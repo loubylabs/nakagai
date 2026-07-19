@@ -1,0 +1,144 @@
+"""Stateful/session-aware primitives for RuleSpec v2 expressions.
+
+Each primitive is fn(ctx, bars, **args) -> Series aligned to bars.index (or a
+float). `bars` is the spec's driving-timeframe frame. The registry maps the
+grammar name to an arg schema (validated in spec.py) and the function.
+"""
+
+import numpy as np
+import pandas as pd
+
+from nakagai.strategies.base import Direction, MarketContext
+from nakagai.strategies.ict.fvg import find_unfilled_fvgs
+from nakagai.strategies.ict.primitives import _strict_extrema
+from nakagai.strategies.util import NY
+
+
+def _ny_dates(bars: pd.DataFrame) -> np.ndarray:
+    return np.asarray(bars.index.tz_convert(NY).date)
+
+
+def _session_groups(bars: pd.DataFrame):
+    return bars.groupby(_ny_dates(bars))
+
+
+def opening_range_high(ctx: MarketContext, bars: pd.DataFrame, minutes: int = 30) -> pd.Series:
+    return _opening_range(bars, int(minutes), "high", max)
+
+
+def opening_range_low(ctx: MarketContext, bars: pd.DataFrame, minutes: int = 30) -> pd.Series:
+    return _opening_range(bars, int(minutes), "low", min)
+
+
+def _opening_range(bars: pd.DataFrame, minutes: int, col: str, agg) -> pd.Series:
+    out = pd.Series(np.nan, index=bars.index)
+    for _, day in _session_groups(bars):
+        start = day.index[0]
+        window = day[day.index < start + pd.Timedelta(minutes=minutes)]
+        # level exists only once the window has fully elapsed (no lookahead)
+        done = day.index >= start + pd.Timedelta(minutes=minutes)
+        if done.any():
+            out.loc[day.index[done]] = agg(window[col])
+    return out
+
+
+def _prev_session(bars: pd.DataFrame, col: str, agg) -> pd.Series:
+    per_day = _session_groups(bars)[col].agg(agg)
+    prev = per_day.shift(1)
+    return pd.Series(prev.loc[_ny_dates(bars)].to_numpy(), index=bars.index)
+
+
+def prev_session_high(ctx: MarketContext, bars: pd.DataFrame) -> pd.Series:
+    return _prev_session(bars, "high", "max")
+
+
+def prev_session_low(ctx: MarketContext, bars: pd.DataFrame) -> pd.Series:
+    return _prev_session(bars, "low", "min")
+
+
+def prev_session_close(ctx: MarketContext, bars: pd.DataFrame) -> pd.Series:
+    return _prev_session(bars, "close", "last")
+
+
+def gap_pct(ctx: MarketContext, bars: pd.DataFrame) -> pd.Series:
+    """Today's session open vs the prior session close, in percent."""
+    opens = _session_groups(bars)["open"].transform("first")
+    prev_close = prev_session_close(ctx, bars)
+    return 100 * (opens - prev_close) / prev_close
+
+
+def swing_high(ctx: MarketContext, bars: pd.DataFrame, k: int = 3) -> pd.Series:
+    return _swing(bars, "high", int(k), find_max=True)
+
+
+def swing_low(ctx: MarketContext, bars: pd.DataFrame, k: int = 3) -> pd.Series:
+    return _swing(bars, "low", int(k), find_max=False)
+
+
+def _swing(bars: pd.DataFrame, col: str, k: int, find_max: bool) -> pd.Series:
+    values = bars[col].to_numpy()
+    mask = _strict_extrema(values, k, find_max)
+    # a swing at i is only KNOWN k bars later; stamp it there, then carry forward
+    out = pd.Series(np.nan, index=bars.index)
+    idx = np.flatnonzero(mask)
+    confirm = idx + k
+    keep = confirm < len(bars)
+    out.iloc[confirm[keep]] = values[idx[keep]]
+    return out.ffill()
+
+
+def day_of_week(ctx: MarketContext, bars: pd.DataFrame) -> pd.Series:
+    return pd.Series(bars.index.tz_convert(NY).dayofweek.astype(float), index=bars.index)
+
+
+def minutes_into_session(ctx: MarketContext, bars: pd.DataFrame) -> pd.Series:
+    starts = bars.index.to_series().groupby(_ny_dates(bars)).transform("first")
+    return ((bars.index.to_series() - starts).dt.total_seconds() / 60).astype(float)
+
+
+def bars_since(ctx: MarketContext, bars: pd.DataFrame, cond: dict, eval_fn=None) -> pd.Series:
+    """Bars elapsed since `cond` was last elementwise-true. NaN before the
+    first True. eval_fn(cond, bars) -> boolean Series is injected by the
+    evaluator to avoid a circular import."""
+    if eval_fn is None:
+        raise ValueError("bars_since needs the evaluator's eval_fn")
+    mask = eval_fn(cond, bars).astype(bool)
+    pos = pd.Series(np.arange(len(bars), dtype=float), index=bars.index)
+    last_true = pos.where(mask).ffill()
+    return pos - last_true
+
+
+def fvg_nearest(ctx: MarketContext, bars: pd.DataFrame,
+                direction: str = "long", field: str = "top") -> float:
+    """Boundary of the unfilled FVG nearest the last close, for the given
+    trade direction. Returns NaN when none exists (condition reads False)."""
+    want = Direction.LONG if direction == "long" else Direction.SHORT
+    gaps = [f for f in find_unfilled_fvgs(bars) if f.direction == want]
+    if not gaps or bars.empty:
+        return float("nan")
+    ref = float(bars["close"].iloc[-1])
+    best = min(gaps, key=lambda f: min(abs(ref - f.top), abs(ref - f.bottom)))
+    return float({"top": best.top, "bottom": best.bottom,
+                  "mid": (best.top + best.bottom) / 2}[field])
+
+
+PRIMITIVES: dict[str, dict] = {
+    "opening_range_high": {"args": {"minutes": (5, 120)}, "fn": opening_range_high},
+    "opening_range_low": {"args": {"minutes": (5, 120)}, "fn": opening_range_low},
+    "prev_session_high": {"args": {}, "fn": prev_session_high},
+    "prev_session_low": {"args": {}, "fn": prev_session_low},
+    "prev_session_close": {"args": {}, "fn": prev_session_close},
+    "gap_pct": {"args": {}, "fn": gap_pct},
+    "swing_high": {"args": {"k": (1, 10)}, "fn": swing_high},
+    "swing_low": {"args": {"k": (1, 10)}, "fn": swing_low},
+    "day_of_week": {"args": {}, "fn": day_of_week},
+    "minutes_into_session": {"args": {}, "fn": minutes_into_session},
+    "bars_since": {"args": {"cond": "condition"}, "fn": bars_since},
+    "fvg_nearest": {"args": {"direction": ("long", "short"),
+                             "field": ("top", "bottom", "mid")}, "fn": fvg_nearest},
+}
+ARG_DEFAULTS: dict[str, dict] = {
+    "opening_range_high": {"minutes": 30}, "opening_range_low": {"minutes": 30},
+    "swing_high": {"k": 3}, "swing_low": {"k": 3},
+    "fvg_nearest": {"direction": "long", "field": "top"},
+}

@@ -1,0 +1,22 @@
+{
+  "title": "RSI mean reversion",
+  "description": "Buy the dip, sell the rip: long when RSI recovers up through the oversold line on the 1h chart, short when it rolls down through overbought. SMA(200) trend filter keeps trades with the larger trend.",
+  "category": "mean-reversion",
+  "tags": ["rsi", "oversold", "dip-buying"],
+  "lineage": "classic: short-period RSI reversion, Connors",
+  "added_at": "2026-07-14",
+  "spec": {
+    "version": 2,
+    "name": "rsi_reversion",
+    "timeframe": "1h",
+    "long": {"all": [
+      {"lhs": {"ind": "rsi", "n": 14}, "op": "crosses_above", "rhs": 30},
+      {"lhs": {"src": "close"}, "op": ">", "rhs": {"ind": "sma", "n": 200}}
+    ]},
+    "short": {"all": [
+      {"lhs": {"ind": "rsi", "n": 14}, "op": "crosses_below", "rhs": 70},
+      {"lhs": {"src": "close"}, "op": "<", "rhs": {"ind": "sma", "n": 200}}
+    ]},
+    "risk": {"stop": {"kind": "atr", "n": 14, "mult": 2.0}, "target": {"kind": "rr", "rr": 1.5}}
+  }
+}

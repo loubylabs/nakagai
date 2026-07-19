@@ -1,0 +1,35 @@
+[project]
+name = "nakagai"
+version = "0.1.0"
+description = "Deterministic core for rule-driven trading agents: bar cache, walk-forward engine, RuleSpec strategy DSL, screener"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.12"
+dependencies = [
+    "pandas>=2.2",
+    "numpy>=1.26",
+    "pyarrow>=16",
+    "httpx>=0.27",
+    "yfinance>=0.2.40",
+]
+
+[project.optional-dependencies]
+nlbuilder = ["anthropic>=0.116"]
+
+[project.urls]
+Homepage = "https://nakag.ai"
+Repository = "https://github.com/loubylabs/nakagai"
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["nakagai"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+      - run: uv sync --all-extras
+      - run: uv run pytest
+
+  wheel:
+    name: the wheel stands alone
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+      - name: Build and import the wheel with no dev environment attached
+        run: |
+          # --isolated --no-project resolves the wheel and its declared
+          # dependencies alone, which is what a consumer's machine looks like.
+          uv build --wheel -o dist/
+          uv run --isolated --no-project --with dist/nakagai-*.whl \
+            python -c "import nakagai.engine.engine; import nakagai.strategies.rules; import nakagai.screen.compiler; print('ok')"

@@ -1,0 +1,24 @@
+{
+  "title": "MACD signal cross",
+  "description": "Momentum-confirmed trend entries: long when the MACD line crosses above its signal line on the 1h chart, short on the cross down.",
+  "category": "trend",
+  "tags": ["macd", "crossover", "momentum"],
+  "lineage": "classic: Appel's MACD trend rules",
+  "added_at": "2026-07-14",
+  "spec": {
+    "version": 2,
+    "name": "macd_trend",
+    "timeframe": "1h",
+    "long": {"all": [
+      {"lhs": {"ind": "macd", "fast": 12, "slow": 26, "signal": 9, "field": "macd"},
+       "op": "crosses_above",
+       "rhs": {"ind": "macd", "fast": 12, "slow": 26, "signal": 9, "field": "signal"}}
+    ]},
+    "short": {"all": [
+      {"lhs": {"ind": "macd", "fast": 12, "slow": 26, "signal": 9, "field": "macd"},
+       "op": "crosses_below",
+       "rhs": {"ind": "macd", "fast": 12, "slow": 26, "signal": 9, "field": "signal"}}
+    ]},
+    "risk": {"stop": {"kind": "atr", "n": 14, "mult": 2.0}, "target": {"kind": "rr", "rr": 2.0}}
+  }
+}
