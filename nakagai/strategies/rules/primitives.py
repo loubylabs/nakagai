@@ -87,6 +87,20 @@ def _swing(bars: pd.DataFrame, col: str, k: int, find_max: bool) -> pd.Series:
     return out.ffill()
 
 
+def leg_retrace(ctx: MarketContext, bars: pd.DataFrame,
+                direction: str = "long", k: int = 3) -> pd.Series:
+    """Position of the close inside the last confirmed swing range.
+    long: (H - close) / (H - L), so 0 = at the swing high, 0.5 = equilibrium,
+    1 = full retrace to the swing low; the ICT OTE band is [0.62, 0.79].
+    short mirrors from the low. NaN until both swings exist or when H <= L."""
+    hi = _swing(bars, "high", int(k), find_max=True)
+    lo = _swing(bars, "low", int(k), find_max=False)
+    rng = (hi - lo).where((hi - lo) > 0)
+    if direction == "long":
+        return (hi - bars["close"]) / rng
+    return (bars["close"] - lo) / rng
+
+
 def day_of_week(ctx: MarketContext, bars: pd.DataFrame) -> pd.Series:
     return pd.Series(bars.index.tz_convert(NY).dayofweek.astype(float), index=bars.index)
 
@@ -136,9 +150,12 @@ PRIMITIVES: dict[str, dict] = {
     "bars_since": {"args": {"cond": "condition"}, "fn": bars_since},
     "fvg_nearest": {"args": {"direction": ("long", "short"),
                              "field": ("top", "bottom", "mid")}, "fn": fvg_nearest},
+    "leg_retrace": {"args": {"direction": ("long", "short"), "k": (1, 10)},
+                    "fn": leg_retrace},
 }
 ARG_DEFAULTS: dict[str, dict] = {
     "opening_range_high": {"minutes": 30}, "opening_range_low": {"minutes": 30},
     "swing_high": {"k": 3}, "swing_low": {"k": 3},
     "fvg_nearest": {"direction": "long", "field": "top"},
+    "leg_retrace": {"direction": "long", "k": 3},
 }
