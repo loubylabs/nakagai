@@ -9,6 +9,8 @@ import re
 from dataclasses import dataclass, field
 
 from nakagai.nlbuilder.prompt import render_system_prompt
+from nakagai.strategies.composite import (
+    describe_composite_spec, validate_composite_blocks, validate_composite_spec)
 from nakagai.strategies.rules import describe_spec, validate_spec
 
 MODEL = "claude-opus-4-8"
@@ -18,6 +20,7 @@ MAX_TOKENS = 8000
 @dataclass
 class CompileResult:
     spec: dict | None = None
+    kind: str = "rules"
     readback: str = ""
     clarifications: list[str] = field(default_factory=list)
     not_expressible: str = ""
@@ -55,11 +58,26 @@ def _add_usage(result: CompileResult, resp) -> None:
     result.usage["cache_write_tokens"] += getattr(u, "cache_creation_input_tokens", 0) or 0
 
 
+def _check(kind: str, spec, members: dict | None):
+    """(errors, describer) for the spec kind the model claims it produced.
+    A composite needs the caller's member registry both to validate block
+    references and to render the prompt, so without one the only honest answer
+    is to send the model back to a single rules spec."""
+    if kind == "composite":
+        if members is None:
+            return (["composite specs are not available here; "
+                     "return a single rules spec instead"], describe_composite_spec)
+        errors = (validate_composite_spec(spec, members, allow_refs=False)
+                  or validate_composite_blocks(spec, members))
+        return errors, describe_composite_spec
+    return validate_spec(spec), describe_spec
+
+
 def compile_strategy(description: str, current_spec: dict | None = None,
                      client=None, model: str = MODEL,
-                     max_retries: int = 2) -> CompileResult:
+                     max_retries: int = 2, members: dict | None = None) -> CompileResult:
     client = _client_or_default(client)
-    system = [{"type": "text", "text": render_system_prompt(),
+    system = [{"type": "text", "text": render_system_prompt(members),
                "cache_control": {"type": "ephemeral"}}]
     user = description.strip()
     if current_spec is not None:
@@ -94,10 +112,14 @@ def compile_strategy(description: str, current_spec: dict | None = None,
             result.not_expressible = str(doc["not_expressible"])
             return result
         spec = doc.get("spec")
-        errors = validate_spec(spec)
+        kind = doc.get("kind") or "rules"
+        if kind not in ("rules", "composite"):
+            kind = "rules"
+        errors, describe = _check(kind, spec, members)
         if not errors:
             result.spec = spec
-            result.readback = describe_spec(spec)
+            result.kind = kind
+            result.readback = describe(spec)
             result.clarifications = [str(c) for c in doc.get("clarifications", [])]
             return result
         last_errors = errors

@@ -199,3 +199,60 @@ def test_usageless_response_is_tolerated():
     client = _RawClient([_NoTextResp(), _Resp(json.dumps({"spec": GOOD_SPEC}))])
     res = compile_strategy("buy rsi dips", client=client)
     assert res.spec == GOOD_SPEC and res.usage["input_tokens"] == 100
+
+
+GOOD_COMPOSITE = {
+    "version": 1, "name": "confluence",
+    "blocks": {"a": {"strategy": "donchian_breakout"},
+               "b": {"strategy": "rules", "params": {"spec": GOOD_SPEC}}},
+    "long": {"all": ["a", "b"]}, "window_bars": 4,
+    "risk": {"stop": {"kind": "atr", "n": 14, "mult": 2.0},
+             "target": {"kind": "rr", "rr": 2.0}}}
+
+
+def test_composite_kind_validates_and_describes_as_a_composite():
+    client = FakeClient([json.dumps({"kind": "composite", "spec": GOOD_COMPOSITE})])
+    res = compile_strategy("combine them", client=client, members=_MEMBERS)
+    assert res.kind == "composite"
+    assert res.spec == GOOD_COMPOSITE
+    assert "Composite" in res.readback and "2 blocks" in res.readback
+
+
+def test_missing_kind_defaults_to_rules():
+    client = FakeClient([json.dumps({"spec": GOOD_SPEC})])
+    res = compile_strategy("buy rsi dips", client=client, members=_MEMBERS)
+    assert res.kind == "rules" and res.spec == GOOD_SPEC
+
+
+def test_bad_vote_tree_retries_with_composite_errors():
+    bad = {**GOOD_COMPOSITE, "long": {"all": ["a", "zz"]}}
+    client = FakeClient([json.dumps({"kind": "composite", "spec": bad}),
+                         json.dumps({"kind": "composite", "spec": GOOD_COMPOSITE})])
+    res = compile_strategy("combine", client=client, members=_MEMBERS)
+    assert res.spec == GOOD_COMPOSITE and res.attempts == 2
+    assert "zz" in json.dumps(client.requests[1]["messages"])
+
+
+def test_bad_rules_leg_retries_with_block_prefixed_errors():
+    bad = {**GOOD_COMPOSITE,
+           "blocks": {"a": {"strategy": "donchian_breakout"},
+                      "b": {"strategy": "rules",
+                            "params": {"spec": {**GOOD_SPEC, "timeframe": "4h"}}}}}
+    client = FakeClient([json.dumps({"kind": "composite", "spec": bad}),
+                         json.dumps({"kind": "composite", "spec": GOOD_COMPOSITE})])
+    res = compile_strategy("combine", client=client, members=_MEMBERS)
+    assert res.spec == GOOD_COMPOSITE and res.attempts == 2
+    assert "blocks.b" in json.dumps(client.requests[1]["messages"])
+
+
+def test_composite_without_members_is_rejected_not_crashed():
+    client = FakeClient([json.dumps({"kind": "composite", "spec": GOOD_COMPOSITE})] * 3)
+    res = compile_strategy("combine", client=client, max_retries=2)
+    assert res.spec is None
+    assert "not available" in res.not_expressible
+
+
+def test_members_reach_the_system_prompt():
+    client = FakeClient([json.dumps({"kind": "composite", "spec": GOOD_COMPOSITE})])
+    compile_strategy("combine", client=client, members=_MEMBERS)
+    assert "donchian_breakout" in client.requests[0]["system"][0]["text"]
