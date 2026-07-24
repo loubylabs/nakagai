@@ -10,7 +10,7 @@ import pandas as pd
 
 from nakagai.strategies.base import Direction, MarketContext
 from nakagai.strategies.ict.fvg import find_fvgs
-from nakagai.strategies.ict.primitives import _strict_extrema
+from nakagai.strategies.ict.primitives import _strict_extrema, atr as _ict_atr
 from nakagai.strategies.util import NY
 
 
@@ -101,6 +101,30 @@ def leg_retrace(ctx: MarketContext, bars: pd.DataFrame,
     return (bars["close"] - lo) / rng
 
 
+def order_block(ctx: MarketContext, bars: pd.DataFrame,
+                direction: str = "long", field: str = "top",
+                body_atr: float = 1.5, lookback: int = 40) -> float:
+    """Range boundary of the last opposing candle before the most recent
+    displacement candle (body >= body_atr * ATR) in the lookback window: the
+    ICT order block. NaN when no displacement or no opposing candle exists."""
+    df = bars.tail(int(lookback))
+    a = _ict_atr(df)
+    if len(df) < 2 or not a or np.isnan(a):
+        return float("nan")
+    body = (df["close"] - df["open"]).to_numpy()
+    disp = body >= body_atr * a if direction == "long" else body <= -body_atr * a
+    disp_idx = np.flatnonzero(disp)
+    if not disp_idx.size:
+        return float("nan")
+    i = disp_idx[-1]
+    opp = np.flatnonzero(body[:i] < 0) if direction == "long" else np.flatnonzero(body[:i] > 0)
+    if not opp.size:
+        return float("nan")
+    ob = df.iloc[opp[-1]]
+    top, bottom = float(ob["high"]), float(ob["low"])
+    return {"top": top, "bottom": bottom, "mid": (top + bottom) / 2}[field]
+
+
 def day_of_week(ctx: MarketContext, bars: pd.DataFrame) -> pd.Series:
     return pd.Series(bars.index.tz_convert(NY).dayofweek.astype(float), index=bars.index)
 
@@ -166,6 +190,10 @@ PRIMITIVES: dict[str, dict] = {
                              "lookback": (10, 200)}, "fn": fvg_nearest},
     "leg_retrace": {"args": {"direction": ("long", "short"), "k": (1, 10)},
                     "fn": leg_retrace},
+    "order_block": {"args": {"direction": ("long", "short"),
+                             "field": ("top", "bottom", "mid"),
+                             "body_atr": (0.5, 5.0), "lookback": (10, 200)},
+                    "fn": order_block},
 }
 ARG_DEFAULTS: dict[str, dict] = {
     "opening_range_high": {"minutes": 30}, "opening_range_low": {"minutes": 30},
@@ -173,4 +201,6 @@ ARG_DEFAULTS: dict[str, dict] = {
     "fvg_nearest": {"direction": "long", "field": "top", "state": "open",
                     "min_size_atr": 0.25, "lookback": 40},
     "leg_retrace": {"direction": "long", "k": 3},
+    "order_block": {"direction": "long", "field": "top",
+                    "body_atr": 1.5, "lookback": 40},
 }

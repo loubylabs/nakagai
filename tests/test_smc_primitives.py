@@ -5,7 +5,7 @@ import pandas as pd
 import pytest
 
 from nakagai.strategies.rules.primitives import (
-    ARG_DEFAULTS, PRIMITIVES, leg_retrace,
+    ARG_DEFAULTS, PRIMITIVES, leg_retrace, order_block,
 )
 
 
@@ -63,3 +63,54 @@ def test_leg_retrace_registered():
     assert PRIMITIVES["leg_retrace"]["args"] == {
         "direction": ("long", "short"), "k": (1, 10)}
     assert ARG_DEFAULTS["leg_retrace"] == {"direction": "long", "k": 3}
+
+
+# 20 quiet bars keep ATR ~1; then one red candle (the order block), then a
+# bullish displacement candle with a 4-point body.
+OB_QUIET = [[100, 100.5, 99.5, 100]] * 20
+OB_SET = OB_QUIET + [[101, 101.6, 99.8, 100.0],    # red candle: the OB
+                     [100.0, 104.2, 99.9, 104.0]]  # displacement up
+
+
+def _obars(rows):
+    idx = pd.date_range("2026-01-05 14:30", periods=len(rows), freq="15min", tz="UTC")
+    df = pd.DataFrame(rows, index=idx, columns=["open", "high", "low", "close"])
+    df["volume"] = 1000.0
+    return df
+
+
+def test_order_block_long_finds_last_red_before_displacement():
+    bars = _obars(OB_SET)
+    assert order_block(None, bars, direction="long", field="top") == pytest.approx(101.6)
+    assert order_block(None, bars, direction="long", field="bottom") == pytest.approx(99.8)
+    assert order_block(None, bars, direction="long", field="mid") == pytest.approx((101.6 + 99.8) / 2)
+
+
+def test_order_block_nan_without_displacement():
+    assert np.isnan(order_block(None, _obars(OB_QUIET), direction="long"))
+
+
+def test_order_block_nan_without_opposing_candle():
+    rows = [[100 + i, 101 + i, 99.5 + i, 100.8 + i] for i in range(20)]  # all green
+    rows.append([120.0, 124.4, 119.9, 124.2])  # displacement, but no red before it
+    assert np.isnan(order_block(None, _obars(rows), direction="long"))
+
+
+def test_order_block_body_atr_threshold():
+    bars = _obars(OB_SET)
+    assert np.isnan(order_block(None, bars, direction="long", body_atr=5.0))
+
+
+def test_order_block_short_mirrors():
+    rows = OB_QUIET + [[100.0, 101.7, 99.9, 101.5],   # green candle: the OB
+                       [101.5, 101.6, 97.2, 97.4]]    # displacement down
+    bars = _obars(rows)
+    assert order_block(None, bars, direction="short", field="bottom") == pytest.approx(99.9)
+
+
+def test_order_block_registered():
+    assert PRIMITIVES["order_block"]["args"] == {
+        "direction": ("long", "short"), "field": ("top", "bottom", "mid"),
+        "body_atr": (0.5, 5.0), "lookback": (10, 200)}
+    assert ARG_DEFAULTS["order_block"] == {
+        "direction": "long", "field": "top", "body_atr": 1.5, "lookback": 40}
