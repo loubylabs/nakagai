@@ -20,7 +20,8 @@ owns its own risk block (members' stops/targets are ignored).
     }
 """
 
-from nakagai.strategies.rules.spec import DEFAULT_RISK, risk_text, validate_risk
+from nakagai.strategies.rules.spec import (
+    DEFAULT_RISK, risk_text, validate_risk, validate_spec)
 
 MAX_BLOCKS = 8
 WINDOW_BARS_BOUNDS = (1, 20)
@@ -89,6 +90,35 @@ def validate_composite_spec(spec, members, allow_refs: bool = True) -> list[str]
     if isinstance(wb, bool) or not isinstance(wb, int) or not lo <= wb <= hi:
         errs.append(f"window_bars must be an integer in [{lo}, {hi}]")
     errs.extend(validate_risk(spec.get("risk", {})))
+    return errs
+
+
+def validate_composite_blocks(spec: dict, members: dict) -> list[str]:
+    """Per-block param validation, the layer validate_composite_spec leaves to
+    its caller. Two block kinds carry params worth checking: a "rules" block
+    whose params.spec is a full RuleSpec, and a catalog play, which declares no
+    PARAMS at all and therefore takes no overrides. Blocks the structural
+    validator already rejected (unknown member, non-dict params) are skipped so
+    one mistake is reported once."""
+    errs: list[str] = []
+    for bid, block in (spec.get("blocks") or {}).items():
+        if not isinstance(block, dict) or "config" in block:
+            continue
+        name = block.get("strategy")
+        cls = members.get(name)
+        params = block.get("params", {})
+        if cls is None or not isinstance(params, dict):
+            continue
+        if name == "rules":
+            inner = params.get("spec")
+            if not isinstance(inner, dict):
+                errs.append(f"blocks.{bid}: rules blocks need params.spec "
+                            "(the rule JSON object)")
+            else:
+                errs.extend(f"blocks.{bid}: {e}" for e in validate_spec(inner))
+        elif not cls.PARAMS and params:
+            errs.append(f"blocks.{bid}: {name} is a built-in spec and takes no "
+                        "param overrides; use a rules block for a tuned leg")
     return errs
 
 
