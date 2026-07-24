@@ -1,5 +1,6 @@
-"""English -> validated RuleSpec v2, via the Claude API with a validator-driven
-retry loop. The validator (validate_spec) is the single source of truth; the
+"""English -> a validated RuleSpec v2 or a validated composite spec, via the
+Claude API with a validator-driven retry loop. The reply's "kind" selects the
+validator, rules or composite, and it stays the single source of truth; the
 model is asked to fix precisely the errors it reports. API failures come back
 as CompileResult.error rather than an exception, so usage accumulated across
 retries always survives."""
@@ -64,7 +65,7 @@ def _check(kind: str, spec, members: dict | None):
     references and to render the prompt, so without one the only honest answer
     is to send the model back to a single rules spec."""
     if kind == "composite":
-        if members is None:
+        if not members:
             return (["composite specs are not available here; "
                      "return a single rules spec instead"], describe_composite_spec)
         errors = (validate_composite_spec(spec, members, allow_refs=False)

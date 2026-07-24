@@ -224,6 +224,12 @@ def test_missing_kind_defaults_to_rules():
     assert res.kind == "rules" and res.spec == GOOD_SPEC
 
 
+def test_unrecognized_kind_falls_back_to_rules():
+    client = FakeClient([json.dumps({"kind": "Composite", "spec": GOOD_SPEC})])
+    res = compile_strategy("buy rsi dips", client=client, members=_MEMBERS)
+    assert res.kind == "rules" and res.spec == GOOD_SPEC
+
+
 def test_bad_vote_tree_retries_with_composite_errors():
     bad = {**GOOD_COMPOSITE, "long": {"all": ["a", "zz"]}}
     client = FakeClient([json.dumps({"kind": "composite", "spec": bad}),
