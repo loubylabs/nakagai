@@ -80,10 +80,12 @@ def _eval(node: dict, ctx: MarketContext, bars: pd.DataFrame, memo: dict):
         return _align(out, bars)
     name = node["prim"]
     a = {**PRIM_DEFAULTS.get(name, {}),
-         **{k: v for k, v in node.items() if k != "prim"}}
+         **{k: v for k, v in node.items() if k not in ("prim", "tf")}}
     if name == "bars_since":
         a["eval_fn"] = lambda cond, b: eval_condition_series(cond, ctx, b, memo)
-    return PRIMITIVES[name]["fn"](ctx, bars, **{k: v for k, v in a.items() if k != "prim"})
+    # Primitives compute on their (possibly higher) timeframe's closed bars;
+    # _align ffills series results onto the driving index, scalars pass through.
+    return _align(PRIMITIVES[name]["fn"](ctx, tf_bars, **a), bars)
 
 
 def _math(op: str, args: list):

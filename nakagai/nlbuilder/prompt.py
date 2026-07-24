@@ -101,7 +101,7 @@ Expressions are numbers or objects:
 - series leaf: {{"src": one of {g.SOURCES}, "tf"?: one of {g.TIMEFRAMES}}}
 - indicator: {{"ind": <name>, <args>, "of"?: <expr>, "tf"?: <tf>}}
 - math: {{"op": one of {sorted(g.MATH_OPS)}, "args": [<expr>, ...]}}
-- primitive: {{"prim": <name>, <args>}}
+- primitive: {{"prim": <name>, <args>, "tf"?: <tf>}}
 
 # Indicators (name(arg=bounds or choices))
 {ind_lines}
