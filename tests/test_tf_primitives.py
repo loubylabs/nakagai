@@ -87,3 +87,20 @@ def test_validate_rejects_unknown_tf_on_prims():
 
 def test_describe_renders_tf_suffix():
     assert _expr_text({"prim": "swing_high", "k": 3, "tf": "1h"}) == "swing_high(3)[1h]"
+
+
+def test_validate_rejects_tf_on_session_scoped_prims():
+    errs = validate_spec(_spec({"lhs": {"prim": "opening_range_high", "tf": "1d"},
+                                "op": "<", "rhs": {"src": "close"}}))
+    assert any("opening_range_high is session-scoped and takes no tf" in e for e in errs)
+
+
+def test_validate_rejects_tf_on_day_of_week():
+    errs = validate_spec(_spec({"lhs": {"prim": "day_of_week", "tf": "1h"},
+                                "op": "<", "rhs": {"src": "close"}}))
+    assert any("day_of_week is session-scoped and takes no tf" in e for e in errs)
+
+
+def test_validate_still_accepts_tf_on_structural_prim():
+    assert validate_spec(_spec({"lhs": {"prim": "swing_high", "k": 3, "tf": "1h"},
+                                "op": "<", "rhs": {"src": "close"}})) == []

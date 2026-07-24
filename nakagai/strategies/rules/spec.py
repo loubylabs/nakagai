@@ -10,6 +10,7 @@ readback; canon.py owns identity hashing.
 
 from nakagai.strategies.rules.primitives import ARG_DEFAULTS as PRIM_DEFAULTS
 from nakagai.strategies.rules.primitives import PRIMITIVES
+from nakagai.strategies.rules.primitives import SESSION_SCOPED_PRIMS
 
 VERSION = 2
 SOURCES = ("open", "high", "low", "close", "volume")
@@ -174,6 +175,8 @@ def _check_expr(node, path: str, errs: list[str], budget: _Budget,
             _check_args(name, node, {}, path, errs, skip=("prim", "cond", "tf"))
         else:
             _check_args(name, node, schema, path, errs, skip=("prim", "tf"))
+        if "tf" in node and name in SESSION_SCOPED_PRIMS:
+            errs.append(f"{path}: {name} is session-scoped and takes no tf")
         _check_tf(node, path, errs)
         return
     errs.append(f"{path}: expression object needs one of src/ind/op/prim")

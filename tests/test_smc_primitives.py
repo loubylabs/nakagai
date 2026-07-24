@@ -108,6 +108,26 @@ def test_order_block_short_mirrors():
     assert order_block(None, bars, direction="short", field="bottom") == pytest.approx(99.9)
 
 
+# Two distinct red candles before the displacement, so opp[-1] (nearer) and
+# opp[0] (farther) are distinguishable. ATR over the tail(14) true ranges is
+# 11 quiet TRs (~1.0 each) + the far red's TR (2.2) + the near red's TR (1.4)
+# + the displacement's TR (5.2), mean ~1.414 (verified against the real atr()).
+# body_atr default 1.5 * 1.414 ~= 2.121, and the displacement's 4.5 body clears
+# it while neither red candle's small negative body ever does.
+OB_TWO_RED = OB_QUIET + [[101, 101.9, 99.7, 100.0],     # farther red: opp[0]
+                         [100.0, 101.3, 99.9, 99.85],   # nearer red: opp[-1]
+                         [100.0, 105.0, 99.8, 104.5]]   # displacement up
+
+
+def test_order_block_uses_nearer_opposing_candle():
+    bars = _obars(OB_TWO_RED)
+    # the nearer red (opp[-1]) has high=101.3/low=99.9; the farther one
+    # (opp[0]) has high=101.9/low=99.7. Only the nearer candle's range must
+    # come back.
+    assert order_block(None, bars, direction="long", field="top") == pytest.approx(101.3)
+    assert order_block(None, bars, direction="long", field="bottom") == pytest.approx(99.9)
+
+
 def test_order_block_registered():
     assert PRIMITIVES["order_block"]["args"] == {
         "direction": ("long", "short"), "field": ("top", "bottom", "mid"),

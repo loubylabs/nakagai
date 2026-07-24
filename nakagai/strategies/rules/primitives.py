@@ -195,6 +195,19 @@ PRIMITIVES: dict[str, dict] = {
                              "body_atr": (0.5, 5.0), "lookback": (10, 200)},
                     "fn": order_block},
 }
+# Session/calendar-scoped primitives read the driving frame's own session or
+# calendar structure (session-open windows, elapsed session minutes, the bar's
+# calendar weekday) rather than plain OHLCV structure. Feeding them a `tf` swaps
+# in a different frame's bars, which silently degenerates: opening_range_* on
+# "1d" bars (one bar per session) never sees its window elapse and is NaN
+# forever, on "1h" bars a minutes=30 window is measured in whole-hour steps;
+# minutes_into_session on "1d" bars is 0 everywhere (one bar per session group);
+# day_of_week on "1d" bars is off by one because those bars are labeled at
+# midnight UTC, which rolls back a day once converted to NY. These primitives
+# must always run on the spec's own driving bars, so `tf` is rejected outright.
+SESSION_SCOPED_PRIMS = frozenset({
+    "opening_range_high", "opening_range_low", "minutes_into_session", "day_of_week",
+})
 ARG_DEFAULTS: dict[str, dict] = {
     "opening_range_high": {"minutes": 30}, "opening_range_low": {"minutes": 30},
     "swing_high": {"k": 3}, "swing_low": {"k": 3},
