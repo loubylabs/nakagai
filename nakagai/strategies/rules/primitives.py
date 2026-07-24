@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 
 from nakagai.strategies.base import Direction, MarketContext
-from nakagai.strategies.ict.fvg import find_unfilled_fvgs
+from nakagai.strategies.ict.fvg import find_fvgs
 from nakagai.strategies.ict.primitives import _strict_extrema
 from nakagai.strategies.util import NY
 
@@ -123,11 +123,22 @@ def bars_since(ctx: MarketContext, bars: pd.DataFrame, cond: dict, eval_fn=None)
 
 
 def fvg_nearest(ctx: MarketContext, bars: pd.DataFrame,
-                direction: str = "long", field: str = "top") -> float:
-    """Boundary of the unfilled FVG nearest the last close, for the given
-    trade direction. Returns NaN when none exists (condition reads False)."""
+                direction: str = "long", field: str = "top",
+                state: str = "open", min_size_atr: float = 0.25,
+                lookback: int = 40) -> float:
+    """Boundary of the qualifying FVG nearest the last close, for the given
+    trade direction. state "open" = unfilled gap in that direction; state
+    "inverted" = a gap of the OPPOSITE original direction whose far boundary
+    a later bar closed through, so the zone now supports this direction.
+    Returns NaN when none exists (condition reads False)."""
     want = Direction.LONG if direction == "long" else Direction.SHORT
-    gaps = [f for f in find_unfilled_fvgs(bars) if f.direction == want]
+    if state == "open":
+        gaps = [f for f, s in find_fvgs(bars, min_size_atr, int(lookback))
+                if s == "open" and f.direction == want]
+    else:
+        origin = Direction.SHORT if want == Direction.LONG else Direction.LONG
+        gaps = [f for f, s in find_fvgs(bars, min_size_atr, int(lookback))
+                if s == "inverted" and f.direction == origin]
     if not gaps or bars.empty:
         return float("nan")
     ref = float(bars["close"].iloc[-1])
@@ -149,13 +160,17 @@ PRIMITIVES: dict[str, dict] = {
     "minutes_into_session": {"args": {}, "fn": minutes_into_session},
     "bars_since": {"args": {"cond": "condition"}, "fn": bars_since},
     "fvg_nearest": {"args": {"direction": ("long", "short"),
-                             "field": ("top", "bottom", "mid")}, "fn": fvg_nearest},
+                             "field": ("top", "bottom", "mid"),
+                             "state": ("open", "inverted"),
+                             "min_size_atr": (0.05, 2.0),
+                             "lookback": (10, 200)}, "fn": fvg_nearest},
     "leg_retrace": {"args": {"direction": ("long", "short"), "k": (1, 10)},
                     "fn": leg_retrace},
 }
 ARG_DEFAULTS: dict[str, dict] = {
     "opening_range_high": {"minutes": 30}, "opening_range_low": {"minutes": 30},
     "swing_high": {"k": 3}, "swing_low": {"k": 3},
-    "fvg_nearest": {"direction": "long", "field": "top"},
+    "fvg_nearest": {"direction": "long", "field": "top", "state": "open",
+                    "min_size_atr": 0.25, "lookback": 40},
     "leg_retrace": {"direction": "long", "k": 3},
 }
