@@ -2,6 +2,7 @@ import json
 
 from nakagai.nlbuilder.compiler import compile_strategy
 from nakagai.nlbuilder.prompt import render_system_prompt
+from nakagai.strategies.rules import RuleStrategy
 
 GOOD_SPEC = {"version": 2, "name": "dip", "timeframe": "1h",
              "long": {"all": [{"lhs": {"ind": "rsi", "n": 14}, "op": "crosses_above", "rhs": 30}]},
@@ -46,6 +47,38 @@ def test_prompt_renders_registries_and_is_deterministic():
     for needle in ("crosses_above", "opening_range_high", "bars_since", "supertrend",
                    "time_stop", "not_expressible", '"version": 2'):
         assert needle in p1, needle
+
+
+_CAT_SPEC = {"version": 2, "name": "donch", "timeframe": "1d",
+             "long": {"all": [{"lhs": {"src": "close"}, "op": "crosses_above",
+                               "rhs": {"ind": "sma", "n": 50}}]},
+             "risk": {"stop": {"kind": "atr", "n": 14, "mult": 2.0},
+                      "target": {"kind": "rr", "rr": 2.0}}}
+_Donch = type("_Donch", (RuleStrategy,), {
+    "name": "donchian_breakout", "title": "Donchian channel breakout",
+    "description": "Buys a break of the upper Donchian channel.",
+    "PARAMS": {}, "DEFAULT_PARAMS": {"spec": _CAT_SPEC}})
+_MEMBERS = {"rules": RuleStrategy, "donchian_breakout": _Donch}
+
+
+def test_prompt_without_members_has_no_composite_section():
+    p = render_system_prompt()
+    assert "composite" not in p.lower()
+    assert '"kind"' in p          # the discriminator is always taught
+
+
+def test_prompt_with_members_renders_composite_contract_and_catalog():
+    p = render_system_prompt(_MEMBERS)
+    for needle in ("# Composites", '"kind": "composite"', "window_bars",
+                   "donchian_breakout", "Donchian channel breakout", "[1d]",
+                   "take no param overrides"):
+        assert needle in p, needle
+    # "rules" is the bespoke-leg escape hatch, not a catalog play entry
+    assert "- rules [" not in p
+
+
+def test_prompt_with_members_is_deterministic():
+    assert render_system_prompt(_MEMBERS) == render_system_prompt(_MEMBERS)
 
 
 def test_happy_path_returns_spec_and_readback():
