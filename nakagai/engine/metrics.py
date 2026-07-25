@@ -40,12 +40,34 @@ def _max_drawdown(curve: pd.Series) -> float:
     return float(((peak - curve) / peak).max())
 
 
-def _sharpe(curve: pd.Series) -> float:
+# Below this many daily returns, an annualized Sharpe is not a statistic, it is
+# a rounding of noise. The house protocol's test window is ONE MONTH, which
+# yields about 21 daily points and 20 returns, and _sharpe multiplied that by
+# sqrt(252) and reported the result as a number. Sixty returns is roughly a
+# quarter: still small, but far enough from the cliff that the figure carries
+# some information.
+#
+# The consequence is deliberate: under the standard 13/4/1 protocol every
+# per-window `sharpe` is now None. That is the honest reading, not a
+# regression. Windows long enough to support the statistic (custom Builder
+# ranges, say) still get one, which is why the field survives at all.
+MIN_SHARPE_OBSERVATIONS = 60
+
+
+def _sharpe(curve: pd.Series) -> float | None:
+    """Annualized Sharpe, or None when the sample is too small to mean anything.
+
+    None rather than 0.0 because they say different things and the old code
+    conflated them: 0.0 is "this strategy had no risk-adjusted edge", None is
+    "do not read a number here". Every consumer already treats null as
+    insufficient data (see the platform's scan/evidence.py), so None travels
+    correctly through parquet, Postgres and signal JSON alike.
+    """
     if curve.empty:
-        return 0.0
+        return None
     daily = curve.resample("1D").last().dropna().pct_change().dropna()
-    if len(daily) < 2 or daily.std() == 0:
-        return 0.0
+    if len(daily) < MIN_SHARPE_OBSERVATIONS or daily.std() == 0:
+        return None
     return float(daily.mean() / daily.std() * np.sqrt(252))
 
 
