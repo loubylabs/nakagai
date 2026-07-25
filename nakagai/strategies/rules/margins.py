@@ -5,8 +5,18 @@ walker mirrors exprs._eval with ONE difference: cross-timeframe alignment is
 visibility-shifted so a full-frame vectorized pass stays lookahead-safe. Row
 t may use a bar from another timeframe only if that bar's CLOSE time is at or
 before row t's own close time (the same guarantee closed_before gives the
-engine per bar). Known shared wart: bars_since conditions align via
-eval_condition_series, same as the signal path.
+engine per bar).
+
+Caveats, not a blanket "stays lookahead-safe" claim:
+- End-anchored scalar primitives (fvg_nearest, order_block) compute one float
+  from the tail of the evaluation frame; broadcasting that across every row
+  is lookahead. They are NOT safe here, and the icir lens abstains for specs
+  that use them (see icir.py's END_ANCHORED_PRIMS).
+- bars_since conditions evaluate through the signal path's plain (unshifted)
+  alignment, via a private memo, not the walker's visibility-shifted one.
+- Group members are ranked within the full evaluation window, so the
+  combined margin is a diagnostic over that window, not a tradable
+  point-in-time series.
 """
 
 import json
@@ -24,7 +34,10 @@ from nakagai.strategies.rules.spec import ARG_DEFAULTS, BAR_INDICATORS
 
 def _close_delta(tf: str, tfs: TimeframeSet) -> pd.Timedelta:
     """Label-to-close offset: session bars are labeled at midnight UTC of
-    their session date and treated as closing one day later."""
+    their session date and treated as closing one day later.
+    This label+1day rule matches closed_before's NY-midnight rule only
+    because cached bars are RTH-only; extended-hours data would need the
+    NY rule here instead."""
     return pd.Timedelta(days=1) if tf in tfs.session_aligned else tfs.deltas[tf]
 
 
@@ -80,7 +93,12 @@ def _margin_eval(node: dict, ctx: MarketContext, bars: pd.DataFrame,
     a = {**PRIM_DEFAULTS.get(name, {}),
          **{k: v for k, v in node.items() if k not in ("prim", "tf")}}
     if name == "bars_since":
-        a["eval_fn"] = lambda cond, b: eval_condition_series(cond, ctx, b, memo)
+        # A private memo, never the walker's: exprs' plain alignment and the
+        # walker's visibility-shifted alignment key their memo entries the
+        # same way ((id(bars), json.dumps(node))), so a cross-timeframe node
+        # appearing both inside this cond and as a direct condition would
+        # poison the walker's cache in either direction if they shared one.
+        a["eval_fn"] = lambda cond, b: eval_condition_series(cond, ctx, b, {})
     return _align_visible(PRIMITIVES[name]["fn"](ctx, tf_bars, **a), bars, tf,
                           bars_tf, ctx.tfs)
 

@@ -125,6 +125,24 @@ def test_group_margin_ranks_then_combines():
     assert g_all.dropna().between(0, 1).all()
 
 
+def test_group_margin_handles_nested_groups():
+    b = _bars(np.linspace(100, 120, 40))
+    ctx = _ctx(b)
+    idx = b.index[10:]
+    c1 = {"lhs": {"src": "close"}, "op": ">", "rhs": {"ind": "sma", "n": 5}}
+    c2 = {"lhs": {"ind": "rsi", "n": 14}, "op": "<", "rhs": 70}
+    c_flat = {"lhs": {"src": "close"}, "op": ">", "rhs": 0}
+    group = {"all": [{"any": [c1, c2]}, c_flat]}
+    g = group_margin(group, ctx, b, "15m", {}, idx)
+
+    m1 = condition_margin(c1, ctx, b, "15m", {}).loc[idx].rank(pct=True)
+    m2 = condition_margin(c2, ctx, b, "15m", {}).loc[idx].rank(pct=True)
+    inner_any = pd.concat([m1, m2], axis=1).max(axis=1)
+    m_flat = condition_margin(c_flat, ctx, b, "15m", {}).loc[idx].rank(pct=True)
+    expected = pd.concat([inner_any.rank(pct=True), m_flat], axis=1).min(axis=1, skipna=False)
+    pd.testing.assert_series_equal(g, expected, check_names=False)
+
+
 def test_all_group_propagates_warmup_nan_any_survives_it():
     b = _bars(np.linspace(100, 120, 40))
     ctx = _ctx(b)
@@ -157,3 +175,22 @@ def test_spec_margin_empty_spec_is_empty():
     out = spec_margin({"version": 2, "name": "t", "timeframe": "15m"},
                       _ctx(b), b.index)
     assert isinstance(out, pd.Series) and out.empty
+
+
+def test_bars_since_eval_fn_does_not_poison_the_walker_memo():
+    # A cross-timeframe node that appears both inside a bars_since cond and
+    # as a direct condition must not share a memo slot: bars_since's cond is
+    # evaluated through exprs' plain (unshifted) alignment, while the direct
+    # condition goes through the walker's visibility-shifted alignment. Both
+    # key their memo entries as (id(bars), json.dumps(node)), so sharing the
+    # memo lets whichever evaluates first poison the other's cache entry.
+    b15 = _bars([100.0] * 26, start="2026-01-06 14:30")
+    b1d = _bars([95.0, 96.0], start="2026-01-05 00:00", freq="1D")
+    ctx = _ctx(b15, b1d=b1d)
+    ref = {"lhs": {"src": "close"}, "op": ">", "rhs": {"src": "close", "tf": "1d"}}
+    bars_since_cond = {"lhs": {"prim": "bars_since", "cond": ref}, "op": ">", "rhs": 0}
+    group = {"all": [bars_since_cond, ref]}
+    memo: dict = {}
+    group_margin(group, ctx, b15, "15m", memo, b15.index)
+    out = margin_expr({"src": "close", "tf": "1d"}, ctx, b15, "15m", memo)
+    assert (out == 95.0).all()
