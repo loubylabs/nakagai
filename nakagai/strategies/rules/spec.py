@@ -10,6 +10,7 @@ readback; canon.py owns identity hashing.
 
 from nakagai.strategies.rules.primitives import ARG_DEFAULTS as PRIM_DEFAULTS
 from nakagai.strategies.rules.primitives import PRIMITIVES
+from nakagai.strategies.rules.primitives import SESSION_SCOPED_PRIMS
 
 VERSION = 2
 SOURCES = ("open", "high", "low", "close", "volume")
@@ -171,9 +172,12 @@ def _check_expr(node, path: str, errs: list[str], budget: _Budget,
                 errs.append(f"{path}: bars_since conditions use comparison ops only")
             else:
                 _check_condition(cond, f"{path}.cond", errs, budget, depth + 1)
-            _check_args(name, node, {}, path, errs, skip=("prim", "cond"))
+            _check_args(name, node, {}, path, errs, skip=("prim", "cond", "tf"))
         else:
-            _check_args(name, node, schema, path, errs, skip=("prim",))
+            _check_args(name, node, schema, path, errs, skip=("prim", "tf"))
+        if "tf" in node and name in SESSION_SCOPED_PRIMS:
+            errs.append(f"{path}: {name} is session-scoped and takes no tf")
+        _check_tf(node, path, errs)
         return
     errs.append(f"{path}: expression object needs one of src/ind/op/prim")
 
@@ -370,15 +374,19 @@ def _expr_text(node) -> str:
         return f"{text}.{field}" if field else text
     name = node["prim"]
     if name == "bars_since":
-        return f"bars_since({_condition_text(node['cond'])})"
-    args = {**PRIM_DEFAULTS.get(name, {}),
-            **{k: v for k, v in node.items() if k not in ("prim", "cond")}}
-    if "minutes" in args:
-        minutes = args.pop("minutes")
-        inner = ", ".join([f"{minutes}m"] + [f"{v}" for v in args.values()])
+        text = f"bars_since({_condition_text(node['cond'])})"
     else:
-        inner = ", ".join(f"{v}" for v in args.values())
-    return f"{name}({inner})" if inner else name
+        args = {**PRIM_DEFAULTS.get(name, {}),
+                **{k: v for k, v in node.items() if k not in ("prim", "cond", "tf")}}
+        if "minutes" in args:
+            minutes = args.pop("minutes")
+            inner = ", ".join([f"{minutes}m"] + [f"{v}" for v in args.values()])
+        else:
+            inner = ", ".join(f"{v}" for v in args.values())
+        text = f"{name}({inner})" if inner else name
+    if "tf" in node:
+        text += f"[{node['tf']}]"
+    return text
 
 
 _OP_TEXT = {">": "is above", "<": "is below", ">=": "is at or above",

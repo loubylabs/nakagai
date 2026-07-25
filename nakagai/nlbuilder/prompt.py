@@ -80,8 +80,10 @@ def render_system_prompt(members: dict | None = None) -> str:
     ind_lines = "\n".join(
         f"- {name}({_bounds(sch)})" + (" [takes of=<expr>]" if name in g.SERIES_INDICATORS else "")
         for name, sch in sorted(g.INDICATORS.items()))
-    prim_lines = "\n".join(f"- {name}({_bounds(p['args'])})"
-                           for name, p in sorted(prims.PRIMITIVES.items()))
+    prim_lines = "\n".join(
+        f"- {name}({_bounds(p['args'])})"
+        + (" [session-scoped, no tf]" if name in prims.SESSION_SCOPED_PRIMS else "")
+        for name, p in sorted(prims.PRIMITIVES.items()))
     composite = _composite_section(members) if members else ""
     example = _COMPOSITE_EXAMPLE if members else ""
     return f"""You compile plain-English trading strategy descriptions into
@@ -101,7 +103,7 @@ Expressions are numbers or objects:
 - series leaf: {{"src": one of {g.SOURCES}, "tf"?: one of {g.TIMEFRAMES}}}
 - indicator: {{"ind": <name>, <args>, "of"?: <expr>, "tf"?: <tf>}}
 - math: {{"op": one of {sorted(g.MATH_OPS)}, "args": [<expr>, ...]}}
-- primitive: {{"prim": <name>, <args>}}
+- primitive: {{"prim": <name>, <args>, "tf"?: <tf>}}
 
 # Indicators (name(arg=bounds or choices))
 {ind_lines}

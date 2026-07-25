@@ -9,8 +9,8 @@ import numpy as np
 import pandas as pd
 
 from nakagai.strategies.base import Direction, MarketContext
-from nakagai.strategies.ict.fvg import find_unfilled_fvgs
-from nakagai.strategies.ict.primitives import _strict_extrema
+from nakagai.strategies.ict.fvg import find_fvgs
+from nakagai.strategies.ict.primitives import _strict_extrema, atr as _ict_atr
 from nakagai.strategies.util import NY
 
 
@@ -87,6 +87,44 @@ def _swing(bars: pd.DataFrame, col: str, k: int, find_max: bool) -> pd.Series:
     return out.ffill()
 
 
+def leg_retrace(ctx: MarketContext, bars: pd.DataFrame,
+                direction: str = "long", k: int = 3) -> pd.Series:
+    """Position of the close inside the last confirmed swing range.
+    long: (H - close) / (H - L), so 0 = at the swing high, 0.5 = equilibrium,
+    1 = full retrace to the swing low; the ICT OTE band is [0.62, 0.79].
+    short mirrors from the low. NaN until both swings exist or when H <= L."""
+    hi = _swing(bars, "high", int(k), find_max=True)
+    lo = _swing(bars, "low", int(k), find_max=False)
+    rng = (hi - lo).where((hi - lo) > 0)
+    if direction == "long":
+        return (hi - bars["close"]) / rng
+    return (bars["close"] - lo) / rng
+
+
+def order_block(ctx: MarketContext, bars: pd.DataFrame,
+                direction: str = "long", field: str = "top",
+                body_atr: float = 1.5, lookback: int = 40) -> float:
+    """Range boundary of the last opposing candle before the most recent
+    displacement candle (body >= body_atr * ATR) in the lookback window: the
+    ICT order block. NaN when no displacement or no opposing candle exists."""
+    df = bars.tail(int(lookback))
+    a = _ict_atr(df)
+    if len(df) < 2 or not a or np.isnan(a):
+        return float("nan")
+    body = (df["close"] - df["open"]).to_numpy()
+    disp = body >= body_atr * a if direction == "long" else body <= -body_atr * a
+    disp_idx = np.flatnonzero(disp)
+    if not disp_idx.size:
+        return float("nan")
+    i = disp_idx[-1]
+    opp = np.flatnonzero(body[:i] < 0) if direction == "long" else np.flatnonzero(body[:i] > 0)
+    if not opp.size:
+        return float("nan")
+    ob = df.iloc[opp[-1]]
+    top, bottom = float(ob["high"]), float(ob["low"])
+    return {"top": top, "bottom": bottom, "mid": (top + bottom) / 2}[field]
+
+
 def day_of_week(ctx: MarketContext, bars: pd.DataFrame) -> pd.Series:
     return pd.Series(bars.index.tz_convert(NY).dayofweek.astype(float), index=bars.index)
 
@@ -109,11 +147,22 @@ def bars_since(ctx: MarketContext, bars: pd.DataFrame, cond: dict, eval_fn=None)
 
 
 def fvg_nearest(ctx: MarketContext, bars: pd.DataFrame,
-                direction: str = "long", field: str = "top") -> float:
-    """Boundary of the unfilled FVG nearest the last close, for the given
-    trade direction. Returns NaN when none exists (condition reads False)."""
+                direction: str = "long", field: str = "top",
+                state: str = "open", min_size_atr: float = 0.25,
+                lookback: int = 40) -> float:
+    """Boundary of the qualifying FVG nearest the last close, for the given
+    trade direction. state "open" = unfilled gap in that direction; state
+    "inverted" = a gap of the OPPOSITE original direction whose far boundary
+    a later bar closed through, so the zone now supports this direction.
+    Returns NaN when none exists (condition reads False)."""
     want = Direction.LONG if direction == "long" else Direction.SHORT
-    gaps = [f for f in find_unfilled_fvgs(bars) if f.direction == want]
+    if state == "open":
+        gaps = [f for f, s in find_fvgs(bars, min_size_atr, int(lookback))
+                if s == "open" and f.direction == want]
+    else:
+        origin = Direction.SHORT if want == Direction.LONG else Direction.LONG
+        gaps = [f for f, s in find_fvgs(bars, min_size_atr, int(lookback))
+                if s == "inverted" and f.direction == origin]
     if not gaps or bars.empty:
         return float("nan")
     ref = float(bars["close"].iloc[-1])
@@ -135,10 +184,36 @@ PRIMITIVES: dict[str, dict] = {
     "minutes_into_session": {"args": {}, "fn": minutes_into_session},
     "bars_since": {"args": {"cond": "condition"}, "fn": bars_since},
     "fvg_nearest": {"args": {"direction": ("long", "short"),
-                             "field": ("top", "bottom", "mid")}, "fn": fvg_nearest},
+                             "field": ("top", "bottom", "mid"),
+                             "state": ("open", "inverted"),
+                             "min_size_atr": (0.05, 2.0),
+                             "lookback": (10, 200)}, "fn": fvg_nearest},
+    "leg_retrace": {"args": {"direction": ("long", "short"), "k": (1, 10)},
+                    "fn": leg_retrace},
+    "order_block": {"args": {"direction": ("long", "short"),
+                             "field": ("top", "bottom", "mid"),
+                             "body_atr": (0.5, 5.0), "lookback": (10, 200)},
+                    "fn": order_block},
 }
+# Session/calendar-scoped primitives read the driving frame's own session or
+# calendar structure (session-open windows, elapsed session minutes, the bar's
+# calendar weekday) rather than plain OHLCV structure. Feeding them a `tf` swaps
+# in a different frame's bars, which silently degenerates: opening_range_* on
+# "1d" bars (one bar per session) never sees its window elapse and is NaN
+# forever, on "1h" bars a minutes=30 window is measured in whole-hour steps;
+# minutes_into_session on "1d" bars is 0 everywhere (one bar per session group);
+# day_of_week on "1d" bars is off by one because those bars are labeled at
+# midnight UTC, which rolls back a day once converted to NY. These primitives
+# must always run on the spec's own driving bars, so `tf` is rejected outright.
+SESSION_SCOPED_PRIMS = frozenset({
+    "opening_range_high", "opening_range_low", "minutes_into_session", "day_of_week",
+})
 ARG_DEFAULTS: dict[str, dict] = {
     "opening_range_high": {"minutes": 30}, "opening_range_low": {"minutes": 30},
     "swing_high": {"k": 3}, "swing_low": {"k": 3},
-    "fvg_nearest": {"direction": "long", "field": "top"},
+    "fvg_nearest": {"direction": "long", "field": "top", "state": "open",
+                    "min_size_atr": 0.25, "lookback": 40},
+    "leg_retrace": {"direction": "long", "k": 3},
+    "order_block": {"direction": "long", "field": "top",
+                    "body_atr": 1.5, "lookback": 40},
 }

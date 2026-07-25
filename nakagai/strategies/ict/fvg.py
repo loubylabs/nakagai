@@ -17,24 +17,41 @@ class FVG:
     bottom: float
 
 
-def find_unfilled_fvgs(df: pd.DataFrame, min_size_atr: float = 0.25, lookback: int = 40) -> list[FVG]:
+def find_fvgs(df: pd.DataFrame, min_size_atr: float = 0.25,
+              lookback: int = 40) -> list[tuple[FVG, str]]:
+    """Every qualifying 3-candle imbalance in the window with its lifecycle
+    state: "open" (never wick-filled), "filled" (a later wick reached the far
+    boundary), or "inverted" (a later bar CLOSED through the far boundary,
+    flipping the zone's polarity)."""
     df = df.tail(lookback)
     a = atr(df)
     if len(df) < 3 or not a or np.isnan(a):
         return []
-    out: list[FVG] = []
+    out: list[tuple[FVG, str]] = []
     highs, lows = df["high"].to_numpy(), df["low"].to_numpy()
+    closes = df["close"].to_numpy()
     for i in range(2, len(df)):
-        later_l = lows[i + 1 :]
-        later_h = highs[i + 1 :]
+        later_l, later_h, later_c = lows[i + 1:], highs[i + 1:], closes[i + 1:]
         if lows[i] > highs[i - 2] and (lows[i] - highs[i - 2]) >= min_size_atr * a:
             bottom, top = highs[i - 2], lows[i]
-            filled = bool(later_l.size) and later_l.min() <= bottom
-            if not filled:
-                out.append(FVG(df.index[i], Direction.LONG, float(top), float(bottom)))
+            if later_c.size and later_c.min() < bottom:
+                state = "inverted"
+            elif later_l.size and later_l.min() <= bottom:
+                state = "filled"
+            else:
+                state = "open"
+            out.append((FVG(df.index[i], Direction.LONG, float(top), float(bottom)), state))
         elif highs[i] < lows[i - 2] and (lows[i - 2] - highs[i]) >= min_size_atr * a:
             bottom, top = highs[i], lows[i - 2]
-            filled = bool(later_h.size) and later_h.max() >= top
-            if not filled:
-                out.append(FVG(df.index[i], Direction.SHORT, float(top), float(bottom)))
+            if later_c.size and later_c.max() > top:
+                state = "inverted"
+            elif later_h.size and later_h.max() >= top:
+                state = "filled"
+            else:
+                state = "open"
+            out.append((FVG(df.index[i], Direction.SHORT, float(top), float(bottom)), state))
     return out
+
+
+def find_unfilled_fvgs(df: pd.DataFrame, min_size_atr: float = 0.25, lookback: int = 40) -> list[FVG]:
+    return [f for f, state in find_fvgs(df, min_size_atr, lookback) if state == "open"]
