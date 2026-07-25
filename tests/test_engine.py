@@ -52,11 +52,14 @@ def test_long_target_hit(tmp_path):
     res = run(cache, sig, rows)
     assert len(res.trades) == 1
     t = res.trades[0]
-    assert t.entry == pytest.approx(100.01)
-    assert t.exit == pytest.approx(103.99)  # target - slippage
+    assert t.entry == pytest.approx(100.01)  # 1bp of 100 == the one-cent floor
+    # Slippage is 1bp of the fill price, floored at a cent (SlippageModel), so
+    # exiting at 104 costs 0.0104 rather than the flat cent this test asserted
+    # before H1. The entry is unchanged because 1bp of 100 is exactly a cent.
+    assert t.exit == pytest.approx(104.0 - 0.0104)
     assert t.exit_reason == "target"
     assert t.qty == 49  # floor(100 / (100.01-98))
-    assert t.pnl == pytest.approx((103.99 - 100.01) * 49)
+    assert t.pnl == pytest.approx((103.9896 - 100.01) * 49)
 
 
 def test_stop_first_when_both_in_bar(tmp_path):
