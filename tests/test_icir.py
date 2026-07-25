@@ -55,6 +55,62 @@ def test_window_icir_positive_for_momentum_factor():
     assert set(out) == {"ic_1", "ic_5", "ic_20", "ic_n_1", "ic_n_5", "ic_n_20"}
 
 
+def _order_block_frame(n=400):
+    # Real (non-flat) OHLC, unlike _frame's open==close bars: order_block
+    # needs actual candle bodies to find a displacement. A down candle
+    # followed by a big up candle near the tail gives it a real order block
+    # to find within its default 40-bar lookback.
+    idx = pd.date_range("2026-01-05 14:30", periods=n, freq="15min", tz="UTC")
+    rng = np.random.default_rng(0)
+    close = 100 + np.cumsum(rng.normal(0, 0.05, n))
+    open_ = np.r_[close[0], close[:-1]]
+    open_[-5], close[-5] = 101.0, 99.0    # opposing (down) candle
+    open_[-3], close[-3] = 99.0, 104.0    # displacement (big up) candle
+    high = np.maximum(open_, close) + 0.2
+    low = np.minimum(open_, close) - 0.2
+    return pd.DataFrame({"open": open_, "high": high, "low": low,
+                         "close": close, "volume": 1000.0}, index=idx)
+
+
+def test_window_icir_abstains_for_end_anchored_primitives():
+    # order_block computes one float from bars.tail(lookback); the vectorized
+    # walker would broadcast that end-of-window value across every row, which
+    # is lookahead. The lens must abstain rather than report a bogus IC, even
+    # on data where a plain sma spec on the same frame has a real one.
+    frame = _order_block_frame()
+    cache = MemoryBars({("SPY", "15m"): frame})
+    spec = {"version": 2, "name": "t", "timeframe": "15m",
+            "long": {"all": [{"lhs": {"src": "close"}, "op": ">",
+                              "rhs": {"prim": "order_block", "direction": "long",
+                                      "field": "top"}}]}}
+    sma_spec = {"version": 2, "name": "t", "timeframe": "15m",
+                "long": {"all": [{"lhs": {"src": "close"}, "op": ">",
+                                  "rhs": {"ind": "sma", "n": 5}}]}}
+    start, end = frame.index[200], frame.index[-1] + pd.Timedelta(minutes=15)
+    w = Window(frame.index[0], start, start, end)
+    out = window_icir(spec, cache, "SPY", w, tfs=TFS)
+    sma_out = window_icir(sma_spec, cache, "SPY", w, tfs=TFS)
+    assert sma_out["ic_1"] is not None    # same frame has a real signal
+    assert all(out[f"ic_{k}"] is None for k in (1, 5, 20))
+    assert all(out[f"ic_n_{k}"] == 0 for k in (1, 5, 20))
+
+
+def test_window_icir_forward_returns_extend_past_test_end():
+    # The factor must be point-in-time, but realized forward returns may look
+    # past test_end: a cache that extends 30 bars beyond the window shouldn't
+    # structurally lose ic_20 just because the window itself is short.
+    closes = 100 + 10 * np.sin(np.linspace(0, 6 * np.pi, 430))
+    frame = _frame(closes)
+    cache = MemoryBars({("SPY", "15m"): frame})
+    spec = {"version": 2, "name": "t", "timeframe": "15m",
+            "long": {"all": [{"lhs": {"src": "close"}, "op": ">",
+                              "rhs": {"ind": "sma", "n": 5}}]}}
+    start, end = frame.index[200], frame.index[400]
+    w = Window(frame.index[0], start, start, end)
+    out = window_icir(spec, cache, "SPY", w, tfs=TFS)
+    assert out["ic_n_1"] == 200 and out["ic_n_20"] == 200
+
+
 def test_window_icir_constant_prices_yield_none():
     frame = _frame([100.0] * 120)
     cache = MemoryBars({("SPY", "15m"): frame})

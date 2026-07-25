@@ -4,13 +4,15 @@ Informational evaluation only: Spearman correlation between a spec's graded
 margin (strategies/rules/margins.py) and forward close-to-close returns at
 1/5/20 bars of the spec's own timeframe, one IC per walk-forward test window.
 IR = mean/std of window ICs, aggregated by icir_fields at report time.
-Forward returns exist only inside this module; nothing feeds the signal path.
+Forward returns are realized returns and may extend past window.test_end;
+only the factor (the margin) is point-in-time. Nothing here feeds the signal
+path. Overlapping k-bar forward returns across rows are not independent
+observations, so n_obs inflates relative to the effective sample size.
 
 Import discipline: the engine runner imports this module, so it must never
 import nakagai.engine.runner or nakagai.stats.
 """
 
-import numpy as np
 import pandas as pd
 
 from nakagai.data.schema import DEFAULT_TIMEFRAMES, TimeframeSet
@@ -21,6 +23,27 @@ from nakagai.strategies.rules.margins import spec_margin
 
 IC_HORIZONS = (1, 5, 20)
 MIN_IC_OBS = 10
+
+END_ANCHORED_PRIMS = frozenset({"fvg_nearest", "order_block"})
+
+
+def _uses_end_anchored(node) -> bool:
+    """True when a spec fragment contains a primitive whose vectorized value
+    is anchored to the end of the evaluation frame (lookahead if broadcast)."""
+    if isinstance(node, dict):
+        if node.get("prim") in END_ANCHORED_PRIMS:
+            return True
+        return any(_uses_end_anchored(v) for v in node.values())
+    if isinstance(node, list):
+        return any(_uses_end_anchored(v) for v in node)
+    return False
+
+
+def empty_ic_fields() -> dict:
+    """The None/0 shape of the six run-row IC fields."""
+    out: dict = {f"ic_{k}": None for k in IC_HORIZONS}
+    out.update({f"ic_n_{k}": 0 for k in IC_HORIZONS})
+    return out
 
 
 def rank_ic(factor: pd.Series, fwd_returns: pd.Series) -> tuple[float | None, int]:
@@ -39,11 +62,15 @@ def rank_ic(factor: pd.Series, fwd_returns: pd.Series) -> tuple[float | None, in
 def window_icir(spec: dict, cache, symbol: str, window: Window,
                 tfs: TimeframeSet = DEFAULT_TIMEFRAMES) -> dict:
     """Per-window rank-IC of one spec on one symbol: the six run-row fields.
-    The tail of each window loses its last k rows per horizon (their forward
-    return would need bars past test_end)."""
-    out: dict = {f"ic_{k}": None for k in IC_HORIZONS}
-    out.update({f"ic_n_{k}": 0 for k in IC_HORIZONS})
+    The factor (margin) is built from frames cut at window.test_end so it
+    stays point-in-time. Forward returns, by contrast, are realized returns
+    and are computed from the uncut cache, so they may extend past test_end;
+    a short window on a daily spec can still have ic_20 as long as the cache
+    itself has 20 more bars, even if they fall outside this window."""
+    out = empty_ic_fields()
     tf = spec.get("timeframe", "1h")
+    if _uses_end_anchored(spec.get("long")) or _uses_end_anchored(spec.get("short")):
+        return out
     frames = {t: closed_before(cache.load(symbol, t), t, window.test_end, tfs)
               for t in tfs.all}
     bars = frames.get(tf)
@@ -57,9 +84,9 @@ def window_icir(spec: dict, cache, symbol: str, window: Window,
     margin = spec_margin(spec, ctx, in_win)
     if margin.empty:
         return out
-    close = bars["close"]
+    full_close = cache.load(symbol, tf)["close"]
     for k in IC_HORIZONS:
-        fwd = (close.shift(-k) / close - 1.0).loc[in_win]
+        fwd = (full_close.shift(-k) / full_close - 1.0).loc[in_win]
         ic, n = rank_ic(margin, fwd)
         out[f"ic_{k}"] = ic
         out[f"ic_n_{k}"] = n
