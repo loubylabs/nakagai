@@ -22,6 +22,7 @@ a screener compiler.
   optional `nlbuilder` extra (installs `anthropic`).
 - `stats.py`: permutation p-values, bootstrap confidence intervals, and the
   decision-exact null harness for backtest results.
+- `icir.py`: rank-IC / IR of rule-spec margins vs forward returns (the informational ICIR lens)
 - `filelock.py`: cross-process advisory file locking for concurrent read-modify-write
   on shared result files.
 

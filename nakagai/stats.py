@@ -92,7 +92,7 @@ def null_batch(play: str, sym: str, windows, frames: dict, epoch: str,
                 permutation_seed(sym, tf, epoch, i)))
             for tf, bars in frames.items()})
         rows = [run_one(null_cache, play, {}, sym, w, batch_id=f"perm-{i}",
-                        tfs=tfs, registry=registry)
+                        tfs=tfs, registry=registry, icir=False)
                 for w in windows]
         t = pd.DataFrame([tr for r in rows for tr in r["trades"]])
         # a null run with no trades cannot beat any positive observed PF
