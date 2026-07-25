@@ -99,3 +99,36 @@ def condition_margin(cond: dict, ctx: MarketContext, bars: pd.DataFrame,
     if cond["op"] in (">", ">=", "crosses_above"):
         return lhs - rhs
     return rhs - lhs
+
+
+def group_margin(group: dict, ctx: MarketContext, bars: pd.DataFrame,
+                 bars_tf: str, memo: dict, index: pd.DatetimeIndex) -> pd.Series:
+    """One all/any group as a percentile margin on `index` rows. Members are
+    rank-transformed within `index` (the walk-forward window) so different
+    native scales combine fairly; `all` takes the min (an unknown member
+    keeps the row unknown), `any` the max (one known member suffices)."""
+    key, items = next(iter(group.items()))
+    members = [
+        (group_margin(i, ctx, bars, bars_tf, memo, index)
+         if ("all" in i or "any" in i)
+         else condition_margin(i, ctx, bars, bars_tf, memo).loc[index])
+        .rank(pct=True)
+        for i in items]
+    both = pd.concat(members, axis=1)
+    return both.min(axis=1, skipna=False) if key == "all" else both.max(axis=1)
+
+
+def spec_margin(spec: dict, ctx: MarketContext,
+                index: pd.DatetimeIndex) -> pd.Series:
+    """The spec as one graded factor on `index` rows: rank(long) minus
+    rank(short), missing side = 0. Positive IC downstream always means the
+    signal points the right way, for shorts too."""
+    tf = spec.get("timeframe", "1h")
+    bars = ctx.bars[tf]
+    memo: dict = {}
+    sides = {side: group_margin(spec[side], ctx, bars, tf, memo, index)
+             for side in ("long", "short") if side in spec}
+    if not sides:
+        return pd.Series(dtype=float)
+    zero = pd.Series(0.0, index=index)
+    return sides.get("long", zero) - sides.get("short", zero)

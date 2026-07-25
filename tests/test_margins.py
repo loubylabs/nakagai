@@ -6,7 +6,7 @@ import pytest
 
 from nakagai.strategies.base import MarketContext
 from nakagai.strategies.indicators import rsi as _rsi
-from nakagai.strategies.rules.margins import condition_margin, margin_expr
+from nakagai.strategies.rules.margins import condition_margin, margin_expr, group_margin, spec_margin
 
 
 def _bars(closes, start="2026-01-05 14:30", freq="15min"):
@@ -106,3 +106,54 @@ def test_tf_qualified_primitive_is_visibility_shifted():
     # the value every Jan 6 row should carry, ffilled in from 45 minutes
     # after the 1h bars close.
     assert (m == 202.0).all()
+
+
+def test_group_margin_ranks_then_combines():
+    b = _bars(np.linspace(100, 120, 40))
+    ctx = _ctx(b)
+    idx = b.index[10:]
+    c1 = {"lhs": {"src": "close"}, "op": ">", "rhs": {"ind": "sma", "n": 5}}
+    c2 = {"lhs": {"ind": "rsi", "n": 14}, "op": "<", "rhs": 70}
+    m1 = condition_margin(c1, ctx, b, "15m", {}).loc[idx].rank(pct=True)
+    m2 = condition_margin(c2, ctx, b, "15m", {}).loc[idx].rank(pct=True)
+    g_all = group_margin({"all": [c1, c2]}, ctx, b, "15m", {}, idx)
+    g_any = group_margin({"any": [c1, c2]}, ctx, b, "15m", {}, idx)
+    both = pd.concat([m1, m2], axis=1)
+    pd.testing.assert_series_equal(g_all, both.min(axis=1, skipna=False),
+                                   check_names=False)
+    pd.testing.assert_series_equal(g_any, both.max(axis=1), check_names=False)
+    assert g_all.dropna().between(0, 1).all()
+
+
+def test_all_group_propagates_warmup_nan_any_survives_it():
+    b = _bars(np.linspace(100, 120, 40))
+    ctx = _ctx(b)
+    idx = b.index          # includes sma warmup rows
+    c_warm = {"lhs": {"src": "close"}, "op": ">", "rhs": {"ind": "sma", "n": 20}}
+    c_ok = {"lhs": {"src": "close"}, "op": ">", "rhs": 0}
+    g_all = group_margin({"all": [c_warm, c_ok]}, ctx, b, "15m", {}, idx)
+    g_any = group_margin({"any": [c_warm, c_ok]}, ctx, b, "15m", {}, idx)
+    assert g_all.iloc[:19].isna().all() and g_all.iloc[19:].notna().all()
+    assert g_any.notna().all()
+
+
+def test_spec_margin_long_only_and_sides():
+    b = _bars(np.linspace(100, 120, 40))
+    ctx = _ctx(b)
+    idx = b.index[10:]
+    cond = {"lhs": {"src": "close"}, "op": ">", "rhs": {"ind": "sma", "n": 5}}
+    long_only = {"version": 2, "name": "t", "timeframe": "15m",
+                 "long": {"all": [cond]}}
+    short_only = {"version": 2, "name": "t", "timeframe": "15m",
+                  "short": {"all": [cond]}}
+    ml = spec_margin(long_only, ctx, idx)
+    ms = spec_margin(short_only, ctx, idx)
+    pd.testing.assert_series_equal(ml, -ms, check_names=False)
+    assert ml.dropna().between(0, 1).all()
+
+
+def test_spec_margin_empty_spec_is_empty():
+    b = _bars(np.linspace(100, 120, 40))
+    out = spec_margin({"version": 2, "name": "t", "timeframe": "15m"},
+                      _ctx(b), b.index)
+    assert isinstance(out, pd.Series) and out.empty
