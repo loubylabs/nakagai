@@ -59,6 +59,10 @@ def run_one(cache_root, strategy_name: str, params: dict, symbol: str,
             "run_one requires a strategies registry: pass a zero-arg callable "
             "returning {name: Strategy class}")
     strategy = registry()[strategy_name](params)
+    # `params` are the caller's overrides on top of the spec's defaults, and
+    # they are the SAME on every window: nothing is fit on window.train_start
+    # .. window.train_end. This is fixed-parameter rolling out-of-sample
+    # evaluation, not walk-forward optimization. See engine/windows.py.
     engine = Engine(strategy, cache, symbol, window.test_start, window.test_end,
                     equity0=equity0, risk_pct=risk_pct, tfs=tfs)
     result = engine.run()
