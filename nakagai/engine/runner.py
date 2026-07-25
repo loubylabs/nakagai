@@ -14,7 +14,7 @@ from nakagai.engine.engine import Engine
 from nakagai.filelock import append_parquet
 from nakagai.engine.metrics import buy_and_hold_return, summarize
 from nakagai.engine.windows import Window
-from nakagai.icir import IC_HORIZONS, window_icir
+from nakagai.icir import empty_ic_fields, window_icir
 from nakagai.strategies.base import Strategy
 from nakagai.strategies.rules.strategy import RuleStrategy
 
@@ -73,10 +73,13 @@ def run_one(cache_root, strategy_name: str, params: dict, symbol: str,
     # ICIR lens: per-window rank-IC of the spec's margin vs forward returns.
     # Rule specs only; permutation replays pass icir=False (an IC of shuffled
     # bars is meaningless and the nulls run thousands of times).
-    ic_fields: dict = {f"ic_{k}": None for k in IC_HORIZONS}
-    ic_fields.update({f"ic_n_{k}": 0 for k in IC_HORIZONS})
+    ic_fields = empty_ic_fields()
     if icir and isinstance(strategy, RuleStrategy) and strategy.spec:
-        ic_fields = window_icir(strategy.spec, cache, symbol, window, tfs=tfs)
+        try:
+            ic_fields = window_icir(strategy.spec, cache, symbol, window, tfs=tfs)
+        except Exception:
+            # The lens is informational; it must never kill a production row.
+            ic_fields = empty_ic_fields()
     return {
         "run_id": run_id,
         "ts_run": pd.Timestamp.now(tz="UTC").isoformat(),
