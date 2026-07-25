@@ -76,3 +76,15 @@ def test_fvg_nearest_returns_float_or_nan():
     bars = _session_bars()
     v = PRIMITIVES["fvg_nearest"]["fn"](_ctx(bars), bars, direction="long", field="top")
     assert isinstance(v, float)                        # NaN when no unfilled FVG exists
+
+
+def test_day_of_week_reads_the_utc_calendar_day_on_daily_frames():
+    # Session-aligned daily bars are labeled midnight UTC of their session date;
+    # converting midnight UTC to NY lands on the prior evening, which used to
+    # shift every weekday back by one (a Monday bar read as Sunday).
+    from nakagai.strategies.rules.primitives import PRIMITIVES
+    idx = pd.date_range("2026-01-05", periods=5, freq="B", tz="UTC")  # Mon..Fri
+    bars = pd.DataFrame({"open": 100.0, "high": 101.0, "low": 99.0,
+                         "close": 100.0, "volume": 1000.0}, index=idx)
+    dow = PRIMITIVES["day_of_week"]["fn"](None, bars)
+    assert list(dow) == [0.0, 1.0, 2.0, 3.0, 4.0]
