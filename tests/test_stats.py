@@ -97,7 +97,7 @@ def test_collect_nulls_threads_custom_tfs_to_run_one(monkeypatch):
     seen = {}
 
     def fake_run_one(cache, strategy_name, params, symbol, window, equity0=10_000.0,
-                     risk_pct=0.01, config="", batch_id="", tfs=None, registry=None):
+                     risk_pct=0.01, config="", batch_id="", tfs=None, registry=None, icir=True):
         seen["tfs"] = tfs
         seen["has_custom_key"] = len(cache.load(symbol, "1h")) > 0
         seen["has_default_key"] = len(cache.load(symbol, "15m")) > 0

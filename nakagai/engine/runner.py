@@ -14,7 +14,9 @@ from nakagai.engine.engine import Engine
 from nakagai.filelock import append_parquet
 from nakagai.engine.metrics import buy_and_hold_return, summarize
 from nakagai.engine.windows import Window
+from nakagai.icir import empty_ic_fields, window_icir
 from nakagai.strategies.base import Strategy
+from nakagai.strategies.rules.strategy import RuleStrategy
 
 # A zero-arg callable returning {name: Strategy class}. Passed as a callable,
 # not a dict: catalog classes are created at runtime and cannot pickle by
@@ -49,7 +51,7 @@ def run_one(cache_root, strategy_name: str, params: dict, symbol: str,
             window: Window, equity0: float = 10_000.0, risk_pct: float = 0.01,
             config: str = "", batch_id: str = "",
             tfs: TimeframeSet = DEFAULT_TIMEFRAMES,
-            registry: Registry | None = None) -> dict:
+            registry: Registry | None = None, icir: bool = True) -> dict:
     # cache_root is a path string from the pool path (picklable), or an
     # already-loaded BarCache-shaped object from in-process callers (the
     # permutation harness passes MemoryBars to skip parquet entirely).
@@ -68,6 +70,16 @@ def run_one(cache_root, strategy_name: str, params: dict, symbol: str,
     result = engine.run()
     bh = buy_and_hold_return(cache.load(symbol, tfs.driving), window.test_start, window.test_end)
     run_id = uuid.uuid4().hex
+    # ICIR lens: per-window rank-IC of the spec's margin vs forward returns.
+    # Rule specs only; permutation replays pass icir=False (an IC of shuffled
+    # bars is meaningless and the nulls run thousands of times).
+    ic_fields = empty_ic_fields()
+    if icir and isinstance(strategy, RuleStrategy) and strategy.spec:
+        try:
+            ic_fields = window_icir(strategy.spec, cache, symbol, window, tfs=tfs)
+        except Exception:
+            # The lens is informational; it must never kill a production row.
+            ic_fields = empty_ic_fields()
     return {
         "run_id": run_id,
         "ts_run": pd.Timestamp.now(tz="UTC").isoformat(),
@@ -86,6 +98,7 @@ def run_one(cache_root, strategy_name: str, params: dict, symbol: str,
         "test_start": window.test_start.isoformat(),
         "test_end": window.test_end.isoformat(),
         **summarize(result, bh),
+        **ic_fields,
         "trades": _trade_rows(result.trades, run_id),
     }
 
