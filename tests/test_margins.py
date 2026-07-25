@@ -5,6 +5,7 @@ import pandas as pd
 import pytest
 
 from nakagai.strategies.base import MarketContext
+from nakagai.strategies.indicators import rsi as _rsi
 from nakagai.strategies.rules.margins import condition_margin, margin_expr
 
 
@@ -51,6 +52,8 @@ def test_scalar_rhs_broadcasts():
     m = condition_margin({"lhs": {"ind": "rsi", "n": 14}, "op": "<", "rhs": 30},
                          _ctx(b), b, "15m", {})
     assert isinstance(m, pd.Series) and len(m) == len(b)
+    expected_rsi = _rsi(b["close"], 14)
+    assert m.iloc[-1] == pytest.approx(30 - expected_rsi.iloc[-1])
 
 
 def test_daily_reference_not_visible_within_its_own_session():
@@ -82,3 +85,24 @@ def test_primitive_margin_is_a_series():
                           "rhs": {"prim": "prev_session_high"}},
                          _ctx(b), b, "15m", {})
     assert isinstance(m, pd.Series) and len(m) == len(b)
+
+
+def test_tf_qualified_primitive_is_visibility_shifted():
+    # prev_session_high on the 1h tf must evaluate on the 1h frame (not the
+    # 15m driving frame) and land on the driving index shifted by the 1h/15m
+    # close-delta gap: 1h closes 45 minutes later than a 15m bar labeled the
+    # same time, so the prior session's 1h high only becomes visible 45
+    # minutes after the 15m bar it would naively align to.
+    b1h = pd.concat([
+        _bars([199.5, 201.5], start="2026-01-05 13:00", freq="1h"),
+        _bars([190.0, 191.0], start="2026-01-06 13:00", freq="1h"),
+    ])
+    b15 = _bars([100.0] * 8, start="2026-01-06 14:30")
+    ctx = _ctx(b15, b1h=b1h)
+    m = margin_expr({"prim": "prev_session_high", "tf": "1h"}, ctx, b15, "15m", {})
+    assert isinstance(m, pd.Series)
+    assert m.index.equals(b15.index)
+    # Jan 5's session high (from closes 199.5/201.5 -> highs 200.0/202.0) is
+    # the value every Jan 6 row should carry, ffilled in from 45 minutes
+    # after the 1h bars close.
+    assert (m == 202.0).all()

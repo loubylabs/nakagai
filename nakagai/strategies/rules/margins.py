@@ -13,7 +13,7 @@ import json
 
 import pandas as pd
 
-from nakagai.data.schema import DEFAULT_TIMEFRAMES, TimeframeSet
+from nakagai.data.schema import TimeframeSet
 from nakagai.strategies.base import MarketContext
 from nakagai.strategies.rules.exprs import (_BAR_FNS, _FRAME_FNS, _SERIES_FNS,
                                             _math, eval_condition_series)
@@ -78,11 +78,11 @@ def _margin_eval(node: dict, ctx: MarketContext, bars: pd.DataFrame,
         return _align_visible(out, bars, tf, bars_tf, ctx.tfs)
     name = node["prim"]
     a = {**PRIM_DEFAULTS.get(name, {}),
-         **{k: v for k, v in node.items() if k != "prim"}}
+         **{k: v for k, v in node.items() if k not in ("prim", "tf")}}
     if name == "bars_since":
         a["eval_fn"] = lambda cond, b: eval_condition_series(cond, ctx, b, memo)
-    return PRIMITIVES[name]["fn"](ctx, bars, **{k: v for k, v in a.items()
-                                                if k != "prim"})
+    return _align_visible(PRIMITIVES[name]["fn"](ctx, tf_bars, **a), bars, tf,
+                          bars_tf, ctx.tfs)
 
 
 def condition_margin(cond: dict, ctx: MarketContext, bars: pd.DataFrame,
