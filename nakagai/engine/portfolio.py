@@ -36,5 +36,15 @@ class SettledLedger:
         self._settled -= amount
         return True
 
+    def pending_total(self) -> float:
+        """Cash credited but not yet settled.
+
+        Equity marking needs this, and reaching into _pending to get it meant a
+        change to settlement bookkeeping broke the engine from a distance. Call
+        settled() first: it sweeps matured entries out of _pending, so asking
+        in the other order double-counts anything that has just settled.
+        """
+        return sum(amount for _, amount in self._pending)
+
     def credit(self, amount: float, now: pd.Timestamp):
         self._pending.append((_next_weekday(now.tz_convert(NY).date()), float(amount)))
