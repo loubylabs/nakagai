@@ -6,7 +6,8 @@ import pandas as pd
 
 from nakagai.data.base import DataProvider
 from nakagai.data.cache import BarCache
-from nakagai.data.sync import fetch_incremental
+from nakagai.data.schema import empty_bars
+from nakagai.data.sync import fetch_incremental, fetch_incremental_multi
 
 
 class CapturingProvider(DataProvider):
@@ -70,3 +71,95 @@ def test_full_ignores_the_cache(tmp_path, make_bars):
     p = CapturingProvider(make_bars)
     fetch_incremental(cache, p, "SPY", "15m", START, END, full=True)
     assert p.calls == [("SPY", "15m", START, END)]
+
+
+# -- fetch_incremental_multi --------------------------------------------------
+# One provider round trip for many symbols. One request carries ONE start, and
+# symbols resume at different points, so the batch starts at the earliest resume
+# point across the group and lets upsert dedupe the overlap. Refetching a few
+# bars for the symbols already caught up is far cheaper than one request each,
+# which is the cost this exists to remove.
+
+
+class CapturingMultiProvider:
+    """fetch_bars_multi-shaped. Not a DataProvider subclass: the batch method is
+    an AlpacaProvider capability, not part of the one-method ABC contract."""
+
+    def __init__(self, frames: dict):
+        self._frames = frames
+        self.calls: list[tuple] = []
+
+    def fetch_bars_multi(self, symbols, timeframe, start, end):
+        self.calls.append((tuple(symbols), timeframe, start, end))
+        return {s: self._frames.get(s, empty_bars()) for s in symbols}
+
+
+def test_multi_widens_to_the_earliest_resume_point(tmp_path, make_bars):
+    """AAPL is caught up further than MSFT. A single request cannot carry two
+    starts, so it must take the earlier one or MSFT gets an unfillable hole."""
+    cache = BarCache(tmp_path)
+    cache.upsert("AAPL", "15m", make_bars(4))                       # ...through 14:15
+    cache.upsert("MSFT", "15m", make_bars(2))                       # ...through 13:45
+    aapl_last = cache.coverage("AAPL", "15m")[1]
+    msft_last = cache.coverage("MSFT", "15m")[1]
+    assert msft_last < aapl_last                                    # premise of the test
+
+    p = CapturingMultiProvider({"AAPL": make_bars(2, start="2026-06-01 14:30"),
+                                "MSFT": make_bars(4, start="2026-06-01 13:45")})
+    written = fetch_incremental_multi(cache, p, ["AAPL", "MSFT"], "15m", START, END)
+
+    assert len(p.calls) == 1, "one round trip for the whole group"
+    assert p.calls[0][2] == msft_last, "started at the EARLIEST resume point"
+    assert written == {"AAPL": 2, "MSFT": 4}
+
+
+def test_multi_forces_the_full_range_when_any_symbol_has_no_cache(tmp_path, make_bars):
+    """An uncached symbol needs everything, and it shares the request, so the
+    group's start collapses to the requested start."""
+    cache = BarCache(tmp_path)
+    cache.upsert("AAPL", "15m", make_bars(4))
+    p = CapturingMultiProvider({"AAPL": make_bars(1), "NEW": make_bars(1)})
+    fetch_incremental_multi(cache, p, ["AAPL", "NEW"], "15m", START, END)
+    assert p.calls[0][2] == START
+
+
+def test_multi_upserts_nothing_for_an_empty_frame(tmp_path):
+    """A symbol the provider had no bars for must not raise and must not write."""
+    cache = BarCache(tmp_path)
+    p = CapturingMultiProvider({})          # every symbol comes back empty
+    written = fetch_incremental_multi(cache, p, ["NOSUCH"], "15m", START, END)
+    assert written == {"NOSUCH": 0}
+    assert cache.load("NOSUCH", "15m").empty
+
+
+def test_multi_full_ignores_cached_coverage(tmp_path, make_bars):
+    cache = BarCache(tmp_path)
+    cache.upsert("AAPL", "15m", make_bars(10))
+    p = CapturingMultiProvider({"AAPL": make_bars(1)})
+    fetch_incremental_multi(cache, p, ["AAPL"], "15m", START, END, full=True)
+    assert p.calls[0][2] == START
+
+
+def test_multi_with_no_symbols_makes_no_call(tmp_path):
+    cache = BarCache(tmp_path)
+    p = CapturingMultiProvider({})
+    assert fetch_incremental_multi(cache, p, [], "15m", START, END) == {}
+    assert p.calls == []
+
+
+def test_multi_uppercases_and_dedupes(tmp_path, make_bars):
+    cache = BarCache(tmp_path)
+    p = CapturingMultiProvider({"AAPL": make_bars(1)})
+    written = fetch_incremental_multi(cache, p, ["aapl", "AAPL"], "15m", START, END)
+    assert p.calls[0][0] == ("AAPL",)
+    assert written == {"AAPL": 1}
+
+
+def test_multi_dedupes_the_refetched_overlap(tmp_path, make_bars):
+    """The widened window refetches bars the cache already had. upsert keeps the
+    newer copy of a duplicate ts, so the cache must not grow by the overlap."""
+    cache = BarCache(tmp_path)
+    cache.upsert("AAPL", "15m", make_bars(4))
+    p = CapturingMultiProvider({"AAPL": make_bars(6)})   # 4 overlapping + 2 new
+    fetch_incremental_multi(cache, p, ["AAPL"], "15m", START, END)
+    assert len(cache.load("AAPL", "15m")) == 6

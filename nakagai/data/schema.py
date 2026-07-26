@@ -8,6 +8,17 @@ import pandas as pd
 BAR_COLUMNS = ["open", "high", "low", "close", "volume"]
 
 
+def empty_bars() -> pd.DataFrame:
+    """The canonical "no bars" frame: right columns, right dtypes, UTC index.
+
+    Lives here beside BAR_COLUMNS because every producer of an empty result owes
+    the same shape, and a provider returning a bare DataFrame() instead sends a
+    frame with no columns downstream, where it fails far from its cause.
+    """
+    idx = pd.DatetimeIndex([], tz="UTC", name="ts")
+    return pd.DataFrame({c: pd.Series(dtype="float64") for c in BAR_COLUMNS}, index=idx)
+
+
 @dataclass(frozen=True)
 class TimeframeSet:
     """The engine's time vocabulary: one driving timeframe (the replay
