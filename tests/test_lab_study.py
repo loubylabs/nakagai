@@ -5,7 +5,7 @@ import pytest
 
 from nakagai.engine.runner import run_one
 from nakagai.lab.mutate import literal_trials
-from nakagai.lab.study import trial_pf
+from nakagai.lab.study import StudySpec, run_study, trial_pf
 from nakagai.stats import pf_from_trades
 from tests.lab_helpers import (BASE_SPEC, lab_registry, memory_cache,
                                random_walk_frames, short_windows)
@@ -93,3 +93,42 @@ def test_trial_pf_pools_the_ledger_instead_of_averaging_per_window_pf():
     assert n == len(pooled_trades)
     assert pf == pytest.approx(pooled_pf)
     assert pf != pytest.approx(averaged_pf)
+
+
+def _study(frames, seed=1, n=4):
+    return StudySpec(
+        trials=tuple(literal_trials(BASE_SPEC, n=n, seed=seed)),
+        symbols=("TEST",),
+        windows=tuple(short_windows(frames, "TEST")),
+        seed=seed)
+
+
+def test_run_study_scores_every_trial():
+    frames = random_walk_frames("TEST", seed=2)
+    out = run_study(memory_cache(frames), _study(frames), lab_registry())
+    assert out.n_trials == 4
+    assert len(out.results) == 4
+    assert {r.trial_id for r in out.results} == {t.id for t in _study(frames).trials}
+
+
+def test_run_study_best_is_the_highest_pf():
+    frames = random_walk_frames("TEST", seed=2)
+    out = run_study(memory_cache(frames), _study(frames), lab_registry())
+    assert out.best is not None
+    assert out.best.pf == max(r.pf for r in out.results)
+
+
+def test_run_study_is_deterministic():
+    frames = random_walk_frames("TEST", seed=2)
+    a = run_study(memory_cache(frames), _study(frames), lab_registry())
+    b = run_study(memory_cache(frames), _study(frames), lab_registry())
+    assert [(r.trial_id, r.pf, r.n_trades) for r in a.results] == \
+           [(r.trial_id, r.pf, r.n_trades) for r in b.results]
+
+
+def test_run_study_rejects_an_empty_trial_set():
+    frames = random_walk_frames("TEST", seed=2)
+    empty = StudySpec(trials=(), symbols=("TEST",),
+                      windows=tuple(short_windows(frames, "TEST")), seed=1)
+    with pytest.raises(ValueError, match="at least one trial"):
+        run_study(memory_cache(frames), empty, lab_registry())
