@@ -111,6 +111,20 @@ def test_run_study_scores_every_trial():
     assert {r.trial_id for r in out.results} == {t.id for t in _study(frames).trials}
 
 
+def test_run_study_preserves_trial_order():
+    # Order is a documented part of run_study's contract, not an accident of
+    # dict/list iteration: Task 9's best_of_n_null compares an observed run
+    # against null replays position for position, without sorting first. A
+    # set comparison (as in test_run_study_scores_every_trial) or a
+    # self-consistency check (as in test_run_study_is_deterministic) would
+    # both still pass if run_study sorted its results by trial_id, so
+    # neither test pins order. This one does.
+    frames = random_walk_frames("TEST", seed=2)
+    study = _study(frames)
+    out = run_study(memory_cache(frames), study, lab_registry())
+    assert [r.trial_id for r in out.results] == [t.id for t in study.trials]
+
+
 def test_run_study_best_is_the_highest_pf():
     frames = random_walk_frames("TEST", seed=2)
     out = run_study(memory_cache(frames), _study(frames), lab_registry())
