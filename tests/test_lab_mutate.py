@@ -65,6 +65,16 @@ def test_mutable_sites_on_a_spec_with_no_numbers_is_empty():
     assert mutable_sites({"version": 2, "name": "x", "timeframe": "1h"}) == []
 
 
+def test_mutable_sites_excludes_booleans_under_site_keys():
+    # bool is an int subclass in Python, so a flag placed under a site key
+    # must still be excluded; if it were not, this would report both paths
+    # as mutable numeric literals.
+    spec = {"lhs": {"ind": "rsi", "n": True}, "op": ">", "rhs": False}
+    paths = {s.path for s in mutable_sites(spec)}
+    assert ("lhs", "n") not in paths
+    assert ("rhs",) not in paths
+
+
 import pytest
 
 from nakagai.lab.mutate import Trial, literal_trials
