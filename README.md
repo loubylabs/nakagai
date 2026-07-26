@@ -7,9 +7,10 @@ a screener compiler.
 
 ## What is here
 
-- `data/`: `BarCache`/`MemoryBars` over local parquet, `DataProvider` implementations
-  for Alpaca and yfinance, agent-mediated Robinhood bar normalization (no network
-  code), and a sync routine that keeps the cache current.
+- `data/`: `BarCache`/`MemoryBars` over local parquet, the `DataProvider` contract
+  and its Alpaca implementation (single-symbol and batched multi-symbol),
+  agent-mediated Robinhood bar normalization (no network code), and a sync routine
+  that keeps the cache current.
 - `engine/`: the walk-forward backtester itself, point-in-time `MarketContext`
   assembly, T+1 cash settlement, run metrics, and the bar-permutation Monte Carlo null.
 - `strategies/`: rule-based (`rules/`), boolean-composed (`composite/`), and
@@ -28,18 +29,19 @@ a screener compiler.
 
 ## Quickstart
 
-This builds a `BarCache` from real SPY bars, loads one of the shipped example
-strategies, runs the walk-forward engine over the cached window, and prints
-run metrics next to buy-and-hold. It needs network access to Yahoo Finance and
-no optional extras. Run it from the repo root with `uv run python quickstart.py`
-(or paste it into a REPL):
+This builds a `BarCache`, loads one of the shipped example strategies, runs the
+walk-forward engine over the cached window, and prints run metrics next to
+buy-and-hold. No network, no credentials, no optional extras, and it prints the
+same numbers every time: the engine's whole contract is that a backtest reads
+the cache and nothing else. Run it from the repo root with
+`uv run python quickstart.py` (or paste it into a REPL):
 
 ```python
 import tempfile
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
-import yfinance as yf
 
 from nakagai.data.cache import BarCache
 from nakagai.data.schema import TimeframeSet, validate_bars
@@ -47,15 +49,21 @@ from nakagai.engine.engine import Engine
 from nakagai.engine.metrics import buy_and_hold_return, summarize
 from nakagai.strategies.catalog import load_catalog
 
-# 1. Fetch and normalize hourly bars for SPY. data/yf.py's YFinanceProvider
-#    ships daily bars only; the shipped example specs run on 1h, so this
-#    pulls intraday bars straight from yfinance.
-raw = yf.download("SPY", period="730d", interval="1h", auto_adjust=True, progress=False)
-if isinstance(raw.columns, pd.MultiIndex):
-    raw.columns = raw.columns.get_level_values(0)
-bars = raw.rename(columns=str.lower)[["open", "high", "low", "close", "volume"]]
-bars.index = pd.DatetimeIndex(bars.index).tz_convert("UTC")
-bars = validate_bars(bars)
+# 1. Generate a deterministic hourly series. Swap this block for
+#    AlpacaProvider().fetch_bars("SPY", "1h", start, end) once you have
+#    ALPACA_KEY_ID / ALPACA_SECRET_KEY; everything below is unchanged, which is
+#    the point of the DataProvider seam.
+rng = np.random.default_rng(0)
+idx = pd.date_range("2024-01-01", periods=2000, freq="1h", tz="UTC", name="ts")
+close = pd.Series(400 * np.exp(np.cumsum(rng.normal(0, 0.006, len(idx)))), index=idx)
+prev = close.shift(1).fillna(close.iloc[0])
+bars = validate_bars(pd.DataFrame({
+    "open": prev,
+    "high": np.maximum(close, prev) * 1.004,
+    "low": np.minimum(close, prev) * 0.996,
+    "close": close,
+    "volume": 1_000_000.0,
+}, index=idx))
 
 # 2. Store it in a local BarCache: parquet on disk, offline after this.
 cache = BarCache(Path(tempfile.mkdtemp()))
@@ -79,14 +87,23 @@ print(f"trades: {metrics['n_trades']}, win_rate: {metrics['win_rate']:.2f}, "
       f"bh_return: {metrics['bh_return']:.2%}")
 ```
 
-A real run against live SPY data printed:
+Because the series is seeded, this prints the same line on every machine, which
+makes it a usable smoke test as well as an example:
 
 ```
-trades: 19, win_rate: 0.53, profit_factor: 2.05, total_return: 9.51%, bh_return: 71.48%
+trades: 25, win_rate: 0.32, profit_factor: 0.92, total_return: -1.27%, bh_return: -28.77%
 ```
 
-Exact numbers depend on the trailing window Yahoo Finance returns on the day you run
-it.
+A trend follower run on a random walk is not supposed to make money, and it
+doesn't. That is the example working, not failing: the engine's job is to tell
+you that honestly. Point step 1 at real bars to see something worth judging.
+
+Two details of the generated series matter if you change it. Position size comes
+from `risk_pct` divided by the ATR stop distance, so a series with a low
+price-to-volatility ratio asks for more shares than `equity0` can buy and every
+entry is skipped, which reads as a silent zero-trade run. And the bars are
+continuous hourly, with no session gaps, which is fine for the `1h` driving
+timeframe here but is not what session-aligned daily logic expects.
 
 ## The RuleSpec DSL
 
