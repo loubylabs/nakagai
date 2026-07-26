@@ -12,6 +12,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from nakagai.strategies.composite.spec import validate_composite_spec
 from nakagai.strategies.rules.spec import validate_spec
 
 HASH_CHARS = 16
@@ -167,4 +168,72 @@ def literal_trials(base_spec: dict, n: int, seed: int, *,
         raise ValueError(
             f"could only build {len(trials)} distinct valid mutants of "
             f"{base_name!r}, asked for {n}; widen the spec or lower n")
+    return trials
+
+
+BLOCK_IDS = ("a", "b", "c", "d", "e", "f", "g", "h")
+WINDOW_BARS_CHOICES = (2, 3, 4, 6, 8)
+STOP_MULT_CHOICES = (1.5, 2.0, 2.5, 3.0)
+TARGET_RR_CHOICES = (1.0, 1.5, 2.0, 3.0)
+
+
+def _vote_tree(ids: list[str], rng) -> dict:
+    """A vote tree over the chosen block ids. Two shapes for two blocks, three
+    for three or more, all of which the grammar's single-key root accepts."""
+    op = "all" if rng.random() < 0.5 else "any"
+    if len(ids) <= 2:
+        return {op: list(ids)}
+    if rng.random() < 0.5:
+        # One block must fire, plus either of the others: the confluence shape.
+        return {"all": [ids[0], {"any": list(ids[1:])}]}
+    return {op: list(ids)}
+
+
+def composite_trials(catalog: list[str], n: int, seed: int, *, members: dict,
+                     max_blocks: int = 3, name: str = "assembly") -> list[Trial]:
+    """`n` distinct valid composites assembled from `catalog` members.
+
+    Member specs are never touched. The search is over which proven plays
+    combine and how the vote tree joins them, so every leg of a survivor
+    already carries its own out-of-sample record.
+    """
+    catalog = sorted(set(catalog))
+    if len(catalog) < 2:
+        raise ValueError("composite assembly needs at least 2 catalog members")
+    rng = np.random.default_rng(seed)
+    ceiling = min(max_blocks, len(catalog), len(BLOCK_IDS))
+
+    trials: list[Trial] = []
+    seen: set[str] = set()
+    for _ in range(60 * n):
+        if len(trials) == n:
+            break
+        size = int(rng.integers(2, ceiling + 1))
+        picked = [catalog[int(i)]
+                  for i in rng.choice(len(catalog), size=size, replace=False)]
+        ids = list(BLOCK_IDS[:size])
+        spec = {
+            "version": 1,
+            "blocks": {bid: {"strategy": play, "params": {}}
+                       for bid, play in zip(ids, picked)},
+            "long": _vote_tree(ids, rng),
+            "window_bars": int(rng.choice(WINDOW_BARS_CHOICES)),
+            "risk": {
+                "stop": {"kind": "atr", "n": 14,
+                         "mult": float(rng.choice(STOP_MULT_CHOICES))},
+                "target": {"kind": "rr",
+                           "rr": float(rng.choice(TARGET_RR_CHOICES))},
+            },
+        }
+        spec, bare = _named(spec, name)
+        if bare in seen or validate_composite_spec(spec, members, allow_refs=False):
+            continue
+        seen.add(bare)
+        trials.append(Trial(id=bare, strategy="composite", spec=spec,
+                            spec_hash=spec_hash(spec)))
+
+    if len(trials) != n:
+        raise ValueError(
+            f"could only assemble {len(trials)} distinct valid composites, "
+            f"asked for {n}; widen the catalog or lower n")
     return trials

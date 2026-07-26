@@ -151,3 +151,55 @@ def test_literal_trials_raises_when_the_mutant_space_is_exhausted():
     assert len(mutable_sites(tiny)) == 1
     with pytest.raises(ValueError, match="could only build"):
         literal_trials(tiny, n=3, seed=1)
+
+
+from nakagai.lab.mutate import composite_trials
+from nakagai.strategies.composite.spec import validate_composite_spec
+from nakagai.strategies.catalog import load_catalog
+from pathlib import Path
+
+SPECS = Path(__file__).resolve().parents[1] / "nakagai/strategies/catalog/specs"
+
+
+def _members():
+    return load_catalog(SPECS)
+
+
+def test_composite_trials_are_all_valid():
+    members = _members()
+    trials = composite_trials(sorted(members), n=10, seed=5, members=members)
+    assert len(trials) == 10
+    for t in trials:
+        assert validate_composite_spec(t.spec, members, allow_refs=False) == [], t.spec
+
+
+def test_composite_trials_carry_the_composite_strategy_name():
+    members = _members()
+    trials = composite_trials(sorted(members), n=4, seed=5, members=members)
+    assert all(t.strategy == "composite" for t in trials)
+
+
+def test_composite_trials_only_reference_catalog_members():
+    members = _members()
+    for t in composite_trials(sorted(members), n=10, seed=2, members=members):
+        for block in t.spec["blocks"].values():
+            assert block["strategy"] in members
+            assert block["params"] == {}
+
+
+def test_composite_trials_are_deterministic_for_a_seed():
+    members = _members()
+    a = composite_trials(sorted(members), n=6, seed=9, members=members)
+    b = composite_trials(sorted(members), n=6, seed=9, members=members)
+    assert [t.spec_hash for t in a] == [t.spec_hash for t in b]
+
+
+def test_composite_trials_are_distinct():
+    members = _members()
+    trials = composite_trials(sorted(members), n=8, seed=4, members=members)
+    assert len({t.id for t in trials}) == 8
+
+
+def test_composite_trials_need_two_members():
+    with pytest.raises(ValueError, match="at least 2"):
+        composite_trials(["sma_cross"], n=3, seed=1, members=_members())
