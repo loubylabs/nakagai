@@ -189,9 +189,48 @@ def _vote_tree(ids: list[str], rng) -> dict:
     return {op: list(ids)}
 
 
+def _canonical_tree(tree: dict, blocks: dict) -> dict:
+    """The vote tree with block ids resolved to the play names they carry, and
+    each operator's own child list sorted, so which block id a play happened
+    to land on stops mattering.
+
+    Sorting is per node, not across nesting levels: a node's children are
+    canonicalized first (so a nested group becomes one opaque value), and
+    only then is that node's own list reordered. That keeps the confluence
+    shape's distinguished position intact, since the distinguished child and
+    the nested group are never merged into one flat list to be reshuffled
+    together; only genuine siblings under the same operator trade places."""
+    key, items = next(iter(tree.items()))
+    resolved = [_canonical_tree(item, blocks) if isinstance(item, dict) else blocks[item]
+                for item in items]
+    resolved.sort(key=lambda item: json.dumps(item, sort_keys=True))
+    return {key: resolved}
+
+
+def _composite_key(spec: dict) -> str:
+    """The dedupe key for a composite: semantic, not syntactic.
+
+    Block ids are an artifact of the seeded draw order, not part of the
+    strategy, so two assemblies that differ only in which id a play sits at
+    must collide here even though their specs (and spec_hash) differ.
+    window_bars and risk still distinguish otherwise-identical trees, so they
+    pass through unchanged."""
+    blocks = {bid: block["strategy"] for bid, block in spec["blocks"].items()}
+    canonical = {side: _canonical_tree(spec[side], blocks)
+                 for side in ("long", "short") if spec.get(side)}
+    canonical["window_bars"] = spec.get("window_bars")
+    canonical["risk"] = spec.get("risk")
+    return spec_hash(canonical)
+
+
 def composite_trials(catalog: list[str], n: int, seed: int, *, members: dict,
                      max_blocks: int = 3, name: str = "assembly") -> list[Trial]:
     """`n` distinct valid composites assembled from `catalog` members.
+
+    "Distinct" is semantic: which block id a play happens to land on is an
+    artifact of the draw, not part of the strategy, so two assemblies that
+    describe the same vote tree over the same plays count as one and only
+    the first survives.
 
     Member specs are never touched. The search is over which proven plays
     combine and how the vote tree joins them, so every leg of a survivor
@@ -226,9 +265,10 @@ def composite_trials(catalog: list[str], n: int, seed: int, *, members: dict,
             },
         }
         spec, bare = _named(spec, name)
-        if bare in seen or validate_composite_spec(spec, members, allow_refs=False):
+        key = _composite_key(spec)
+        if key in seen or validate_composite_spec(spec, members, allow_refs=False):
             continue
-        seen.add(bare)
+        seen.add(key)
         trials.append(Trial(id=bare, strategy="composite", spec=spec,
                             spec_hash=spec_hash(spec)))
 

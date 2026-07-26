@@ -203,3 +203,80 @@ def test_composite_trials_are_distinct():
 def test_composite_trials_need_two_members():
     with pytest.raises(ValueError, match="at least 2"):
         composite_trials(["sma_cross"], n=3, seed=1, members=_members())
+
+
+from nakagai.lab.mutate import _composite_key
+
+# The two specs below describe the identical strategy, "macd_trend OR
+# rsi_reversion", but with the plays sitting at swapped block ids. A
+# syntactic dedupe key (spec_hash of the spec minus its name) treats these
+# as two different trials, since the "blocks" dict content differs; the
+# semantic key must treat them as one.
+_COMMON = {
+    "version": 1,
+    "window_bars": 4,
+    "risk": {"stop": {"kind": "atr", "n": 14, "mult": 2.0},
+             "target": {"kind": "rr", "rr": 1.5}},
+}
+
+
+def test_composite_key_collapses_a_block_id_swap():
+    a = {**_COMMON, "name": "x",
+         "blocks": {"a": {"strategy": "macd_trend", "params": {}},
+                    "b": {"strategy": "rsi_reversion", "params": {}}},
+         "long": {"any": ["a", "b"]}}
+    b = {**_COMMON, "name": "y",
+         "blocks": {"a": {"strategy": "rsi_reversion", "params": {}},
+                    "b": {"strategy": "macd_trend", "params": {}}},
+         "long": {"any": ["a", "b"]}}
+    assert spec_hash(a) != spec_hash(b)          # syntactically different specs
+    assert _composite_key(a) == _composite_key(b)  # but the same strategy
+
+
+def test_composite_key_keeps_the_confluence_position_distinguished():
+    # {"all": [x, {"any": [y, z]}]} means "x AND (y OR z)". Swapping which
+    # play is x (the distinguished, non-voted leg) versus which play sits in
+    # the "any" group changes the strategy, even though the same three plays
+    # and the same tree shape are used both times. Over-canonicalizing (e.g.
+    # sorting across the nesting boundary) would wrongly collapse these.
+    a = {**_COMMON, "name": "x",
+         "blocks": {"a": {"strategy": "macd_trend", "params": {}},
+                    "b": {"strategy": "rsi_reversion", "params": {}},
+                    "c": {"strategy": "sma_cross", "params": {}}},
+         "long": {"all": ["a", {"any": ["b", "c"]}]}}
+    b = {**_COMMON, "name": "y",
+         "blocks": {"a": {"strategy": "rsi_reversion", "params": {}},
+                    "b": {"strategy": "macd_trend", "params": {}},
+                    "c": {"strategy": "sma_cross", "params": {}}},
+         "long": {"all": ["a", {"any": ["b", "c"]}]}}
+    assert _composite_key(a) != _composite_key(b)
+
+
+def test_composite_key_is_order_independent_within_the_nested_any():
+    # Within the confluence shape's own "any" group, member order is still
+    # symmetric: swapping y and z there (leaving the distinguished leg alone)
+    # must still collide.
+    a = {**_COMMON, "name": "x",
+         "blocks": {"a": {"strategy": "macd_trend", "params": {}},
+                    "b": {"strategy": "rsi_reversion", "params": {}},
+                    "c": {"strategy": "sma_cross", "params": {}}},
+         "long": {"all": ["a", {"any": ["b", "c"]}]}}
+    b = {**_COMMON, "name": "y",
+         "blocks": {"a": {"strategy": "macd_trend", "params": {}},
+                    "b": {"strategy": "sma_cross", "params": {}},
+                    "c": {"strategy": "rsi_reversion", "params": {}}},
+         "long": {"all": ["a", {"any": ["b", "c"]}]}}
+    assert _composite_key(a) == _composite_key(b)
+
+
+def test_composite_trials_are_semantically_distinct():
+    # The regression the review caught: t.id (derived from the full,
+    # block-id-sensitive spec_hash) was always unique even when two trials
+    # described the same strategy with swapped block ids. This checks the
+    # dedupe key the module itself uses for identity, so a reintroduced
+    # syntactic-only dedupe would fail it even though test_composite_trials
+    # _are_distinct (which only checks t.id) would still pass.
+    members = _members()
+    trials = composite_trials(sorted(members), n=10, seed=5, members=members)
+    keys = {_composite_key(t.spec) for t in trials}
+    assert len(keys) == 10
