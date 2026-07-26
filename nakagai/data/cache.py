@@ -5,13 +5,13 @@ from pathlib import Path
 
 import pandas as pd
 
-from nakagai.data.schema import BAR_COLUMNS, validate_bars
+# empty_bars is re-exported here because this module has always been its import
+# site; it now lives in schema.py, beside BAR_COLUMNS, so the providers can share
+# the one implementation instead of each hardcoding the column list.
+from nakagai.data.schema import empty_bars, validate_bars
 from nakagai.filelock import file_lock
 
-
-def empty_bars() -> pd.DataFrame:
-    idx = pd.DatetimeIndex([], tz="UTC", name="ts")
-    return pd.DataFrame({c: pd.Series(dtype="float64") for c in BAR_COLUMNS}, index=idx)
+__all__ = ["BarCache", "MemoryBars", "empty_bars"]
 
 
 class MemoryBars:
