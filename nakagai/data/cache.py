@@ -1,10 +1,12 @@
 """Local parquet cache. Backtests read ONLY from here, offline and reproducible."""
 
+import os
 from pathlib import Path
 
 import pandas as pd
 
 from nakagai.data.schema import BAR_COLUMNS, validate_bars
+from nakagai.filelock import file_lock
 
 
 def empty_bars() -> pd.DataFrame:
@@ -36,13 +38,30 @@ class BarCache:
         return self.root / f"{symbol}_{timeframe}.parquet"
 
     def upsert(self, symbol: str, timeframe: str, df: pd.DataFrame) -> int:
+        """Merge `df` into the cached pair, newest copy of a duplicate ts winning.
+
+        Locked and atomic for the reason nakagai/filelock.py exists: this is a
+        read-concat-write, and an unlocked one silently keeps only whichever
+        writer finished last. The scan loop, a backfill, and the proving farm
+        can all touch one pair, and a lost bar reads downstream as "this play
+        does not trade much" rather than as data loss. append_parquet is not
+        reusable here because it concatenates with ignore_index=True, and this
+        cache is indexed by ts and dedupes on that index.
+        """
         if "interpolated" in df.columns:
             df = df[df["interpolated"] != True]  # noqa: E712 (spec: fake gap-fill bars never enter the cache)
         df = validate_bars(df)
-        existing = self.load(symbol, timeframe)
-        merged = pd.concat([existing, df])
-        merged = merged[~merged.index.duplicated(keep="last")].sort_index()
-        merged.to_parquet(self.path(symbol, timeframe))
+        path = self.path(symbol, timeframe)
+        with file_lock(path):
+            existing = self.load(symbol, timeframe)
+            merged = pd.concat([existing, df])
+            merged = merged[~merged.index.duplicated(keep="last")].sort_index()
+            tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+            try:
+                merged.to_parquet(tmp)
+                os.replace(tmp, path)
+            finally:
+                tmp.unlink(missing_ok=True)
         return len(df)
 
     def coverage(self, symbol: str, timeframe: str) -> tuple[pd.Timestamp, pd.Timestamp] | None:
