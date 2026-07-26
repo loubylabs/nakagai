@@ -32,3 +32,6 @@ packages = ["nakagai"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "slow: statistical tests that replay hundreds of backtests. Excluded from a default run with -m 'not slow'; CI runs them.",
+]
