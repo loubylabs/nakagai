@@ -94,16 +94,25 @@ def _set(node, path: tuple, value) -> None:
 
 def _perturb(value, kind: str, rng) -> float | int:
     """Move one literal. Multiplicative rather than additive, so a period of
-    200 and a period of 14 both move by a comparable proportion."""
+    200 and a period of 14 both move by a comparable proportion.
+
+    The no-op guard must run AFTER clamping, not before: a draw can land
+    outside the valid range, get pulled back to the boundary by the clamp,
+    and land exactly back on the original value without ever having equalled
+    it pre-clamp. Checking the clamped result is what actually catches that."""
     if kind == "period":
         moved = int(round(value * float(rng.uniform(0.5, 1.8))))
+        moved = max(PERIOD_MIN, min(PERIOD_MAX, moved))
         if moved == value:                      # a jitter that changed nothing
-            moved = value + 1                   # is a wasted trial
-        return max(PERIOD_MIN, min(PERIOD_MAX, moved))
+            moved = moved - 1 if moved >= PERIOD_MAX else moved + 1
+        return moved
     if kind == "threshold":
         return round(float(value) * float(rng.uniform(0.6, 1.4)), 4)
     if kind in ("mult", "rr"):
-        return round(max(RISK_MIN, float(value) * float(rng.uniform(0.5, 2.0))), 3)
+        moved = round(max(RISK_MIN, float(value) * float(rng.uniform(0.5, 2.0))), 3)
+        if moved == value:                      # is a wasted trial
+            moved = round(moved + 0.001, 3)      # no upper clamp, so nudging up is always safe
+        return moved
     raise ValueError(f"unknown site kind {kind!r}")
 
 

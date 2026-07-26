@@ -130,3 +130,24 @@ def test_literal_trials_refuses_a_spec_with_nothing_to_move():
     with pytest.raises(ValueError, match="no mutable"):
         literal_trials({"version": 2, "name": "x", "timeframe": "1h"},
                        n=3, seed=1)
+
+
+def test_literal_trials_raises_when_the_mutant_space_is_exhausted():
+    # One mutable site: a period pinned at PERIOD_MIN. Its reachable,
+    # post-clamp, post-no-op-guard values are only {3, 4}, a two-element
+    # space, so a third distinct mutant can never be produced. The rhs is an
+    # expression (not a bare number) and risk is left out entirely (so
+    # validate_risk falls back to its own in-range defaults), which keeps
+    # this the *only* mutable literal in the spec.
+    tiny = {
+        "version": 2,
+        "name": "tiny",
+        "timeframe": "1h",
+        "long": {"all": [
+            {"lhs": {"ind": "rsi", "n": 2}, "op": ">", "rhs": {"src": "close"}},
+        ]},
+    }
+    assert validate_spec(tiny) == []
+    assert len(mutable_sites(tiny)) == 1
+    with pytest.raises(ValueError, match="could only build"):
+        literal_trials(tiny, n=3, seed=1)
