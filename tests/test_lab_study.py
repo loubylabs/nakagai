@@ -1,5 +1,10 @@
 """The study statistic and the frozen trial set that uses it."""
 
+import json
+import subprocess
+import sys
+import textwrap
+
 import pandas as pd
 import pytest
 
@@ -146,3 +151,45 @@ def test_run_study_rejects_an_empty_trial_set():
                       windows=tuple(short_windows(frames, "TEST")), seed=1)
     with pytest.raises(ValueError, match="at least one trial"):
         run_study(memory_cache(frames), empty, lab_registry())
+
+
+_DETERMINISM_SCRIPT = textwrap.dedent("""
+    import json
+    from nakagai.lab.mutate import literal_trials
+    from nakagai.lab.study import StudySpec, run_study
+    from tests.lab_helpers import (BASE_SPEC, lab_registry, memory_cache,
+                                   random_walk_frames, short_windows)
+
+    frames = random_walk_frames("TEST", seed=2)
+    study = StudySpec(trials=tuple(literal_trials(BASE_SPEC, n=4, seed=1)),
+                      symbols=("TEST",),
+                      windows=tuple(short_windows(frames, "TEST")),
+                      seed=1)
+    out = run_study(memory_cache(frames), study, lab_registry())
+    print(json.dumps([[r.trial_id, r.spec_hash, r.pf, r.n_trades]
+                      for r in out.results]))
+""")
+
+
+def _in_subprocess() -> list:
+    proc = subprocess.run([sys.executable, "-c", _DETERMINISM_SCRIPT],
+                          capture_output=True, text=True, check=True)
+    return json.loads(proc.stdout)
+
+
+def test_a_study_is_identical_across_process_boundaries():
+    # PYTHONHASHSEED differs between interpreter runs by default. A digest or
+    # an iteration order that leaked into the result would diverge here and
+    # nowhere else.
+    assert _in_subprocess() == _in_subprocess()
+
+
+def test_the_subprocess_agrees_with_this_process():
+    frames = random_walk_frames("TEST", seed=2)
+    study = StudySpec(trials=tuple(literal_trials(BASE_SPEC, n=4, seed=1)),
+                      symbols=("TEST",),
+                      windows=tuple(short_windows(frames, "TEST")),
+                      seed=1)
+    here = [[r.trial_id, r.spec_hash, r.pf, r.n_trades]
+            for r in run_study(memory_cache(frames), study, lab_registry()).results]
+    assert here == _in_subprocess()
