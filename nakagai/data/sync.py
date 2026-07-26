@@ -38,17 +38,29 @@ def fetch_incremental(cache: BarCache, provider: DataProvider, symbol: str,
 def fetch_incremental_multi(cache: BarCache, provider, symbols: list[str],
                             timeframe: str, start: pd.Timestamp, end: pd.Timestamp,
                             full: bool = False) -> dict[str, int]:
-    """Batch counterpart to fetch_incremental: one provider round trip for many
-    symbols, then a locked upsert per symbol. Returns symbol -> rows upserted.
+    """Batch counterpart to fetch_incremental: batched provider round trips for
+    many symbols, then a locked upsert per symbol. Returns symbol -> rows
+    upserted.
 
-    One request carries one start, and symbols resume at different points, so
-    the batch starts at the EARLIEST resume point across the group and lets
-    upsert dedupe the overlap (it keeps the newer copy of a duplicate ts).
-    Refetching a few bars for the symbols that were already caught up is far
-    cheaper than one request per symbol, which is the cost this function exists
-    to remove. A symbol with no cache, or one whose history starts after the
-    requested start, forces the full range the same way fetch_incremental does,
-    so widening the window still backfills.
+    One request carries one start while symbols resume at different points, so
+    the symbols are PARTITIONED rather than reduced to a single min():
+
+    - warm (a cached span covering `start`) share one call beginning at the
+      earliest of their last bars, and upsert dedupes the small overlap;
+    - cold (no cache, or history starting after `start`) share one call over the
+      full range, the same backfill fetch_incremental would do.
+
+    Partitioning rather than min()-ing everything is not a micro-optimization,
+    it is the difference between batching working and not. A single cold symbol
+    contributes `start` itself, so one min() across the whole group drags every
+    warm symbol back to the full window on EVERY cycle. Measured on the 101-name
+    house universe: one symbol with no IEX bars (MMC) turned a near-empty
+    incremental into a 40-day refetch for all 101, and the warm cycle cost the
+    same as a cold backfill.
+
+    Symbols are not bucketed more finely than warm/cold on purpose. The overlap
+    within the warm group is bounded by how stale its laggard is, which is one
+    cycle in steady state, and more groups means more requests.
 
     `provider` must expose fetch_bars_multi (AlpacaProvider does); this is
     deliberately not typed as DataProvider, whose contract is the single-symbol
@@ -57,16 +69,27 @@ def fetch_incremental_multi(cache: BarCache, provider, symbols: list[str],
     wanted = list(dict.fromkeys(s.upper() for s in symbols if s))
     if not wanted:
         return {}
-    fetch_start = start
-    if not full:
-        resume = []
+    if full:
+        groups = [(start, wanted)]
+    else:
+        warm: dict[str, pd.Timestamp] = {}
+        cold: list[str] = []
         for sym in wanted:
             span = cache.coverage(sym, timeframe)
-            resume.append(span[1] if span is not None and start >= span[0] else start)
-        fetch_start = min(resume)
-    frames = provider.fetch_bars_multi(wanted, timeframe, fetch_start, end)
-    written: dict[str, int] = {}
-    for sym in wanted:
-        df = frames.get(sym)
-        written[sym] = 0 if df is None or df.empty else cache.upsert(sym, timeframe, df)
+            if span is not None and start >= span[0]:
+                warm[sym] = span[1]
+            else:
+                cold.append(sym)
+        groups = []
+        if warm:
+            groups.append((min(warm.values()), list(warm)))
+        if cold:
+            groups.append((start, cold))
+    written: dict[str, int] = dict.fromkeys(wanted, 0)
+    for group_start, group in groups:
+        frames = provider.fetch_bars_multi(group, timeframe, group_start, end)
+        for sym in group:
+            df = frames.get(sym)
+            if df is not None and not df.empty:
+                written[sym] = cache.upsert(sym, timeframe, df)
     return written
