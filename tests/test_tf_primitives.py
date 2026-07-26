@@ -104,3 +104,44 @@ def test_validate_rejects_tf_on_day_of_week():
 def test_validate_still_accepts_tf_on_structural_prim():
     assert validate_spec(_spec({"lhs": {"prim": "swing_high", "k": 3, "tf": "1h"},
                                 "op": "<", "rhs": {"src": "close"}})) == []
+
+
+def test_validate_rejects_session_prim_inside_tf_bars_since():
+    errs = validate_spec(_spec({"lhs": {"prim": "bars_since", "tf": "1d",
+                                        "cond": {"lhs": {"prim": "day_of_week"},
+                                                 "op": "<", "rhs": 1}},
+                                "op": "<=", "rhs": 1}))
+    assert any("day_of_week is session-scoped and cannot sit inside a bars_since with tf" in e
+               for e in errs)
+
+
+def test_validate_rejects_session_prim_nested_deep_in_tf_bars_since():
+    inner = {"prim": "bars_since",
+             "cond": {"lhs": {"prim": "minutes_into_session"}, "op": ">", "rhs": 30}}
+    errs = validate_spec(_spec({"lhs": {"prim": "bars_since", "tf": "1h",
+                                        "cond": {"lhs": inner, "op": "<=", "rhs": 2}},
+                                "op": "<=", "rhs": 6}))
+    assert any("minutes_into_session is session-scoped" in e for e in errs)
+
+
+def test_validate_accepts_structural_prims_inside_tf_bars_since():
+    assert validate_spec(_spec({"lhs": {"prim": "bars_since", "tf": "1h",
+                                        "cond": {"lhs": {"src": "close"}, "op": ">",
+                                                 "rhs": {"prim": "swing_high", "k": 3}}},
+                                "op": "<=", "rhs": 6})) == []
+
+
+def test_validate_accepts_session_prim_in_untf_bars_since():
+    assert validate_spec(_spec({"lhs": {"prim": "bars_since",
+                                        "cond": {"lhs": {"prim": "day_of_week"},
+                                                 "op": "<", "rhs": 1}},
+                                "op": "<=", "rhs": 1})) == []
+
+
+def test_validate_survives_adversarially_deep_bars_since_cond():
+    deep = {"lhs": {"src": "close"}, "op": ">", "rhs": 1}
+    for _ in range(3000):
+        deep = {"lhs": deep, "op": ">", "rhs": 1}
+    errs = validate_spec(_spec({"lhs": {"prim": "bars_since", "tf": "1h", "cond": deep},
+                                "op": "<=", "rhs": 1}))
+    assert errs  # rejected with validation errors, never a crash

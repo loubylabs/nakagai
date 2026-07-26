@@ -126,7 +126,14 @@ def order_block(ctx: MarketContext, bars: pd.DataFrame,
 
 
 def day_of_week(ctx: MarketContext, bars: pd.DataFrame) -> pd.Series:
-    return pd.Series(bars.index.tz_convert(NY).dayofweek.astype(float), index=bars.index)
+    """Weekday of each bar's session, 0 = Monday. Intraday labels convert to
+    NY time; session-aligned daily bars are labeled midnight UTC of their
+    session date, where the NY conversion would land on the prior evening,
+    so exact-midnight labels read the UTC calendar day instead."""
+    idx = bars.index
+    midnight_utc = (idx.hour == 0) & (idx.minute == 0)
+    dow = np.where(midnight_utc, idx.dayofweek, idx.tz_convert(NY).dayofweek)
+    return pd.Series(dow.astype(float), index=idx)
 
 
 def minutes_into_session(ctx: MarketContext, bars: pd.DataFrame) -> pd.Series:
@@ -202,8 +209,9 @@ PRIMITIVES: dict[str, dict] = {
 # "1d" bars (one bar per session) never sees its window elapse and is NaN
 # forever, on "1h" bars a minutes=30 window is measured in whole-hour steps;
 # minutes_into_session on "1d" bars is 0 everywhere (one bar per session group);
-# day_of_week on "1d" bars is off by one because those bars are labeled at
-# midnight UTC, which rolls back a day once converted to NY. These primitives
+# day_of_week reads calendar identity that belongs to the spec's own session,
+# so answering it from a foreign frame is a category error even though the
+# primitive itself now handles midnight-UTC daily labels. These primitives
 # must always run on the spec's own driving bars, so `tf` is rejected outright.
 SESSION_SCOPED_PRIMS = frozenset({
     "opening_range_high", "opening_range_low", "minutes_into_session", "day_of_week",

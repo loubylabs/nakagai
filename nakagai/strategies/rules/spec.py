@@ -96,6 +96,27 @@ def _check_args(name: str, given: dict, schema: dict, path: str, errs: list[str]
                 errs.append(f"{path}: {name}.{arg} must be a number in [{lo}, {hi}], got {v!r}")
 
 
+def _session_prims_in(node) -> set[str]:
+    """Session-scoped primitive names appearing anywhere in an expression tree.
+    Iterative walk with a seen set: this runs before the shape checks bound
+    depth, so it must not recurse or loop on adversarially deep input."""
+    found: set[str] = set()
+    stack, seen = [node], set()
+    while stack:
+        item = stack.pop()
+        if id(item) in seen:
+            continue
+        if isinstance(item, dict):
+            seen.add(id(item))
+            if item.get("prim") in SESSION_SCOPED_PRIMS:
+                found.add(item["prim"])
+            stack.extend(item.values())
+        elif isinstance(item, list):
+            seen.add(id(item))
+            stack.extend(item)
+    return found
+
+
 def _check_tf(node: dict, path: str, errs: list[str],
               allowed_extra: tuple[str, ...] = ()) -> None:
     """Rejects a `tf` not in TIMEFRAMES, and (for src leaves) any extra key
@@ -172,6 +193,12 @@ def _check_expr(node, path: str, errs: list[str], budget: _Budget,
                 errs.append(f"{path}: bars_since conditions use comparison ops only")
             else:
                 _check_condition(cond, f"{path}.cond", errs, budget, depth + 1)
+            if "tf" in node and isinstance(cond, dict):
+                # A tf'd bars_since evaluates its cond on that frame, which
+                # would smuggle session-scoped prims onto a foreign timeframe.
+                for bad in sorted(_session_prims_in(cond)):
+                    errs.append(f"{path}: {bad} is session-scoped and cannot "
+                                f"sit inside a bars_since with tf")
             _check_args(name, node, {}, path, errs, skip=("prim", "cond", "tf"))
         else:
             _check_args(name, node, schema, path, errs, skip=("prim", "tf"))
