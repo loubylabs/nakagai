@@ -113,14 +113,63 @@ def test_multi_widens_to_the_earliest_resume_point(tmp_path, make_bars):
     assert written == {"AAPL": 2, "MSFT": 4}
 
 
-def test_multi_forces_the_full_range_when_any_symbol_has_no_cache(tmp_path, make_bars):
-    """An uncached symbol needs everything, and it shares the request, so the
-    group's start collapses to the requested start."""
+def test_multi_partitions_cold_symbols_instead_of_widening_the_warm_batch(tmp_path, make_bars):
+    """One uncached symbol must not drag the caught-up ones back to the full range.
+
+    This was measured, not imagined. With min() taken across the whole group, a
+    single symbol Alpaca has no bars for (MMC, on the 101-name house universe)
+    contributed `start` itself, so EVERY cycle refetched 40 days for all 101
+    symbols and the batching bought almost nothing. Two batched calls, one per
+    partition, keeps the warm group's window tiny.
+    """
     cache = BarCache(tmp_path)
     cache.upsert("AAPL", "15m", make_bars(4))
-    p = CapturingMultiProvider({"AAPL": make_bars(1), "NEW": make_bars(1)})
-    fetch_incremental_multi(cache, p, ["AAPL", "NEW"], "15m", START, END)
+    cache.upsert("MSFT", "15m", make_bars(4))
+    warm_resume = cache.coverage("AAPL", "15m")[1]
+
+    p = CapturingMultiProvider({"AAPL": make_bars(1), "MSFT": make_bars(1),
+                                "COLD": make_bars(1)})
+    fetch_incremental_multi(cache, p, ["AAPL", "MSFT", "COLD"], "15m", START, END)
+
+    assert len(p.calls) == 2, "one call for the warm group, one for the cold"
+    by_start = {call[2]: set(call[0]) for call in p.calls}
+    assert by_start[warm_resume] == {"AAPL", "MSFT"}, "warm group resumed at its own last bar"
+    assert by_start[START] == {"COLD"}, "only the cold symbol pays the full range"
+
+
+def test_multi_makes_one_call_when_every_symbol_is_warm(tmp_path, make_bars):
+    """No cold partition means no second request, and the shared start is the
+    EARLIEST warm resume point so no symbol is left with a hole."""
+    cache = BarCache(tmp_path)
+    cache.upsert("AAPL", "15m", make_bars(4))       # ...through 14:15
+    cache.upsert("MSFT", "15m", make_bars(2))       # ...through 13:45, the laggard
+    msft_last = cache.coverage("MSFT", "15m")[1]
+    assert msft_last < cache.coverage("AAPL", "15m")[1]     # premise
+
+    p = CapturingMultiProvider({"AAPL": make_bars(1), "MSFT": make_bars(1)})
+    fetch_incremental_multi(cache, p, ["AAPL", "MSFT"], "15m", START, END)
+    assert len(p.calls) == 1
+    assert p.calls[0][2] == msft_last
+
+
+def test_multi_makes_one_call_when_every_symbol_is_cold(tmp_path, make_bars):
+    cache = BarCache(tmp_path)
+    p = CapturingMultiProvider({"A": make_bars(1), "B": make_bars(1)})
+    written = fetch_incremental_multi(cache, p, ["A", "B"], "15m", START, END)
+    assert len(p.calls) == 1
     assert p.calls[0][2] == START
+    assert written == {"A": 1, "B": 1}
+
+
+def test_multi_treats_a_start_before_cached_history_as_cold(tmp_path, make_bars):
+    """Widening the configured start must still backfill, so a symbol whose
+    history begins after the requested start belongs in the cold partition."""
+    cache = BarCache(tmp_path)
+    cache.upsert("AAPL", "15m", make_bars(4))                    # starts 13:30
+    earlier = pd.Timestamp("2026-05-01", tz="UTC")
+    p = CapturingMultiProvider({"AAPL": make_bars(1)})
+    fetch_incremental_multi(cache, p, ["AAPL"], "15m", earlier, END)
+    assert p.calls[0][2] == earlier
 
 
 def test_multi_upserts_nothing_for_an_empty_frame(tmp_path):
