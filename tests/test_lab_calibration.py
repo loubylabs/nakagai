@@ -14,10 +14,17 @@ in estimate. The actual measured wall clock for both tests together was
 1439 seconds, roughly 24 minutes: budget for that before running this file.
 
 Two symbols are pooled per replicate, not one: a single-symbol trial places
-only 19 to 24 trades, thin enough to produce lumpy profit factors, frequent
+roughly 3 to 26 trades (measured on BASE_SPEC itself, not its mutants, which
+trade differently), thin enough to produce lumpy profit factors, frequent
 PF_CLAMP hits, and tied p-values that would corrupt the uniformity this test
 measures. TEST and TEST2, built from independent seeds and merged, push a
-trial to roughly 37 to 39 trades.
+trial's pooled count to roughly 7 to 50 with a median near 24 (again on the
+mutants literal_trials actually generates, not BASE_SPEC). Pooling roughly
+doubles the count and reduces the thin-ledger lumpiness; it does not
+eliminate it, since several trials still land below 20 pooled trades. The
+override of the brief's symbols=("TEST",) was still the right call; only the
+earlier trade-count figures quoted for it (19 to 24 single, 37 to 39 pooled)
+were overstated.
 
 Marked slow: each replicate replays hundreds of backtests. Run with
 `uv run pytest -m slow tests/test_lab_calibration.py -v`.
@@ -74,6 +81,14 @@ def _run_replicate(frames, seed: int) -> _Replicate | None:
         return None
     nulls = best_of_n_null(frames, study, registry, PERMUTATIONS,
                            epoch=f"cal-{seed}")
+    # total_trades sums n_trades across every trial in the set (all TRIALS of
+    # them), while observed.best.pf comes from a single trial, so the two are
+    # a roughly 4x mismatch at TRIALS = 4 (e.g. 84 pooled trades total versus
+    # 21 for the winning trial alone on replicate 0). Harmless at
+    # min_trades=1, verbatim from the brief, but it would silently defeat the
+    # trade floor if min_trades were ever raised in this file: a study could
+    # clear the floor on the OTHER trials' trade counts while the best trial
+    # itself traded on a near-empty ledger.
     total_trades = sum(r.n_trades for r in observed.results)
     # min_trades=1 deliberately: calibration is measuring the p-value
     # DISTRIBUTION, and the production trade floor would refuse most replicates
@@ -121,9 +136,25 @@ def test_p_values_are_uniform_on_pure_noise():
         f"says nothing. Lengthen the bars or loosen BASE_SPEC's entry.")
 
     mean_p = statistics.fmean(ps)
-    # Under a correct null p is uniform, so the mean is 0.5. A null that is too
-    # permissive drags this toward 0; one that is too conservative pushes it
-    # toward 1.
+    # Under a correct null p is uniform, so the mean is 0.5 in the continuous
+    # limit. A null that is too permissive drags this toward 0; one that is
+    # too conservative pushes it toward 1.
+    #
+    # At PERMUTATIONS = 16 the bias-corrected p-value actually lives on a
+    # 17-point grid of k/17 (k = 0..16), so the exact expectation under a
+    # correct null is E[p] = 9/17 = 0.5294, not 0.5. A 200k-run simulation of
+    # 24 draws from that grid gives SE(mean_p) = 0.0588, which puts the
+    # inherited [0.35, 0.65] band (sized in the brief for 40 replicates, not
+    # 24) asymmetric around the true expectation: the lower edge (0.35) sits
+    # 3.05 SE below it, the upper edge (0.65) only 2.05 SE above it. The
+    # resulting spurious-failure rate on correct code is about 3% overall:
+    # roughly 1.95% high (mean_p exceeds 0.65, the closer bound), 0.08% low
+    # (mean_p falls below 0.35, the farther bound), plus about 1.4% from the
+    # tail-fraction band below. Nearly all of that residual risk sits on the
+    # "too conservative" (mean_p too high) side, which is exactly the
+    # direction a reader would misread as a real defect in the null rather
+    # than sampling noise at this N. Bounds are left as-is per the brief;
+    # this is a known property, not a defect.
     assert 0.35 <= mean_p <= 0.65, (
         f"mean p-value {mean_p:.3f} over {len(ps)} noise replicates. The "
         f"best-of-N null is miscalibrated: p should be uniform when there is "
