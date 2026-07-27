@@ -177,6 +177,46 @@ def test_verdict_refutes_an_ordinary_result():
     assert out["reason"] == "p_value above alpha"
 
 
+def test_alpha_actually_gates_survival():
+    # The p-value does not change with alpha, only how it is judged. Score
+    # the SAME observed/null pair twice, differing only in alpha, so the
+    # only thing that can explain a different verdict is alpha itself. An
+    # implementation that hardcoded 0.05 and ignored the parameter would
+    # refuse both calls.
+    observed, nulls = 1.05, [1.0, 1.1, 0.9, 1.2, 1.5]
+    refuted = study_verdict(observed, nulls, n_trades=40, alpha=0.05)
+    survived = study_verdict(observed, nulls, n_trades=40, alpha=0.7)
+    assert refuted["p_value"] == survived["p_value"]
+    assert refuted["survived"] is False
+    assert survived["survived"] is True
+    assert survived["reason"] == "survived"
+
+
+def test_verdict_survives_at_the_alpha_boundary():
+    # p == alpha is deliberately inclusive: the check is p <= alpha, not
+    # p < alpha. Pinned on purpose so a future reader does not "tidy" this
+    # into a strict comparison, which would silently raise the bar and
+    # refuse every study that lands exactly at alpha.
+    out = study_verdict(9.0, [1.0] * 19, n_trades=40)
+    assert out["p_value"] == 0.05
+    assert out["survived"] is True
+    assert out["reason"] == "survived"
+
+
+def test_verdict_trade_floor_boundary_is_inclusive():
+    # n_trades == min_trades is sufficient, matching "twenty trades is the
+    # floor" on the thin-ledger test below: the floor itself counts, it is
+    # not the first refused value. Bracket the boundary from both sides on
+    # the same observed/null pair so only n_trades differs between calls.
+    observed, nulls = 5.0, [1.0] * 24
+    just_under = study_verdict(observed, nulls, n_trades=19)
+    at_floor = study_verdict(observed, nulls, n_trades=20)
+    assert just_under["survived"] is False
+    assert just_under["reason"] == "too few trades"
+    assert at_floor["survived"] is True
+    assert at_floor["reason"] == "survived"
+
+
 def test_verdict_refutes_a_thin_ledger_however_significant():
     # Twenty trades is the floor the proving verdict already uses. A PF built
     # on three trades is not evidence, no matter where it sits in the null.

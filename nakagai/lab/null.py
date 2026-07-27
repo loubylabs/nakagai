@@ -70,9 +70,9 @@ def best_of_n_null(frames: dict, study: StudySpec, registry,
     return nulls
 
 
-# Mirrors DEFAULT_PROVING["min_trades"] in the platform's proving.py. The lab
-# never imports the platform, so the floor is a parameter carrying the same
-# default rather than a shared constant.
+# Mirrors DEFAULT_PROVING["verdict"]["min_trades"] in the platform's
+# proving.py. The lab never imports the platform, so the floor is a parameter
+# carrying the same default rather than a shared constant.
 DEFAULT_MIN_TRADES = 20
 
 
