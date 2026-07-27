@@ -23,23 +23,36 @@ def _session_groups(bars: pd.DataFrame):
 
 
 def opening_range_high(ctx: MarketContext, bars: pd.DataFrame, minutes: int = 30) -> pd.Series:
-    return _opening_range(bars, int(minutes), "high", max)
+    return _opening_range(bars, int(minutes), "high", "max")
 
 
 def opening_range_low(ctx: MarketContext, bars: pd.DataFrame, minutes: int = 30) -> pd.Series:
-    return _opening_range(bars, int(minutes), "low", min)
+    return _opening_range(bars, int(minutes), "low", "min")
 
 
-def _opening_range(bars: pd.DataFrame, minutes: int, col: str, agg) -> pd.Series:
-    out = pd.Series(np.nan, index=bars.index)
-    for _, day in _session_groups(bars):
-        start = day.index[0]
-        window = day[day.index < start + pd.Timedelta(minutes=minutes)]
-        # level exists only once the window has fully elapsed (no lookahead)
-        done = day.index >= start + pd.Timedelta(minutes=minutes)
-        if done.any():
-            out.loc[day.index[done]] = agg(window[col])
-    return out
+def _opening_range(bars: pd.DataFrame, minutes: int, col: str, how: str) -> pd.Series:
+    """The session's opening-range level, NaN until the range has fully elapsed.
+
+    Fully vectorized, and it has to stay that way. This runs once per replayed
+    bar, so the per-session Python loop it replaced made a window replay
+    O(sessions x bars) and grew heavier every month as history accumulated. At
+    three years of 15m bars that loop cost ~90ms per call against ~2.6ms here,
+    which is what put permutation testing out of reach: a single 638-bar window
+    spent minutes inside this function alone. tests/test_primitives.py guards
+    both the shape of the answer and the cost.
+    """
+    if not len(bars.index):
+        return pd.Series(np.nan, index=bars.index, dtype="float64")
+    days = _ny_dates(bars)
+    ts = pd.Series(bars.index, index=bars.index)
+    # Each session's range is measured from ITS OWN first bar, not from a wall
+    # clock: a late open or a half day has to measure from where it actually
+    # started, which is why this is a groupby-first rather than a fixed time.
+    edge = ts.groupby(days).transform("first") + pd.Timedelta(minutes=minutes)
+    level = bars[col].where(ts < edge).groupby(days).transform(how)
+    # No lookahead: the level is invisible until its own window has elapsed, so
+    # a session that closes inside the range never gets one.
+    return level.where(ts >= edge).rename(None)
 
 
 def _prev_session(bars: pd.DataFrame, col: str, agg) -> pd.Series:
