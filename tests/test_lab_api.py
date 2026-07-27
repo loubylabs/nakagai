@@ -8,9 +8,10 @@ import textwrap
 def test_public_api_is_importable_from_the_package_root():
     import nakagai.lab as lab
 
-    for name in ("Trial", "literal_trials", "composite_trials", "spec_hash",
-                 "StudySpec", "StudyResult", "TrialResult", "run_study",
-                 "trial_pf", "best_of_n_null", "study_verdict"):
+    for name in ("Site", "Trial", "literal_trials", "composite_trials",
+                 "mutable_sites", "spec_hash", "StudySpec", "StudyResult",
+                 "TrialResult", "run_study", "trial_pf", "best_of_n_null",
+                 "study_verdict"):
         assert hasattr(lab, name), f"nakagai.lab is missing {name}"
 
 
