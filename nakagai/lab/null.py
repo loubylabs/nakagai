@@ -18,6 +18,7 @@ from nakagai.data.cache import MemoryBars
 from nakagai.data.schema import DEFAULT_TIMEFRAMES, TimeframeSet
 from nakagai.engine.permutation import permutation_seed, permute_bars
 from nakagai.lab.study import StudySpec, trial_pf
+from nakagai.stats import permutation_pvalue
 
 
 def best_of_n_null(frames: dict, study: StudySpec, registry,
@@ -67,3 +68,36 @@ def best_of_n_null(frames: dict, study: StudySpec, registry,
             best = max(best, pf)
         nulls.append(float(best))
     return nulls
+
+
+# Mirrors DEFAULT_PROVING["min_trades"] in the platform's proving.py. The lab
+# never imports the platform, so the floor is a parameter carrying the same
+# default rather than a shared constant.
+DEFAULT_MIN_TRADES = 20
+
+
+def study_verdict(observed_pf: float | None, nulls: list[float], *,
+                  alpha: float = 0.05, min_trades: int = DEFAULT_MIN_TRADES,
+                  n_trades: int = 0) -> dict:
+    """Score the observed best against the best-of-N null.
+
+    Fails closed in every direction: no nulls, no observed value, or a ledger
+    thinner than the floor all refute. A study that could not be scored is not
+    a study that passed.
+    """
+    out = {"p_value": None, "survived": False, "n_permutations": len(nulls),
+           "observed_pf": observed_pf, "reason": ""}
+    if observed_pf is None or n_trades < min_trades:
+        out["reason"] = "too few trades"
+        return out
+    if not nulls:
+        out["reason"] = "no null distribution"
+        return out
+    p = permutation_pvalue(observed_pf, nulls)
+    out["p_value"] = p
+    if p is not None and p <= alpha:
+        out["survived"] = True
+        out["reason"] = "survived"
+    else:
+        out["reason"] = "p_value above alpha"
+    return out

@@ -139,3 +139,64 @@ def test_null_rejects_an_empty_trial_set():
                       windows=tuple(short_windows(frames, "TEST")), seed=1)
     with pytest.raises(ValueError, match="at least one trial"):
         best_of_n_null(frames, empty, lab_registry(), n_permutations=3)
+
+
+from nakagai.lab.null import study_verdict
+
+
+def test_verdict_survives_a_clear_winner():
+    # 24 nulls, mirroring the PERMUTATIONS count Task 11 uses for the same
+    # reason: with N nulls the smallest reachable p-value is 1/(N+1), and
+    # 1/25 = 0.04 sits comfortably inside the default alpha of 0.05 rather
+    # than exactly on the boundary where float equality would decide it.
+    nulls = [1.0] * 24
+    out = study_verdict(2.5, nulls, n_trades=40)
+    assert out["survived"] is True
+    assert out["p_value"] == (1 + 0) / (24 + 1)
+    assert out["reason"] == "survived"
+
+
+def test_verdict_cannot_survive_with_too_few_permutations():
+    # The smallest p-value a permutation test can report is 1/(N+1), so N
+    # must be at least 19 before alpha=0.05 is reachable at all. A study that
+    # runs too few permutations cannot produce a survivor no matter how large
+    # its edge, even a decisive one like an observed PF of 2.5 against a
+    # null clustered at 1.0. This is the exact shape of test data that once
+    # sat in test_verdict_survives_a_clear_winner: 5 nulls give a floor of
+    # 1/6, which can never clear alpha=0.05, so that test's expectation of
+    # survival was self-contradictory rather than merely unlucky.
+    out = study_verdict(2.5, [1.0, 1.1, 0.9, 1.2, 1.05], n_trades=40)
+    assert out["survived"] is False
+    assert out["reason"] == "p_value above alpha"
+    assert out["p_value"] == (1 + 0) / (5 + 1)
+
+
+def test_verdict_refutes_an_ordinary_result():
+    out = study_verdict(1.05, [1.0, 1.1, 0.9, 1.2, 1.5], n_trades=40)
+    assert out["survived"] is False
+    assert out["reason"] == "p_value above alpha"
+
+
+def test_verdict_refutes_a_thin_ledger_however_significant():
+    # Twenty trades is the floor the proving verdict already uses. A PF built
+    # on three trades is not evidence, no matter where it sits in the null.
+    out = study_verdict(5.0, [1.0] * 20, n_trades=3)
+    assert out["survived"] is False
+    assert out["reason"] == "too few trades"
+
+
+def test_verdict_with_no_nulls_cannot_survive():
+    out = study_verdict(2.0, [], n_trades=40)
+    assert out["survived"] is False
+    assert out["p_value"] is None
+    assert out["reason"] == "no null distribution"
+
+
+def test_verdict_with_no_observed_cannot_survive():
+    out = study_verdict(None, [1.0, 1.1], n_trades=0)
+    assert out["survived"] is False
+    assert out["reason"] == "too few trades"
+
+
+def test_verdict_reports_the_permutation_count():
+    assert study_verdict(2.0, [1.0] * 7, n_trades=40)["n_permutations"] == 7
