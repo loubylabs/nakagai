@@ -173,9 +173,15 @@ cache = MemoryBars(frames)
 observed = run_study(cache, study, registry)
 nulls = best_of_n_null(frames, study, registry, n_permutations=200)
 verdict = study_verdict(observed.best.pf, nulls,
-                        n_trades=sum(r.n_trades for r in observed.results))
+                        n_trades=observed.best.n_trades)
 # {"p_value": 0.015, "survived": True, ...}
 ```
+
+`n_trades` is the WINNING trial's ledger, not the sum across the trial set.
+The verdict is a statement about one trial's PF, so the trade floor has to
+apply to that same trial: eight trials making five trades each sum to forty
+and sail past a floor of twenty, while the winner's own record is five trades
+and is noise.
 
 The permutation count sets p-value resolution: 200 permutations resolve to
 0.005. It is also the entire compute cost, scaling as

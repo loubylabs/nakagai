@@ -23,7 +23,8 @@ from nakagai.stats import permutation_pvalue
 
 def best_of_n_null(frames: dict, study: StudySpec, registry,
                    n_permutations: int, *, epoch: str = "",
-                   tfs: TimeframeSet = DEFAULT_TIMEFRAMES) -> list[float]:
+                   tfs: TimeframeSet = DEFAULT_TIMEFRAMES,
+                   on_progress=None, should_cancel=None) -> list[float]:
     """One maximum-across-trials PF per permutation.
 
     The `frames` given here and the `cache` given to `run_study` for the
@@ -57,12 +58,26 @@ def best_of_n_null(frames: dict, study: StudySpec, registry,
     sweeping many base specs at one fixed seed is reusing that one set of
     histories across every sweep member, which correlates the resulting
     p-values rather than drawing each independently.
+
+    `should_cancel`, when given, is consulted before each permutation and
+    `on_progress` is called as on_progress(done, total) after each one. A
+    caller whose should_cancel returns True gets the permutations completed so
+    far, so a list shorter than n_permutations means cancelled.
+
+    Both live here rather than in a caller's own copy of this loop because a
+    permutation count is not resumable: this function always iterates range(n)
+    from zero, so a caller driving it one permutation at a time would replay
+    index 0 every time and collect n copies of one number, which is not a null
+    distribution at all. Neither hook can move a number, since each is
+    consulted outside the statistic's own computation.
     """
     if not study.trials:
         raise ValueError("a study needs at least one trial")
     epoch = epoch or f"study-{study.seed}"
     nulls: list[float] = []
     for i in range(int(n_permutations)):
+        if should_cancel is not None and should_cancel():
+            break
         permuted = {
             (symbol, tf): permute_bars(
                 bars, np.random.default_rng(permutation_seed(symbol, tf, epoch, i)))
@@ -75,6 +90,8 @@ def best_of_n_null(frames: dict, study: StudySpec, registry,
                              registry, tfs=tfs)
             best = max(best, pf)
         nulls.append(float(best))
+        if on_progress is not None:
+            on_progress(i + 1, int(n_permutations))
     return nulls
 
 
