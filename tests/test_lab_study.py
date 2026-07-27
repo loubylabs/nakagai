@@ -9,10 +9,11 @@ import pandas as pd
 import pytest
 
 from nakagai.engine.runner import run_one
-from nakagai.lab.mutate import literal_trials
+from nakagai.lab.mutate import composite_trials, literal_trials
 from nakagai.lab.study import StudySpec, run_study, trial_pf
 from nakagai.stats import pf_from_trades
-from tests.lab_helpers import (BASE_SPEC, lab_registry, memory_cache,
+from nakagai.strategies.catalog import load_catalog
+from tests.lab_helpers import (BASE_SPEC, SPECS_DIR, lab_registry, memory_cache,
                                random_walk_frames, short_windows)
 
 
@@ -151,6 +152,35 @@ def test_run_study_rejects_an_empty_trial_set():
                       windows=tuple(short_windows(frames, "TEST")), seed=1)
     with pytest.raises(ValueError, match="at least one trial"):
         run_study(memory_cache(frames), empty, lab_registry())
+
+
+def test_run_study_scores_composite_trials_end_to_end():
+    # composite_trials had validation-only coverage on the branch: Tasks 6,
+    # 7, 9, and 11 all ran literal_trials output through the study path, and
+    # nothing crossed the "composite" seam tests/lab_helpers.py's registry
+    # binds. This takes composite_trials output through run_study, the same
+    # path a real study takes. Kept cheap (3 trials, 2 windows, no
+    # permutations) since this file is already the slowest in the suite.
+    #
+    # Composite trials can legitimately tie on profit factor: a manual probe
+    # during review scored two of three trials identically. So this does not
+    # assert the results are pairwise distinct, only that the run produced a
+    # non-degenerate result (every trial scored, and at least one traded).
+    frames = random_walk_frames("TEST", seed=2)
+    members = load_catalog(SPECS_DIR)
+    trials = composite_trials(sorted(members), n=3, seed=5, members=members)
+    study = StudySpec(trials=tuple(trials), symbols=("TEST",),
+                      windows=tuple(short_windows(frames, "TEST", count=2)),
+                      seed=5)
+
+    out = run_study(memory_cache(frames), study, lab_registry())
+
+    assert out.n_trials == 3
+    assert {r.trial_id for r in out.results} == {t.id for t in trials}
+    for r in out.results:
+        assert isinstance(r.pf, float) and r.pf >= 0.0
+        assert isinstance(r.n_trades, int) and r.n_trades >= 0
+    assert any(r.n_trades > 0 for r in out.results)
 
 
 _DETERMINISM_SCRIPT = textwrap.dedent("""
