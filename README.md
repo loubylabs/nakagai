@@ -139,6 +139,50 @@ Two more examples ship in `nakagai/strategies/catalog/specs/`: `rsi_reversion.js
 (mean reversion) and `macd_trend.json` (momentum). `load_catalog(specs_dir)` turns
 every JSON file in a directory like this one into a `RuleStrategy` subclass.
 
+## The lab
+
+`nakagai/lab/` searches strategy space and scores the winner honestly.
+
+A **trial** is a mutated spec, not a parameter set: v2 specs declare no tunable
+params, so the tunable surface is the spec JSON itself. `literal_trials` moves
+the numeric literals inside one spec; `composite_trials` assembles catalog
+plays into composites. Every mutant is validated before it is returned.
+
+A **study** runs a frozen trial set. N is fixed when the study is built and
+cannot grow, because the null below is computed for exactly that N.
+
+The **null** is what makes a survivor mean anything. Running four hundred
+trials and keeping the best one finds noise with a good story; the fix is to
+replay the entire search on permuted bars and take the best across all trials,
+which gives the exact distribution of "best of N when there is nothing there".
+
+```python
+from nakagai.lab import (StudySpec, best_of_n_null, literal_trials,
+                         run_study, study_verdict)
+
+trials = literal_trials(base_spec, n=60, seed=7)
+study = StudySpec(trials=tuple(trials), symbols=("SPY",),
+                  windows=tuple(windows), seed=7)
+
+observed = run_study(cache, study, registry)
+nulls = best_of_n_null(frames, study, registry, n_permutations=200)
+verdict = study_verdict(observed.best.pf, nulls,
+                        n_trades=sum(r.n_trades for r in observed.results))
+# {"p_value": 0.015, "survived": True, ...}
+```
+
+The permutation count sets p-value resolution: 200 permutations resolve to
+0.005. It is also the entire compute cost, scaling as
+`trials x symbols x windows x permutations`.
+
+`tests/test_lab_calibration.py` is the module's real specification. It runs the
+whole pipeline on bars with no exploitable structure and asserts the p-values
+come out uniform, then runs it on bars with a real effect and asserts it is
+found. Run it with `uv run pytest -m slow`. The gate was measured at 24
+replicates, 4 trials by 16 permutations: it took about 24 minutes and the mean
+p-value on pure noise came out 0.5074 against a theoretical 0.5, while the
+positive control detected the real effect at the permutation resolution floor.
+
 ## What is NOT here
 
 This repo does not include the curated Playbook content (the hand-authored
