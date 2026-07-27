@@ -190,6 +190,10 @@ p-value on pure noise came out 0.5074 against an expectation of 9/17
 (approximately 0.5294) at this permutation count, while the positive control
 detected the real effect at the permutation resolution floor.
 
+In CI, the gate runs automatically only when a change touches the lab or the
+core modules it depends on (see `.github/workflows/calibration.yml`);
+otherwise it can be triggered by hand via `workflow_dispatch`.
+
 ## What is NOT here
 
 This repo does not include the curated Playbook content (the hand-authored

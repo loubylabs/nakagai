@@ -1,0 +1,53 @@
+name: Calibration
+
+# This gate replays hundreds of backtests against permuted bars to check that
+# the lab's null distribution still looks like noise; it takes roughly 25
+# minutes, so it only runs against the code its result actually depends on:
+# the lab itself, the engine and data modules it calls into, the strategy
+# registry the trials draw from, nakagai/stats.py, the lab's own tests, and
+# the dependency pins (a numpy/pandas bump is the one realistic way this
+# deterministic gate turns red).
+#
+# NOTE for whoever wires up branch protection: because this workflow is
+# path-filtered, GitHub does not run it (and reports no status at all) on a
+# PR that never touches the paths below. If this job is marked as a REQUIRED
+# status check, such a PR can never merge, because the check never reports.
+# Keep that in mind before requiring it.
+
+on:
+  pull_request:
+    paths:
+      - "nakagai/lab/**"
+      - "nakagai/data/**"
+      - "nakagai/engine/**"
+      - "nakagai/strategies/**"
+      - "nakagai/stats.py"
+      - "tests/test_lab_*.py"
+      - "tests/lab_helpers.py"
+      - "pyproject.toml"
+      - "uv.lock"
+  push:
+    branches: [main]
+    paths:
+      - "nakagai/lab/**"
+      - "nakagai/data/**"
+      - "nakagai/engine/**"
+      - "nakagai/strategies/**"
+      - "nakagai/stats.py"
+      - "tests/test_lab_*.py"
+      - "tests/lab_helpers.py"
+      - "pyproject.toml"
+      - "uv.lock"
+  workflow_dispatch:
+
+jobs:
+  calibration:
+    name: the calibration gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+      - run: uv sync --all-extras
+      - run: uv run pytest -m slow
