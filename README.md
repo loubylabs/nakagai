@@ -156,7 +156,12 @@ trials and keeping the best one finds noise with a good story; the fix is to
 replay the entire search on permuted bars and take the best across all trials,
 which gives the exact distribution of "best of N when there is nothing there".
 
+`cache` must be built over the same bars as `frames`, i.e. `cache =
+MemoryBars(frames)`; otherwise the observed statistic and the null are scored
+on different histories and the resulting p-value means nothing.
+
 ```python
+from nakagai.data.cache import MemoryBars
 from nakagai.lab import (StudySpec, best_of_n_null, literal_trials,
                          run_study, study_verdict)
 
@@ -164,6 +169,7 @@ trials = literal_trials(base_spec, n=60, seed=7)
 study = StudySpec(trials=tuple(trials), symbols=("SPY",),
                   windows=tuple(windows), seed=7)
 
+cache = MemoryBars(frames)
 observed = run_study(cache, study, registry)
 nulls = best_of_n_null(frames, study, registry, n_permutations=200)
 verdict = study_verdict(observed.best.pf, nulls,
@@ -180,8 +186,9 @@ whole pipeline on bars with no exploitable structure and asserts the p-values
 come out uniform, then runs it on bars with a real effect and asserts it is
 found. Run it with `uv run pytest -m slow`. The gate was measured at 24
 replicates, 4 trials by 16 permutations: it took about 24 minutes and the mean
-p-value on pure noise came out 0.5074 against a theoretical 0.5, while the
-positive control detected the real effect at the permutation resolution floor.
+p-value on pure noise came out 0.5074 against an expectation of 9/17
+(approximately 0.5294) at this permutation count, while the positive control
+detected the real effect at the permutation resolution floor.
 
 ## What is NOT here
 

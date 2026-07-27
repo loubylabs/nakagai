@@ -26,6 +26,14 @@ def best_of_n_null(frames: dict, study: StudySpec, registry,
                    tfs: TimeframeSet = DEFAULT_TIMEFRAMES) -> list[float]:
     """One maximum-across-trials PF per permutation.
 
+    The `frames` given here and the `cache` given to `run_study` for the
+    observed statistic must cover the SAME bars, i.e. `cache` should be
+    `MemoryBars(frames)`. Nothing enforces this: the single-`trial_pf`
+    contract ties the observed and the null to the same function, not to the
+    same bars, so a `cache` spanning a different range than `frames` produces
+    a p-value that compares two different histories and means nothing,
+    silently.
+
     `permutation_seed(symbol, tf, epoch, i)` keys on the timeframe as well as
     the symbol, so within one permutation index i, `15m`, `1h`, and `1d` each
     get their OWN independent shuffle rather than one shuffle shared across
