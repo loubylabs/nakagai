@@ -153,6 +153,43 @@ def test_literal_trials_raises_when_the_mutant_space_is_exhausted():
         literal_trials(tiny, n=3, seed=1)
 
 
+import numpy as np
+
+from nakagai.lab.mutate import _perturb
+
+ZERO_THRESHOLD_SPEC = {
+    "version": 2,
+    "name": "zero_thresh",
+    "timeframe": "1h",
+    "long": {"all": [
+        {"lhs": {"ind": "macd", "field": "hist"}, "op": ">", "rhs": 0},
+    ]},
+}
+
+
+def test_perturb_threshold_moves_a_zero_value():
+    # A threshold literal of exactly 0 is idiomatic for this grammar: roc,
+    # zscore, and macd's "hist" field are all zero-centred, and the branch
+    # is multiplicative (value * a random factor), so 0 never moves without
+    # a guard. Regression for the case where all 20000 seeded draws left 0
+    # unmoved.
+    rng = np.random.default_rng(0)
+    for _ in range(20000):
+        assert _perturb(0, "threshold", rng) != 0
+
+
+def test_literal_trials_moves_a_zero_threshold_not_just_its_json_type():
+    # Before the fix, the only reachable "mutant" of a spec whose sole
+    # mutable site is a zero threshold differed from the base only by 0
+    # becoming 0.0: a JSON int/float coercion the seen-set dedupe could not
+    # tell apart from a real move, so literal_trials(n=1) shipped a no-op
+    # trial under an "n distinct valid mutants" guarantee.
+    assert validate_spec(ZERO_THRESHOLD_SPEC) == []
+    assert len(mutable_sites(ZERO_THRESHOLD_SPEC)) == 1
+    trials = literal_trials(ZERO_THRESHOLD_SPEC, n=1, seed=1)
+    assert trials[0].spec["long"]["all"][0]["rhs"] != 0
+
+
 from nakagai.lab.mutate import composite_trials
 from nakagai.strategies.composite.spec import validate_composite_spec
 from nakagai.strategies.catalog import load_catalog

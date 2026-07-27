@@ -108,7 +108,10 @@ def _perturb(value, kind: str, rng) -> float | int:
             moved = moved - 1 if moved >= PERIOD_MAX else moved + 1
         return moved
     if kind == "threshold":
-        return round(float(value) * float(rng.uniform(0.6, 1.4)), 4)
+        moved = round(float(value) * float(rng.uniform(0.6, 1.4)), 4)
+        if moved == value:                       # value 0: no multiplier moves it
+            moved = round(moved + 0.5, 4)        # no clamp here either, so nudging is always safe
+        return moved
     if kind in ("mult", "rr"):
         moved = round(max(RISK_MIN, float(value) * float(rng.uniform(0.5, 2.0))), 3)
         if moved == value:                      # is a wasted trial
