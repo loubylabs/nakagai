@@ -40,7 +40,17 @@ def best_of_n_null(frames: dict, study: StudySpec, registry,
     across trials is kept per permutation: that maximum, not any single
     trial's null, is the distribution a best-of-N observed statistic must be
     compared against.
+
+    When `epoch` is not given, it defaults to `f"study-{study.seed}"`, which
+    depends only on the seed. Two different studies that happen to share a
+    seed therefore draw the identical set of permuted alternate histories:
+    each study's own p-value stays valid on its own, but a researcher
+    sweeping many base specs at one fixed seed is reusing that one set of
+    histories across every sweep member, which correlates the resulting
+    p-values rather than drawing each independently.
     """
+    if not study.trials:
+        raise ValueError("a study needs at least one trial")
     epoch = epoch or f"study-{study.seed}"
     nulls: list[float] = []
     for i in range(int(n_permutations)):
