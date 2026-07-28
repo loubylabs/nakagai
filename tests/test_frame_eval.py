@@ -4,10 +4,12 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from nakagai.data.cache import MemoryBars
 from nakagai.data.schema import DEFAULT_TIMEFRAMES as TFS
-from nakagai.engine.context import closed_before
+from nakagai.engine.context import build_context, closed_before
 from nakagai.strategies.indicators import crossed_above
 from nakagai.strategies.rules.frame_eval import FrameEval
+from nakagai.strategies.rules.primitives import PRIMITIVES
 from tests.whole_frame_oracle import prefix_value
 
 NODES = [
@@ -95,8 +97,11 @@ def test_nothing_visible_yet_is_nan_not_the_last_bar():
 def test_end_anchored_primitive_matches_prefix_over_its_span(node):
     """End-anchored primitives read the tail of the frame they are handed, so
     they are the one node kind a whole-frame pass may not broadcast. Inside the
-    span they must equal the prefix answer row for row; outside it they are NaN
-    rather than a value carried from somewhere else in history."""
+    span they must equal the prefix answer row for row; outside it, on BOTH
+    sides, they are NaN rather than a value carried from somewhere else in
+    history. The rows before the span matter as much as the rows after: each row
+    is computed on its own full prefix, so the span needs no warm-up margin, and
+    a margin would only cost calls no reader can reach."""
     frames = _frames()
     fe = FrameEval(frames, TFS, "SPY")
     fe.set_span("15m", 300, 340)
@@ -105,7 +110,40 @@ def test_end_anchored_primitive_matches_prefix_over_its_span(node):
         now = frames["15m"].index[i] + TFS.step
         want = prefix_value(node, frames, "15m", now, TFS)
         assert (pd.isna(got.iloc[i]) and pd.isna(want)) or got.iloc[i] == want, f"row {i}"
+    assert got.iloc[:300].isna().all()
     assert got.iloc[340:].isna().all()
+
+
+def test_a_point_in_time_context_walks_one_row_not_the_whole_frame(monkeypatch):
+    """build_context's non-replay branch has to declare its span.
+
+    The scanner and the screener build a context per bar against a raw cache,
+    with no replay to bound anything. build_context has already cut the frames
+    at `now`, so the only row those callers can read is the last one. An
+    undeclared span defaults to the whole frame, and the end-anchored branch
+    then calls the primitive once per row of history to produce values nobody
+    reads. Measured on the real three-year 15m SPY cache that took one spec, one
+    symbol, one bar from 0.001s to 11.4s; three end-anchored specs sit in the
+    scan registry, on a 15-minute cron. Every fixture in this suite is a few
+    hundred rows, where the cost is invisible, so assert the row COUNT.
+    """
+    frames = _frames(900)
+    cache = MemoryBars({("SPY", tf): f for tf, f in frames.items()})
+    now = frames["15m"].index[-1] + TFS.step
+    node = {"prim": "fvg_nearest", "direction": "long", "field": "top"}
+    want = prefix_value(node, frames, "15m", now, TFS)
+
+    calls = []
+    real = PRIMITIVES["fvg_nearest"]["fn"]
+    monkeypatch.setitem(PRIMITIVES["fvg_nearest"], "fn",
+                        lambda *a, **k: (calls.append(1), real(*a, **k))[1])
+    ctx = build_context(cache, "SPY", now)
+    got = float(ctx.fe.series(node, "15m").iloc[-1])
+
+    assert len(calls) == 1, (
+        f"walked {len(calls)} rows of a {len(frames['15m'])}-row frame; "
+        "a point-in-time context can only read the last one")
+    assert (pd.isna(got) and pd.isna(want)) or got == want
 
 
 def test_series_is_memoized_per_node():

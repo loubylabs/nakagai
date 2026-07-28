@@ -165,8 +165,12 @@ class FrameEval:
         a = {**PRIM_DEFAULTS.get(name, {}),
              **{k: v for k, v in node.items() if k not in ("prim", "tf")}}
         if name in END_ANCHORED:
+            # Exactly the span, with no warm-up margin in front of it. Row i is
+            # the scalar function called on bars[:i+1], which does its own
+            # `lookback` tail-trim, so a row needs nothing computed before it:
+            # widening the range only calls the function for rows no reader can
+            # reach, at `lookback` extra calls per node per replay.
             lo, hi = self._span(src_tf)
-            lo = max(lo - int(a.get("lookback", 40)), 0)
             part = end_anchored_series(name, None, frame, lo, hi, **a)
             out = pd.Series(np.nan, index=frame.index)
             out.iloc[lo:hi] = part.to_numpy()

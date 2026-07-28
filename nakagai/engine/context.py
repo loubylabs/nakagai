@@ -103,6 +103,18 @@ def build_context(cache: BarCache, symbol: str, now: pd.Timestamp,
     # a scanner or screener has no replay, so it gets one over the cut frames, whose
     # last row IS `now`. Both index the same way, so there is one walker and one set
     # of semantics rather than a point-in-time walker beside a whole-frame one.
-    fe = getattr(cache, "fe", None) or FrameEval(bars, tfs, symbol)
+    fe = getattr(cache, "fe", None)
+    if fe is None:
+        fe = FrameEval(bars, tfs, symbol)
+        # The span is not optional here. A point-in-time caller can only ever
+        # read the LAST row of each frame, because the frames were just cut at
+        # `now`; without a span the end-anchored primitives default to the whole
+        # frame and walk every row of history one at a time to produce values
+        # nobody asks for. Measured on a three-year 15m SPY cache that took one
+        # spec, one symbol, one bar from 0.001s to 11.4s, and the scan registry
+        # holds three end-anchored specs run every 15 minutes.
+        for tf in tfs.all:
+            n = len(bars[tf])
+            fe.set_span(tf, max(n - 1, 0), n)
     return MarketContext(symbol=symbol, now=now, tfs=tfs, bars=bars, fe=fe,
                          cursor={tf: len(bars[tf]) - 1 for tf in tfs.all})
