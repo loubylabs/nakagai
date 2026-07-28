@@ -44,6 +44,24 @@ def _cross_prev(node, v: pd.Series) -> pd.Series:
     Reproduce the broadcast: an end-anchored operand has no honest history to
     shift, so its "previous" value is the current row's.
 
+    That was first kept because it was the old behavior. It is kept now because
+    it is the right reading, and the difference is worth stating so nobody
+    "fixes" it later. fvg_nearest and order_block answer "the nearest such
+    level as of now". Between bar i-1 and bar i the nearest gap can become a
+    DIFFERENT gap at a different price, so L[i-1] is not the same level one bar
+    ago; it is another object. Comparing close[i-1] to L[i-1] and close[i] to
+    L[i] therefore registers a crossing when the level was re-identified and
+    price crossed nothing, which is not the question a trader is asking. The
+    broadcast asks the question they are: did price cross THIS level on this
+    bar. Measured over the catalog corpus (57 plays x 10 symbols x 32 windows),
+    switching to the shifted reading moves 39 of 570 pairs and 42,227 trades
+    to 41,647, all of it inside fvg_bounce, ifvg_reversal, ob_bounce and the
+    smc_confluence composite that contains them.
+
+    Nesting an end-anchored primitive inside a math op would evade the check
+    below and get the shifted reading anyway, so spec._check_condition refuses
+    that shape outright rather than leaving two readings reachable.
+
     What the .shift(1) on everything else preserves, exactly, and what it does
     not:
 

@@ -245,12 +245,14 @@ def _check_expr(node, path: str, errs: list[str], budget: _Budget,
             else:
                 _check_condition(cond, f"{path}.cond", errs, budget, depth + 1)
             if isinstance(cond, dict):
-                # bars_since ffills over the WHOLE mask, so it is the one reader
-                # that looks outside the span the end-anchored primitives are
-                # evaluated over, and outside it they are NaN and the condition
-                # False. The same bar would then count differently depending on
-                # which walk-forward window replayed it, which breaks replay's
-                # contract that the same bars and spec give the same trades.
+                # End-anchored primitives are NaN outside the span they are
+                # evaluated over, so any reader that reaches rows outside it
+                # gets a span-dependent answer: the same bar counts differently
+                # depending on which walk-forward window replayed it, which
+                # breaks replay's contract that the same bars and spec give the
+                # same trades. bars_since is one such reader, because it ffills
+                # over the WHOLE mask. A cross with a nested end-anchored
+                # operand was the other; _check_condition refuses that one.
                 for bad in sorted(_prims_in(cond, END_ANCHORED)):
                     errs.append(f"{path}: {bad} is anchored to the end of the "
                                 f"frame and cannot sit inside a bars_since")
@@ -285,6 +287,34 @@ def _check_condition(cond, path: str, errs: list[str], budget: _Budget,
     _check_expr(cond["lhs"], f"{path}.lhs", errs, budget, depth,
                 series_required=op in CROSS_OPS)
     _check_expr(cond["rhs"], f"{path}.rhs", errs, budget, depth)
+    if op in CROSS_OPS:
+        # series_required only ever inspects the operand's TOP node, so it saw
+        # {"prim": "fvg_nearest"} and not {"op": "*", "args": [that, 1.0]}. The
+        # nested form is not the same rule read from one level down, it is a
+        # different rule:
+        #
+        #   _cross_prev broadcasts an end-anchored operand rather than shifting
+        #   it, because a level has no honest history to shift (see its
+        #   docstring). It matches on the node itself, so nesting it under any
+        #   math op hides it, and the whole computed series gets .shift(1) --
+        #   the reading this grammar deliberately does NOT use.
+        #
+        #   Worse, it is span-dependent. End-anchored primitives are NaN outside
+        #   the span, so on a real SPY 15m frame the same nested condition gives
+        #   1089 crossings under a replay span and 0 under a scan span. Same
+        #   bars, same spec, different answer.
+        #
+        # So the only defined shape is a bare end-anchored primitive, and only
+        # on the right (the left stays refused above). Anything deeper is
+        # refused here rather than silently evaluated under the other reading.
+        for side in ("lhs", "rhs"):
+            node = cond[side]
+            top = node.get("prim") if isinstance(node, dict) else None
+            nested = _prims_in(node, END_ANCHORED) - {top}
+            for bad in sorted(nested):
+                errs.append(f"{path}.{side}: {bad} is anchored to the end of "
+                            f"the frame and cannot be nested inside a cross "
+                            f"operand; use it bare on the right of the cross")
     if budget.nodes > MAX_NODES:
         errs.append(f"{path}: more than {MAX_NODES} indicator/primitive nodes")
 
