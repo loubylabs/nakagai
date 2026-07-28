@@ -4,7 +4,7 @@ import pandas as pd
 import pytest
 
 from nakagai.strategies.base import Direction
-from nakagai.strategies.ict.fvg import find_fvgs, find_unfilled_fvgs
+from nakagai.strategies.ict.fvg import find_fvgs
 from nakagai.strategies.rules.primitives import PRIMITIVES, fvg_nearest
 
 
@@ -22,18 +22,19 @@ QUIET = [[100, 100.5, 99.5, 100]] * 20
 GAP = QUIET + [[100, 101, 99.9, 100.9], [101, 102.5, 100.4, 102.4], [103.2, 104, 103, 103.8]]
 
 
-def test_open_gap_reported_by_both():
+def _open_gaps(bars):
+    return [g for g, state in find_fvgs(bars) if state == "open"]
+
+
+def test_open_gap_is_reported_open():
     bars = _bars(GAP)
-    open_gaps = find_unfilled_fvgs(bars)
-    assert [g.direction for g in open_gaps] == [Direction.LONG]
-    states = dict((g.ts, s) for g, s in find_fvgs(bars))
-    assert states[open_gaps[0].ts] == "open"
+    assert [g.direction for g in _open_gaps(bars)] == [Direction.LONG]
 
 
 def test_wick_fill_is_filled_not_inverted():
     # wick pierces the gap bottom (101) but the close holds above it
     bars = _bars(GAP + [[103.5, 103.6, 100.9, 103.0]])
-    assert find_unfilled_fvgs(bars) == []
+    assert _open_gaps(bars) == []
     (gap, state), = [t for t in find_fvgs(bars) if t[0].direction == Direction.LONG]
     assert state == "filled"
 
