@@ -1,5 +1,6 @@
 """Point-in-time MarketContext assembly. The ONLY door strategies get to data."""
 
+import numpy as np
 import pandas as pd
 
 from nakagai.data.cache import BarCache
@@ -47,6 +48,28 @@ def closed_before(df: pd.DataFrame, timeframe: str, now: pd.Timestamp,
         return df.iloc[:df.index.searchsorted(cutoff, side="left")]
     delta = tfs.deltas[timeframe]
     return df.iloc[:df.index.searchsorted(now - delta, side="right")]
+
+
+def visible_counts(src_index: pd.DatetimeIndex, dst_close_times: pd.DatetimeIndex,
+                   timeframe: str, tfs: TimeframeSet = DEFAULT_TIMEFRAMES) -> np.ndarray:
+    """How many `timeframe` bars are fully closed at each of `dst_close_times`.
+
+    The vectorized form of calling closed_before once per replayed bar: entry i
+    is exactly len(closed_before(src, timeframe, dst_close_times[i], tfs)). One
+    searchsorted per (timeframe, replay) replaces one slice per bar.
+
+    The session-aligned branch reuses closed_before's own NY rule rather than a
+    label-plus-one-day approximation, so it does not depend on the cache being
+    RTH-only.
+    """
+    if not len(src_index):
+        return np.zeros(len(dst_close_times), dtype=np.int64)
+    if timeframe in tfs.session_aligned:
+        cutoffs = pd.DatetimeIndex(
+            [pd.Timestamp(t.tz_convert(NY).date(), tz="UTC") for t in dst_close_times])
+        return src_index.searchsorted(cutoffs, side="left").astype(np.int64)
+    delta = tfs.deltas[timeframe]
+    return src_index.searchsorted(dst_close_times - delta, side="right").astype(np.int64)
 
 
 def build_context(cache: BarCache, symbol: str, now: pd.Timestamp,
