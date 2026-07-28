@@ -6,6 +6,7 @@ import pytest
 
 from nakagai.data.schema import DEFAULT_TIMEFRAMES as TFS
 from nakagai.engine.context import closed_before
+from nakagai.strategies.indicators import crossed_above
 from nakagai.strategies.rules.frame_eval import FrameEval
 from tests.whole_frame_oracle import prefix_value
 
@@ -112,3 +113,127 @@ def test_series_is_memoized_per_node():
     a = fe.series({"ind": "sma", "n": 20}, "15m")
     b = fe.series({"ind": "sma", "n": 20}, "15m")
     assert a is b
+
+
+def test_memo_key_separates_evaluation_timeframes():
+    """The same node at two timeframes is two different series.
+
+    _eval evaluates `of` sub-nodes at src_tf, so one spec can ask for
+    {'src': 'close'} on 15m and again on 1h within a single replay. A memo key
+    that keyed on the node alone would hand the second caller the first
+    caller's series, indexed on the wrong timeframe, and every later read would
+    be off by whatever the two indexes disagree about.
+    """
+    frames = _frames()
+    fe = FrameEval(frames, TFS, "SPY")
+    node = {"src": "close"}
+    at15, at1h = fe.series(node, "15m"), fe.series(node, "1h")
+    assert at15 is not at1h
+    assert not at15.index.equals(at1h.index)
+    assert at15.index.equals(frames["15m"].index)
+    assert at1h.index.equals(frames["1h"].index)
+
+
+def _closes(values) -> dict:
+    idx = pd.date_range("2026-01-05 14:30", periods=len(values), freq="15min",
+                        tz="UTC")
+    c = pd.Series(values, index=idx, dtype="float64")
+    return {"15m": pd.DataFrame({"open": c, "high": c + 0.5, "low": c - 0.5,
+                                 "close": c, "volume": 1000.0}, index=idx)}
+
+
+def test_cross_reads_the_bar_before_never_the_bar_after():
+    """crosses_above compares row i against row i-1, and row i-1 only.
+
+    The shift direction is the whole causality of the operator. A .shift(-1)
+    here still produces plausible-looking crosses, just ones that consult the
+    NEXT bar, which is lookahead that no metric would flag.
+    """
+    frames = _closes([1.0, 2.0, 4.0, 5.0, 2.0, 6.0])
+    fe = FrameEval(frames, TFS, "SPY")
+    cond = {"lhs": {"src": "close"}, "op": "crosses_above", "rhs": 3.0}
+    got = fe.condition_series(cond, "15m")
+    assert got.dtype == bool
+    assert list(got) == [False, False, True, False, False, True]
+
+    close = frames["15m"]["close"]
+    for i in range(len(close)):
+        assert bool(got.iloc[i]) == crossed_above(close.iloc[: i + 1], 3.0), \
+            f"row {i} disagrees with the prefix-and-iloc[-2] semantics"
+
+
+def test_cross_below_reads_the_bar_before():
+    frames = _closes([6.0, 5.0, 2.0, 1.0, 4.0, 1.0])
+    fe = FrameEval(frames, TFS, "SPY")
+    cond = {"lhs": {"src": "close"}, "op": "crosses_below", "rhs": 3.0}
+    got = fe.condition_series(cond, "15m")
+    assert list(got) == [False, False, True, False, False, True]
+
+
+def test_cross_against_an_end_anchored_level_keeps_the_scalar_broadcast():
+    """Both bars of the cross see the level known at the CURRENT bar.
+
+    fvg_nearest returned one float per replayed bar, and crossed_above's scalar
+    branch compared close[i-1] AND close[i] against that single level. Shifting
+    the level series instead tests the earlier bar against the level as it stood
+    a bar ago, which fires and suppresses different trades. This is the fixture
+    that says so: `shifted` is what a plain .shift(1) on both operands would
+    give, and it must not match.
+    """
+    frames = _frames()
+    fe = FrameEval(frames, TFS, "SPY")
+    lo, hi = 200, 400
+    fe.set_span("15m", lo, hi)
+    node = {"prim": "fvg_nearest", "direction": "long", "field": "top"}
+    got = fe.condition_series(
+        {"lhs": {"src": "close"}, "op": "crosses_above", "rhs": node}, "15m")
+
+    driving, level = frames["15m"], fe.series(node, "15m")
+    close = driving["close"]
+    want, shifted = [], []
+    for i in range(lo, hi):
+        now = driving.index[i] + TFS.step
+        prefix = closed_before(driving, "15m", now, TFS)
+        want.append(bool(crossed_above(
+            prefix["close"], prefix_value(node, frames, "15m", now, TFS))))
+        shifted.append(bool(close.iloc[i - 1] <= level.iloc[i - 1]
+                            and close.iloc[i] > level.iloc[i]))
+    assert [bool(v) for v in got.iloc[lo:hi]] == want
+    assert any(want), "fixture must contain at least one firing cross"
+    assert shifted != want, \
+        "fixture must contain a row where shifting the level changes the answer"
+
+
+def test_a_higher_timeframe_condition_is_false_until_its_bar_has_closed():
+    """The lift onto the driving index keeps booleans boolean.
+
+    strategy.py reads this series as bool(series.iloc[i]). Lifting through the
+    float branch would leave the not-yet-visible rows NaN, and bool(nan) is
+    True, so a condition on a bar that has not closed yet would read SATISFIED
+    for every row of the opening blind window.
+    """
+    frames = _frames()
+    frames["1h"] = frames["1h"].iloc[8:]
+    fe = FrameEval(frames, TFS, "SPY")
+    group = {"all": [{"lhs": {"src": "close"}, "op": ">", "rhs": 0.0},
+                     {"lhs": {"src": "high"}, "op": ">=", "rhs": {"src": "low"}}]}
+    out = fe.driving_group(group, "1h")
+
+    driving = frames["15m"]
+    blind = [i for i in range(len(driving))
+             if not len(closed_before(frames["1h"], "1h",
+                                      driving.index[i] + TFS.step, TFS))]
+    assert len(blind) > 8, "fixture must open with a real blind window"
+    assert out.dtype == bool
+    assert not out.iloc[blind].any()
+    assert not any(bool(out.iloc[i]) for i in blind)
+    seeing = sorted(set(range(len(driving))) - set(blind))
+    assert out.iloc[seeing].all(), "the visible rows must still read satisfied"
+
+
+def test_session_aligned_destination_timeframe_is_refused():
+    """A daily bar's label carries no close time, so its visibility cutoff
+    would have to be guessed. _positions refuses rather than guess."""
+    fe = FrameEval(_frames(), TFS, "SPY")
+    with pytest.raises(ValueError, match="session-aligned"):
+        fe.series({"src": "close", "tf": "15m"}, "1d")
