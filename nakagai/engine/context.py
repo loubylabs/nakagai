@@ -11,15 +11,20 @@ NY = "America/New_York"
 
 
 class PreloadedBars:
-    """In-memory, BarCache-shaped view of one symbol's timeframes.
+    """In-memory, BarCache-shaped view of one symbol's timeframes, plus the
+    replay's node cache.
 
-    Engine.run builds one of these so replay does one parquet read per
-    timeframe total instead of one per bar. Point-in-time filtering still
-    happens per bar in closed_before; this only removes repeated disk I/O.
+    Engine.run builds one of these, so replay does one parquet read per
+    timeframe total instead of one per bar, and every node in a spec is
+    computed once per replay instead of once per bar. Point-in-time filtering
+    still happens per bar in closed_before; `fe` holds the untruncated frames.
     """
 
     def __init__(self, cache, symbol: str, tfs: TimeframeSet = DEFAULT_TIMEFRAMES):
+        from nakagai.strategies.rules.frame_eval import FrameEval
         self._frames = {tf: cache.load(symbol, tf) for tf in tfs.all}
+        self.tfs = tfs
+        self.fe = FrameEval(self._frames, tfs, symbol)
 
     def load(self, symbol: str, timeframe: str):
         return self._frames[timeframe]
@@ -83,7 +88,16 @@ def visible_counts(src_index: pd.DatetimeIndex, dst_close_times: pd.DatetimeInde
 
 def build_context(cache: BarCache, symbol: str, now: pd.Timestamp,
                   tfs: TimeframeSet = DEFAULT_TIMEFRAMES) -> MarketContext:
-    return MarketContext(
-        symbol=symbol, now=now, tfs=tfs,
-        bars={tf: closed_before(cache.load(symbol, tf), tf, now, tfs)
-              for tf in tfs.all})
+    """Point-in-time context at `now`.
+
+    closed_before still runs per timeframe per call. It is a searchsorted plus
+    a zero-copy .iloc slice, measured at 1.5% of replay, and ctx.bars[tf] has to
+    stay a real prefix frame because _fresh, rr_signal, stop_target and every
+    non-rule strategy read it. Removing it would trade that 1.5% for a new
+    invariant to defend.
+    """
+    frames = {tf: cache.load(symbol, tf) for tf in tfs.all}
+    bars = {tf: closed_before(frames[tf], tf, now, tfs) for tf in tfs.all}
+    return MarketContext(symbol=symbol, now=now, tfs=tfs, bars=bars,
+                         fe=getattr(cache, "fe", None),
+                         cursor={tf: len(bars[tf]) - 1 for tf in tfs.all})

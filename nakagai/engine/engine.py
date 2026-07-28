@@ -20,7 +20,7 @@ import pandas as pd
 
 from nakagai.data.cache import BarCache
 from nakagai.data.schema import DEFAULT_TIMEFRAMES, TimeframeSet
-from nakagai.engine.context import PreloadedBars, build_context
+from nakagai.engine.context import PreloadedBars, build_context, visible_counts
 from nakagai.engine.costs import FeeModel, SlippageModel
 from nakagai.engine.portfolio import SettledLedger
 from nakagai.strategies.base import Direction, PositionAction, Signal, Strategy
@@ -89,6 +89,19 @@ class Engine:
         view = PreloadedBars(self.cache, self.symbol, self.tfs)
         bars = view.load(self.symbol, self.tfs.driving)
         bars = bars[(bars.index >= self.start) & (bars.index < self.end)]
+        # End-anchored primitives (fvg_nearest, order_block) are evaluated row
+        # by row, so bound EVERY timeframe to the rows this replay actually
+        # visits rather than the whole frame. The driving timeframe is not a
+        # special case: a spec on 1h reads 1h rows through the 1h span, and
+        # leaving that one unbounded would walk the entire 1h history per
+        # replay. visible_counts maps the window onto each frame's own index,
+        # so the span is exactly the rows the cursor can land on.
+        if len(bars):
+            closes = bars.index + self.tfs.step
+            for tf in self.tfs.all:
+                counts = visible_counts(view.load(self.symbol, tf).index,
+                                        closes, tf, self.tfs)
+                view.fe.set_span(tf, int(counts.min()) - 1, int(counts.max()))
         ledger = SettledLedger(self.equity0)
         trades: list[Trade] = []
         rejected = 0

@@ -1,7 +1,7 @@
 """Axis 1 contract: strategies are pure functions MarketContext -> [Signal]."""
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import ClassVar
 
@@ -38,6 +38,12 @@ class MarketContext:
     now: pd.Timestamp
     bars: dict[str, pd.DataFrame]
     tfs: TimeframeSet = DEFAULT_TIMEFRAMES
+    # Replay-scoped whole-frame evaluation. Present during Engine.run; None for
+    # point-in-time callers (the scanner, the screener) that build a context for
+    # a single `now`. `cursor[tf]` is the row index of the bar closing at `now`,
+    # or -1 when that timeframe has nothing visible yet.
+    fe: object | None = None
+    cursor: dict[str, int] = field(default_factory=dict)
 
     @property
     def driving_bars(self) -> pd.DataFrame:
