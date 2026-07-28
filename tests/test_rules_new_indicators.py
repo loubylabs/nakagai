@@ -3,10 +3,10 @@
 import numpy as np
 import pandas as pd
 
+from nakagai.data.schema import DEFAULT_TIMEFRAMES as TFS
 from nakagai.strategies import indicators as ind
-from nakagai.strategies.base import MarketContext
 from nakagai.strategies.rules import describe_spec, validate_spec
-from nakagai.strategies.rules.exprs import eval_expr
+from nakagai.strategies.rules.frame_eval import FrameEval
 
 
 def _spec(cond):
@@ -34,21 +34,21 @@ def test_new_indicator_arg_errors():
     assert any("cci.n" in e for e in validate_spec(_spec(oob)))
 
 
-def _ctx():
+def _fe():
     rng = np.random.default_rng(3)
     idx = pd.date_range("2026-01-05 14:30", periods=120, freq="15min", tz="UTC")
     c = pd.Series(100 + rng.normal(0, 1, 120).cumsum(), index=idx)
     bars = pd.DataFrame({"open": c, "high": c + 0.5, "low": c - 0.5,
                          "close": c, "volume": 1000.0}, index=idx)
-    return MarketContext("SPY", idx[-1], bars={"15m": bars, "1h": bars, "1d": bars}), bars
+    return FrameEval({"15m": bars, "1h": bars, "1d": bars}, TFS), bars
 
 
 def test_eval_matches_direct_indicator_calls():
-    ctx, bars = _ctx()
-    out = eval_expr({"ind": "wpr", "n": 14}, ctx, bars, {})
+    fe, bars = _fe()
+    out = fe.series({"ind": "wpr", "n": 14}, "15m")
     pd.testing.assert_series_equal(out, ind.wpr(bars, 14), check_names=False)
-    kc = eval_expr({"ind": "keltner", "n": 20, "mult": 1.5, "field": "upper"},
-                   ctx, bars, {})
+    kc = fe.series({"ind": "keltner", "n": 20, "mult": 1.5, "field": "upper"},
+                   "15m")
     pd.testing.assert_series_equal(kc, ind.keltner(bars, 20, 1.5)["upper"],
                                    check_names=False)
 

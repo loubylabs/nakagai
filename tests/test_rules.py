@@ -2,9 +2,10 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from nakagai.data.schema import DEFAULT_TIMEFRAMES as TFS
 from nakagai.strategies.base import Direction, MarketContext
 from nakagai.strategies.rules import RuleStrategy
-from nakagai.strategies.rules.exprs import eval_expr, eval_group
+from nakagai.strategies.rules.frame_eval import FrameEval
 
 RISK = {"stop": {"kind": "atr", "n": 14, "mult": 2.0}, "target": {"kind": "rr", "rr": 2.0}}
 
@@ -16,30 +17,46 @@ def _bars(closes, start="2026-01-05 14:30", freq="15min"):
                          "close": c, "volume": 1000.0})
 
 
-def _ctx(b15, b1h=None, b1d=None):
+def _frames(b15, b1h=None, b1d=None) -> dict:
+    return {"15m": b15, "1h": b1h if b1h is not None else b15,
+            "1d": b1d if b1d is not None else b15}
+
+
+def _fe(b15, b1h=None, b1d=None) -> FrameEval:
+    return FrameEval(_frames(b15, b1h, b1d), TFS)
+
+
+def _ctx(b15, b1h=None, b1d=None) -> MarketContext:
+    """A context shaped the way build_context builds one: cut frames, a walker
+    over them, and a cursor on the last row of each."""
+    frames = _frames(b15, b1h, b1d)
     return MarketContext("SPY", b15.index[-1] + pd.Timedelta(minutes=15),
-                         bars={"15m": b15, "1h": b1h if b1h is not None else b15,
-                               "1d": b1d if b1d is not None else b15})
+                         bars=frames, tfs=TFS, fe=FrameEval(frames, TFS),
+                         cursor={tf: len(f) - 1 for tf, f in frames.items()})
+
+
+def _holds(group, fe, tf="15m") -> bool:
+    return bool(fe.group_series(group, tf).iloc[-1])
 
 
 def test_math_and_indicator_composition():
     b = _bars(np.linspace(100, 120, 60))
     node = {"op": "*", "args": [2.0, {"ind": "sma", "n": 5, "of": {"src": "close"}}]}
-    out = eval_expr(node, _ctx(b), b, {})
+    out = _fe(b).series(node, "15m")
     assert out.iloc[-1] == pytest.approx(2 * b["close"].iloc[-5:].mean())
 
 
 def test_division_by_zero_is_nan_and_condition_false():
     b = _bars([100.0] * 30)
     group = {"all": [{"lhs": {"op": "/", "args": [{"src": "close"}, 0]}, "op": ">", "rhs": 0}]}
-    assert eval_group(group, _ctx(b), b, {}) is False
+    assert _holds(group, _fe(b)) is False
 
 
 def test_cross_timeframe_alignment_no_lookahead():
     b15 = _bars(np.linspace(100, 110, 60))
     b1d = _bars([90.0, 95.0], start="2026-01-03 00:00", freq="1D")
     node = {"src": "close", "tf": "1d"}
-    out = eval_expr(node, _ctx(b15, b1d=b1d), b15, {})
+    out = _fe(b15, b1d=b1d).series(node, "15m")
     assert out.iloc[-1] == 95.0
     assert len(out) == len(b15)
 
@@ -50,7 +67,7 @@ def test_series_indicator_with_tf_computes_on_native_frame():
     b15 = _bars(np.linspace(100, 110, 60))
     b1d = _bars([90.0, 100.0, 110.0], start="2026-01-02 00:00", freq="1D")
     node = {"ind": "sma", "n": 2, "tf": "1d"}
-    out = eval_expr(node, _ctx(b15, b1d=b1d), b15, {})
+    out = _fe(b15, b1d=b1d).series(node, "15m")
     assert len(out) == len(b15)
     assert out.iloc[-1] == pytest.approx(105.0)
 
@@ -58,10 +75,10 @@ def test_series_indicator_with_tf_computes_on_native_frame():
 def test_series_indicator_with_tf_explicit_of_matches_implicit():
     b15 = _bars(np.linspace(100, 110, 60))
     b1d = _bars([90.0, 100.0, 110.0], start="2026-01-02 00:00", freq="1D")
-    ctx = _ctx(b15, b1d=b1d)
-    implicit = eval_expr({"ind": "sma", "n": 2, "tf": "1d"}, ctx, b15, {})
-    explicit = eval_expr({"ind": "sma", "n": 2, "tf": "1d", "of": {"src": "close"}},
-                         ctx, b15, {})
+    fe = _fe(b15, b1d=b1d)
+    implicit = fe.series({"ind": "sma", "n": 2, "tf": "1d"}, "15m")
+    explicit = fe.series({"ind": "sma", "n": 2, "tf": "1d", "of": {"src": "close"}},
+                         "15m")
     assert implicit.iloc[-1] == pytest.approx(105.0)
     assert explicit.iloc[-1] == pytest.approx(105.0)
 
@@ -70,13 +87,13 @@ def test_crosses_above_uses_last_two_bars():
     closes = [100.0] * 30 + [99.0, 101.0]
     b = _bars(closes)
     group = {"all": [{"lhs": {"src": "close"}, "op": "crosses_above", "rhs": 100.0}]}
-    assert eval_group(group, _ctx(b), b, {}) is True
+    assert _holds(group, _fe(b)) is True
 
 
 def test_nan_warmup_condition_false():
     b = _bars([100.0, 101.0, 102.0])   # far less than sma 200 warmup
     group = {"all": [{"lhs": {"src": "close"}, "op": ">", "rhs": {"ind": "sma", "n": 200}}]}
-    assert eval_group(group, _ctx(b), b, {}) is False
+    assert _holds(group, _fe(b)) is False
 
 
 def test_memo_reuses_identical_subtrees(monkeypatch):
@@ -85,10 +102,10 @@ def test_memo_reuses_identical_subtrees(monkeypatch):
     real = ind.sma
     monkeypatch.setattr(ind, "sma", lambda s, n: calls.__setitem__("n", calls["n"] + 1) or real(s, n))
     b = _bars(np.linspace(100, 120, 60))
-    memo = {}
+    fe = _fe(b)
     node = {"ind": "sma", "n": 20}
-    eval_expr(node, _ctx(b), b, memo)
-    eval_expr(node, _ctx(b), b, memo)
+    fe.series(node, "15m")
+    fe.series(node, "15m")
     assert calls["n"] == 1
 
 

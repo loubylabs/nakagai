@@ -10,7 +10,6 @@ import pandas as pd
 from nakagai.strategies import indicators as ind
 from nakagai.strategies.base import Direction, MarketContext, PositionAction, Signal, Strategy
 from nakagai.strategies.risk import stop_target
-from nakagai.strategies.rules.exprs import eval_group
 from nakagai.strategies.rules.spec import validate_spec
 from nakagai.strategies.util import fresh_bar, first_bar_of_session, rr_signal
 
@@ -49,16 +48,29 @@ class RuleStrategy(Strategy):
         """-> (stop, target, rr); target None means rr-derived in rr_signal."""
         return stop_target(self.spec.get("risk", {}), ctx, bars, direction)
 
+    def _group_at(self, ctx: MarketContext, group: dict) -> bool:
+        """One all/any tree at `now`.
+
+        The tree is evaluated on the SPEC's timeframe (so `crosses_above`
+        compares consecutive spec-timeframe bars, as the per-bar path did) and
+        the resulting boolean is lifted onto the driving index, where the
+        cursor reads it.
+        """
+        tf = self.spec.get("timeframe", "1h")
+        i = ctx.cursor.get(ctx.tfs.driving, -1)
+        if i < 0:
+            return False
+        return bool(ctx.fe.driving_group(group, tf).iloc[i])
+
     def on_bar(self, ctx: MarketContext) -> list[Signal]:
         if not self.spec or ctx.driving_bars.empty or not self._fresh(ctx):
             return []
         bars = self._bars_for(ctx)
         if len(bars) < 2:
             return []
-        memo: dict = {}
         name = str(self.spec.get("name", "rules"))
         for side, direction in (("long", Direction.LONG), ("short", Direction.SHORT)):
-            if side in self.spec and eval_group(self.spec[side], ctx, bars, memo):
+            if side in self.spec and self._group_at(ctx, self.spec[side]):
                 stop, target, rr = self._stop_target(ctx, bars, direction)
                 sig = rr_signal(ctx, direction, stop, rr, ("rules", name),
                                 f"{name}: {side} rules matched on "
@@ -75,12 +87,11 @@ class RuleStrategy(Strategy):
         bars = self._bars_for(ctx)
         if bars.empty or ctx.driving_bars.empty:
             return PositionAction.HOLD
-        memo: dict = {}
         direction = position.signal.direction
         long = direction == Direction.LONG
         ref = float(ctx.driving_bars["close"].iloc[-1])
 
-        if "exit" in exits and eval_group(exits["exit"], ctx, bars, memo):
+        if "exit" in exits and self._group_at(ctx, exits["exit"]):
             return PositionAction.EXIT
         if "time_stop" in exits:
             # held starts at 1 (not 0) on the fill bar: manage() runs in the

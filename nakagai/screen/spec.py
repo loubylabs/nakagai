@@ -23,12 +23,18 @@ def validate_screen_spec(spec) -> list[str]:
     errs: list[str] = []
     if spec.get("version") != VERSION:
         errs.append(f"spec version must be {VERSION} (got {spec.get('version')!r})")
-    if spec.get("tf", "1d") not in TIMEFRAMES:
+    tf = spec.get("tf", "1d")
+    if tf not in TIMEFRAMES:
         errs.append(f"tf must be one of {TIMEFRAMES}, got {spec.get('tf')!r}")
     if "conditions" not in spec:
         errs.append("spec needs a conditions group")
     else:
-        errs.extend(validate_condition_group(spec["conditions"], "conditions"))
+        # A screen defaults to 1d, which is session-aligned, so "daily screen
+        # plus one intraday reference" is the shape a user reaches for first
+        # and the one the evaluator cannot carry. Refusing it here rather than
+        # per symbol keeps it out of the rows, where it reads as no matches.
+        errs.extend(validate_condition_group(spec["conditions"], "conditions",
+                                             tf if tf in TIMEFRAMES else "1h"))
     unknown = set(spec) - _KEYS
     if unknown:
         errs.append(f"unknown keys {sorted(unknown)}")

@@ -67,6 +67,26 @@ def test_validate_screen_spec_walks_the_grammar():
     assert any(e.startswith("conditions.all[0]") for e in errs)
 
 
+def test_a_daily_screen_may_not_reference_an_intraday_timeframe():
+    """The default screen tf is 1d, so "daily screen plus one intraday
+    reference" is the first shape a user reaches for and the one the evaluator
+    cannot carry: a daily label has no close time to compare against. Refused
+    per symbol at evaluation time it wrote an error note on every row and read
+    as a screen that matched nothing."""
+    spec = {"version": 1, "tf": "1d", "conditions": {"all": [
+        {"lhs": {"src": "close"}, "op": ">",
+         "rhs": {"ind": "sma", "n": 20, "tf": "1h"}}]}}
+    errs = validate_screen_spec(spec)
+    assert any("session-aligned" in e for e in errs), errs
+
+
+def test_an_intraday_screen_may_reference_a_higher_timeframe():
+    spec = {"version": 1, "tf": "15m", "conditions": {"all": [
+        {"lhs": {"src": "close"}, "op": ">",
+         "rhs": {"ind": "sma", "n": 20, "tf": "1d"}}]}}
+    assert validate_screen_spec(spec) == []
+
+
 def test_validate_screen_spec_rejects_non_dict():
     assert validate_screen_spec([1]) == ["spec must be a JSON object"]
 

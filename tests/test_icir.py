@@ -8,6 +8,8 @@ from nakagai.data.cache import MemoryBars
 from nakagai.data.schema import TimeframeSet
 from nakagai.engine.windows import Window
 from nakagai.icir import icir_fields, rank_ic, window_icir
+from nakagai.strategies.rules.frame_eval import FrameEval
+from nakagai.strategies.rules.margins import condition_margin
 
 TFS = TimeframeSet(driving="15m", deltas={"15m": pd.Timedelta(minutes=15)})
 
@@ -56,43 +58,57 @@ def test_window_icir_positive_for_momentum_factor():
 
 
 def _order_block_frame(n=400):
-    # Real (non-flat) OHLC, unlike _frame's open==close bars: order_block
-    # needs actual candle bodies to find a displacement. A down candle
-    # followed by a big up candle near the tail gives it a real order block
-    # to find within its default 40-bar lookback.
+    # Real (non-flat) OHLC, unlike _frame's open==close bars: order_block needs
+    # actual candle bodies to find a displacement (body >= 1.5x ATR) with an
+    # opposing candle before it, inside its 40-bar lookback. One such pattern
+    # near the tail would leave every earlier row NaN and there would be no
+    # factor to score, so the pattern repeats every 25 bars and the level moves
+    # through the window the way a point-in-time level does.
     idx = pd.date_range("2026-01-05 14:30", periods=n, freq="15min", tz="UTC")
     rng = np.random.default_rng(0)
-    close = 100 + np.cumsum(rng.normal(0, 0.05, n))
-    open_ = np.r_[close[0], close[:-1]]
-    open_[-5], close[-5] = 101.0, 99.0    # opposing (down) candle
-    open_[-3], close[-3] = 99.0, 104.0    # displacement (big up) candle
+    step = rng.normal(0, 0.05, n)
+    step[10::25] = -1.0                   # opposing (down) candle
+    step[12::25] = 3.0                    # displacement (big up) candle
+    close = 100 + np.cumsum(step)
+    open_ = np.r_[close[0], close[:-1]]   # body of bar i is exactly step[i]
     high = np.maximum(open_, close) + 0.2
     low = np.minimum(open_, close) - 0.2
     return pd.DataFrame({"open": open_, "high": high, "low": low,
                          "close": close, "volume": 1000.0}, index=idx)
 
 
-def test_window_icir_abstains_for_end_anchored_primitives():
-    # order_block computes one float from bars.tail(lookback); the vectorized
-    # walker would broadcast that end-of-window value across every row, which
-    # is lookahead. The lens must abstain rather than report a bogus IC, even
-    # on data where a plain sma spec on the same frame has a real one.
+def test_window_icir_covers_end_anchored_primitives():
+    # The lens used to refuse these specs outright, because the margin walker
+    # broadcast order_block's one end-of-window float across every row. The
+    # primitive is row-wise now and the window declares its span, so the factor
+    # is point-in-time and the lens has an answer instead of an abstention.
     frame = _order_block_frame()
     cache = MemoryBars({("SPY", "15m"): frame})
     spec = {"version": 2, "name": "t", "timeframe": "15m",
             "long": {"all": [{"lhs": {"src": "close"}, "op": ">",
                               "rhs": {"prim": "order_block", "direction": "long",
                                       "field": "top"}}]}}
-    sma_spec = {"version": 2, "name": "t", "timeframe": "15m",
-                "long": {"all": [{"lhs": {"src": "close"}, "op": ">",
-                                  "rhs": {"ind": "sma", "n": 5}}]}}
     start, end = frame.index[200], frame.index[-1] + pd.Timedelta(minutes=15)
     w = Window(frame.index[0], start, start, end)
     out = window_icir(spec, cache, "SPY", w, tfs=TFS)
-    sma_out = window_icir(sma_spec, cache, "SPY", w, tfs=TFS)
-    assert sma_out["ic_1"] is not None    # same frame has a real signal
-    assert all(out[f"ic_{k}"] is None for k in (1, 5, 20))
-    assert all(out[f"ic_n_{k}"] == 0 for k in (1, 5, 20))
+    assert all(out[f"ic_n_{k}"] > 0 for k in (1, 5, 20))
+
+
+def test_window_icir_end_anchored_factor_is_not_broadcast():
+    # The point-in-time proof: the margin the lens scores must be the one the
+    # window's own rows would have seen, row by row, not one level from the end
+    # of the window repeated. A broadcast level would make close - level a
+    # simple monotone function of close, so its rank would equal close's rank.
+    frame = _order_block_frame()
+    node = {"prim": "order_block", "direction": "long", "field": "top"}
+    fe = FrameEval({"15m": frame}, TFS)
+    in_win = frame.index[200:]
+    fe.set_span("15m", 200, len(frame))
+    level = fe.series(node, "15m").loc[in_win]
+    assert level.nunique() > 1, "the level must move within the window"
+    margin = condition_margin({"lhs": {"src": "close"}, "op": ">", "rhs": node},
+                              fe, "15m").loc[in_win]
+    assert not margin.rank(pct=True).equals(frame["close"].loc[in_win].rank(pct=True))
 
 
 def test_window_icir_forward_returns_extend_past_test_end():
