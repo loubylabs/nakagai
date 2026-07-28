@@ -31,6 +31,26 @@ from nakagai.strategies.rules.primitives import (END_ANCHORED, PRIMITIVES,
 from nakagai.strategies.rules.spec import ARG_DEFAULTS, BAR_INDICATORS
 
 
+def _cross_prev(node, v: pd.Series) -> pd.Series:
+    """The operand's PREVIOUS-bar value inside a cross comparison.
+
+    indicators.crossed_above reads `b.iloc[-2], b.iloc[-1]` when `b` is a
+    Series but `(b, b)` when it is a scalar. fvg_nearest and order_block used
+    to return one float per replayed bar, so that scalar branch compared BOTH
+    bars of the cross against the single level known at the current bar:
+    close[i-1] <= L[i] and close[i] > L[i]. They are series now, and shifting
+    them would test the earlier bar against L[i-1] instead, which is a real
+    semantic change that moves trades on every play crossing one of them.
+    Reproduce the broadcast: an end-anchored operand has no honest history to
+    shift, so its "previous" value is the current row's. Everything else was a
+    genuine series before, where .shift(1) is exactly `.iloc[-2]`. Do not
+    collapse this back into a plain shift on both sides.
+    """
+    if isinstance(node, dict) and node.get("prim") in END_ANCHORED:
+        return v
+    return v.shift(1)
+
+
 class FrameEval:
     """Replay-scoped node cache over one symbol's untruncated frames."""
 
@@ -164,16 +184,16 @@ class FrameEval:
         if not isinstance(rhs, pd.Series):
             rhs = pd.Series(rhs, index=index)
         op = cond["op"]
-        if op == "crosses_above":
-            out = (lhs.shift(1) <= rhs.shift(1)) & (lhs > rhs)
-        elif op == "crosses_below":
-            out = (lhs.shift(1) >= rhs.shift(1)) & (lhs < rhs)
+        if op in ("crosses_above", "crosses_below"):
+            lhs_prev = _cross_prev(cond["lhs"], lhs)
+            rhs_prev = _cross_prev(cond["rhs"], rhs)
+            out = ((lhs_prev <= rhs_prev) & (lhs > rhs) if op == "crosses_above"
+                   else (lhs_prev >= rhs_prev) & (lhs < rhs))
+            na = lhs.isna() | rhs.isna() | lhs_prev.isna() | rhs_prev.isna()
         else:
             out = {">": lhs > rhs, "<": lhs < rhs,
                    ">=": lhs >= rhs, "<=": lhs <= rhs}[op]
-        na = lhs.isna() | rhs.isna()
-        if op in ("crosses_above", "crosses_below"):
-            na = na | lhs.shift(1).isna() | rhs.shift(1).isna()
+            na = lhs.isna() | rhs.isna()
         return out.where(~na, False).astype(bool)
 
     def group_series(self, group: dict, tf: str) -> pd.Series:
