@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from nakagai.data.cache import BarCache
+from nakagai.data.cache import BarCache, MemoryBars
 from nakagai.data.schema import DEFAULT_TIMEFRAMES, TimeframeSet
 from nakagai.engine.engine import Engine
 from nakagai.filelock import append_parquet
@@ -52,9 +52,10 @@ def run_one(cache_root, strategy_name: str, params: dict, symbol: str,
             config: str = "", batch_id: str = "",
             tfs: TimeframeSet = DEFAULT_TIMEFRAMES,
             registry: Registry | None = None, icir: bool = True) -> dict:
-    # cache_root is a path string from the pool path (picklable), or an
-    # already-loaded BarCache-shaped object from in-process callers (the
-    # permutation harness passes MemoryBars to skip parquet entirely).
+    # cache_root is a path string, or an already-loaded BarCache-shaped object.
+    # Both pickle, so either crosses into a pool worker. run_grid and the
+    # permutation harness hand over MemoryBars to skip repeated parquet reads;
+    # single-run callers still pass a path.
     cache = cache_root if hasattr(cache_root, "load") else BarCache(Path(cache_root))
     if registry is None:
         raise ValueError(
@@ -116,7 +117,15 @@ def run_grid(cache_root: str, strategy_names: list[str], symbols: list[str], win
             "run_grid requires a strategies registry: pass a zero-arg callable "
             "returning {name: Strategy class}")
     overrides = params_by_strategy or {}
-    jobs = [(cache_root, s, overrides.get(s, {}), sym, w, equity0, risk_pct, config, batch_id, tfs, registry)
+    # One parquet read per (symbol, timeframe) for the whole grid. BarCache.load
+    # re-reads the file and recomputes pd.infer_freq on every call, and Engine.run
+    # calls it per timeframe per window, so the naive grid re-reads identical bars
+    # thousands of times. MemoryBars is BarCache-shaped, returns exactly the frames
+    # BarCache.load returned, and pickles, so it crosses into pool workers too.
+    disk = BarCache(Path(cache_root))
+    caches = {sym: MemoryBars({(sym, tf): disk.load(sym, tf) for tf in tfs.all})
+              for sym in symbols}
+    jobs = [(caches[sym], s, overrides.get(s, {}), sym, w, equity0, risk_pct, config, batch_id, tfs, registry)
             for s in strategy_names for sym in symbols for w in windows]
 
     def _tick(done: int) -> None:
