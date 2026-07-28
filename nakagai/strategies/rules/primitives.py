@@ -238,3 +238,25 @@ ARG_DEFAULTS: dict[str, dict] = {
     "order_block": {"direction": "long", "field": "top",
                     "body_atr": 1.5, "lookback": 40},
 }
+
+# Primitives whose value is anchored to the END of the frame they are handed:
+# one float from the tail, not a causal series. A whole-frame pass may not
+# broadcast that across history (it would be lookahead), so they are evaluated
+# row by row over a bounded span instead. Bounded by `lookback`, so this costs
+# what the per-bar path always cost.
+END_ANCHORED = frozenset({"fvg_nearest", "order_block"})
+
+
+def end_anchored_series(name: str, ctx, bars: pd.DataFrame, lo: int, hi: int,
+                        **args) -> pd.Series:
+    """Row `i` holds exactly what PRIMITIVES[name] returns for bars[:i+1].
+
+    Calling the scalar function per row rather than reimplementing it makes the
+    equivalence a tautology: there is no second implementation to drift.
+    """
+    fn = PRIMITIVES[name]["fn"]
+    idx = bars.index[lo:hi]
+    if not len(idx):
+        return pd.Series(dtype="float64", index=idx)
+    return pd.Series([float(fn(ctx, bars.iloc[: i + 1], **args))
+                      for i in range(lo, hi)], index=idx, dtype="float64")
