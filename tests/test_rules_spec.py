@@ -137,6 +137,91 @@ def test_bars_since_condition_rejects_cross_ops():
     assert any("bars_since" in e for e in validate_spec(spec))
 
 
+FVG = {"prim": "fvg_nearest", "direction": "long", "field": "top"}
+OB = {"prim": "order_block", "direction": "long", "field": "top"}
+
+
+def test_a_cross_may_still_have_an_end_anchored_level_on_the_right():
+    """The supported shape, and the one the catalog uses: price crossing a
+    level. Both bars of the cross see the level known at the current bar."""
+    spec = {**ORB, "long": {"all": [
+        {"lhs": {"src": "close"}, "op": "crosses_above", "rhs": FVG}]}}
+    assert validate_spec(spec) == []
+
+
+@pytest.mark.parametrize("node", [FVG, OB], ids=lambda n: n["prim"])
+def test_an_end_anchored_level_on_the_left_of_a_cross_is_rejected(node):
+    """fvg_nearest and order_block are one level read from the tail of the
+    frame, which is what END_ANCHORED means. crossed_above's scalar branch only
+    ever covered the RHS and the old eval_condition returned False outright for
+    a non-Series LHS, so this spec was permanently dead; _cross_prev is
+    symmetric, so it would now fire. series_required has to say so."""
+    spec = {**ORB, "long": {"all": [
+        {"lhs": node, "op": "crosses_above", "rhs": {"src": "close"}}]}}
+    errs = validate_spec(spec)
+    assert any(node["prim"] in e and "series" in e for e in errs), errs
+
+
+@pytest.mark.parametrize("node", [FVG, OB], ids=lambda n: n["prim"])
+def test_bars_since_over_an_end_anchored_level_is_rejected(node):
+    """bars_since ffills over the whole mask, so it is the one reader that
+    looks outside the span the end-anchored primitives are evaluated over.
+    Outside it they are NaN and the condition False, so the same bar would
+    count differently depending on which walk-forward window replayed it."""
+    spec = {**ORB, "long": {"all": [
+        {"lhs": {"prim": "bars_since",
+                 "cond": {"lhs": {"src": "close"}, "op": ">", "rhs": node}},
+         "op": "<", "rhs": 5}]}}
+    errs = validate_spec(spec)
+    assert any(node["prim"] in e and "bars_since" in e for e in errs), errs
+
+
+def test_a_session_aligned_spec_may_not_reference_another_timeframe():
+    """A daily bar's label carries its session date, not the 16:00 NY bell, so
+    there is no honest cutoff for carrying an intraday series onto it. The
+    evaluator refuses at runtime, per symbol, inside the screener's per-symbol
+    try/except; saying it here puts it where the NL retry loop can read it."""
+    spec = {**ORB, "timeframe": "1d", "long": {"all": [
+        {"lhs": {"src": "close"}, "op": ">",
+         "rhs": {"ind": "sma", "n": 50, "tf": "1h"}}]}}
+    errs = validate_spec(spec)
+    assert any("session-aligned" in e for e in errs), errs
+
+
+def test_a_session_aligned_spec_with_no_foreign_reference_is_fine():
+    spec = {**ORB, "timeframe": "1d", "long": {"all": [
+        {"lhs": {"src": "close"}, "op": ">", "rhs": {"ind": "sma", "n": 50}}]}}
+    assert validate_spec(spec) == []
+
+
+def test_an_intraday_spec_may_still_reference_a_daily_bar():
+    """ORB itself does: the destination is 15m, which has a close time."""
+    assert validate_spec(ORB) == []
+
+
+def test_the_session_aligned_refusal_follows_a_tf_qualified_bars_since():
+    """A bars_since with a tf evaluates its condition on THAT frame, so the
+    destination timeframe moves out from under the subtree. The spec here is
+    15m, but the reference inside the condition lands on 1d."""
+    spec = {**ORB, "timeframe": "15m", "long": {"all": [
+        {"lhs": {"prim": "bars_since", "tf": "1d",
+                 "cond": {"lhs": {"src": "close"}, "op": ">",
+                          "rhs": {"src": "close", "tf": "1h"}}},
+         "op": "<", "rhs": 5}]}}
+    errs = validate_spec(spec)
+    assert any("session-aligned" in e for e in errs), errs
+
+
+def test_the_session_aligned_refusal_covers_the_exit_group():
+    spec = {**ORB, "timeframe": "1d",
+            "long": {"all": [{"lhs": {"src": "close"}, "op": ">", "rhs": 1}]},
+            "exits": {"exit": {"all": [
+                {"lhs": {"src": "close"}, "op": "<",
+                 "rhs": {"ind": "sma", "n": 20, "tf": "15m"}}]}}}
+    errs = validate_spec(spec)
+    assert any("exits.exit" in e and "session-aligned" in e for e in errs), errs
+
+
 def test_describe_mentions_the_pieces():
     text = describe_spec(ORB)
     assert "orb-volume" in text and "15m" in text

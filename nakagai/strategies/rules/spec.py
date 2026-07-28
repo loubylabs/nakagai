@@ -8,11 +8,13 @@ compiler's retry loop feeds on them); describe_spec renders the trust-step
 readback; canon.py owns identity hashing.
 """
 
+from nakagai.data.schema import DEFAULT_TIMEFRAMES
 from nakagai.strategies.rules.primitives import ARG_DEFAULTS as PRIM_DEFAULTS
-from nakagai.strategies.rules.primitives import PRIMITIVES
+from nakagai.strategies.rules.primitives import END_ANCHORED, PRIMITIVES
 from nakagai.strategies.rules.primitives import SESSION_SCOPED_PRIMS
 
 VERSION = 2
+SESSION_ALIGNED = DEFAULT_TIMEFRAMES.session_aligned
 SOURCES = ("open", "high", "low", "close", "volume")
 TIMEFRAMES = ("15m", "1h", "1d")
 OPS = (">", "<", ">=", "<=", "crosses_above", "crosses_below")
@@ -96,8 +98,8 @@ def _check_args(name: str, given: dict, schema: dict, path: str, errs: list[str]
                 errs.append(f"{path}: {name}.{arg} must be a number in [{lo}, {hi}], got {v!r}")
 
 
-def _session_prims_in(node) -> set[str]:
-    """Session-scoped primitive names appearing anywhere in an expression tree.
+def _prims_in(node, names) -> set[str]:
+    """Which of `names` appear as primitives anywhere in an expression tree.
     Iterative walk with a seen set: this runs before the shape checks bound
     depth, so it must not recurse or loop on adversarially deep input."""
     found: set[str] = set()
@@ -108,13 +110,53 @@ def _session_prims_in(node) -> set[str]:
             continue
         if isinstance(item, dict):
             seen.add(id(item))
-            if item.get("prim") in SESSION_SCOPED_PRIMS:
+            if item.get("prim") in names:
                 found.add(item["prim"])
             stack.extend(item.values())
         elif isinstance(item, list):
             seen.add(id(item))
             stack.extend(item)
     return found
+
+
+def _check_session_aligned_refs(node, eval_tf: str, path: str,
+                                errs: list[str]) -> None:
+    """Refuse a cross-timeframe reference evaluated on a session-aligned frame.
+
+    frame_eval carries a series from one timeframe onto another by asking when
+    each DESTINATION bar closed, and a session-aligned label carries no close
+    time: a daily bar's label holds the session date, not the 16:00 NY bell.
+    The evaluator refuses to guess, but it does so per symbol at evaluation
+    time, inside the screener's per-symbol try/except, where a daily screen
+    with one intraday reference writes an error note on every row and reads as
+    a screen that simply matched nothing. Say it once here instead, where the
+    NL compiler's retry loop can see it; the runtime guard stays as a backstop.
+
+    `eval_tf` follows the evaluator: a node's own `tf` is the frame its
+    children are computed on, which is how a bars_since with a tf, or an
+    indicator's `of`, moves the destination frame out from under a subtree.
+    Iterative for the same reason _prims_in is.
+    """
+    stack, seen = [(node, eval_tf, path)], set()
+    while stack:
+        item, tf, at = stack.pop()
+        key = (id(item), tf)
+        if key in seen:
+            continue
+        if isinstance(item, list):
+            seen.add(key)
+            stack.extend((v, tf, f"{at}[{i}]") for i, v in enumerate(item))
+            continue
+        if not isinstance(item, dict):
+            continue
+        seen.add(key)
+        src_tf = item.get("tf", tf) if isinstance(item.get("tf", tf), str) else tf
+        if src_tf != tf and tf in SESSION_ALIGNED:
+            errs.append(f"{at}: {tf} is session-aligned, so a reference to "
+                        f"{src_tf!r} has no well-defined visibility cutoff; "
+                        "move it to an intraday timeframe")
+        stack.extend((v, src_tf, f"{at}.{k}")
+                     for k, v in item.items() if k != "tf")
 
 
 def _check_tf(node: dict, path: str, errs: list[str],
@@ -184,6 +226,15 @@ def _check_expr(node, path: str, errs: list[str], budget: _Budget,
         if name not in PRIMITIVES:
             errs.append(f"{path}: unknown primitive {name!r} (valid: {sorted(PRIMITIVES)})")
             return
+        if series_required and name in END_ANCHORED:
+            # An end-anchored primitive is one level read from the tail of the
+            # frame, not a series, which is exactly what this module's own
+            # END_ANCHORED set means. crossed_above's scalar branch only ever
+            # covered the RHS, and the old eval_condition returned False
+            # outright for a non-Series LHS, so a spec shaped this way was
+            # permanently dead. _cross_prev is symmetric, so it would now fire.
+            errs.append(f"{path}: the left side of a cross must be a series; "
+                        f"{name} is a level read from the end of the frame")
         schema = PRIMITIVES[name]["args"]
         if name == "bars_since":
             cond = node.get("cond")
@@ -193,10 +244,20 @@ def _check_expr(node, path: str, errs: list[str], budget: _Budget,
                 errs.append(f"{path}: bars_since conditions use comparison ops only")
             else:
                 _check_condition(cond, f"{path}.cond", errs, budget, depth + 1)
-            if "tf" in node and isinstance(cond, dict):
+            if isinstance(cond, dict):
+                # bars_since ffills over the WHOLE mask, so it is the one reader
+                # that looks outside the span the end-anchored primitives are
+                # evaluated over, and outside it they are NaN and the condition
+                # False. The same bar would then count differently depending on
+                # which walk-forward window replayed it, which breaks replay's
+                # contract that the same bars and spec give the same trades.
+                for bad in sorted(_prims_in(cond, END_ANCHORED)):
+                    errs.append(f"{path}: {bad} is anchored to the end of the "
+                                f"frame and cannot sit inside a bars_since")
+            if "tf" in node:
                 # A tf'd bars_since evaluates its cond on that frame, which
                 # would smuggle session-scoped prims onto a foreign timeframe.
-                for bad in sorted(_session_prims_in(cond)):
+                for bad in sorted(_prims_in(cond, SESSION_SCOPED_PRIMS)):
                     errs.append(f"{path}: {bad} is session-scoped and cannot "
                                 f"sit inside a bars_since with tf")
             _check_args(name, node, {}, path, errs, skip=("prim", "cond", "tf"))
@@ -352,20 +413,33 @@ def validate_spec(spec) -> list[str]:
     if not sides:
         errs.append("spec needs at least one of long/short entry groups")
     budget = _Budget()
+    # An unusable timeframe is already reported above; fall back to an intraday
+    # one so the cross-timeframe walk below adds nothing on top of that, and
+    # never trips over a non-string.
+    tf = spec.get("timeframe", "1h")
+    tf = tf if tf in TIMEFRAMES else "1h"
     for side in sides:
         _check_group(spec[side], side, errs, budget)
+        _check_session_aligned_refs(spec[side], tf, side, errs)
     if "exits" in spec:
         _check_exits(spec["exits"], errs, budget)
+        if isinstance(spec["exits"], dict) and "exit" in spec["exits"]:
+            _check_session_aligned_refs(spec["exits"]["exit"], tf,
+                                        "exits.exit", errs)
     errs.extend(validate_risk(spec.get("risk", {})))
     return errs
 
 
-def validate_condition_group(group, path: str = "conditions") -> list[str]:
+def validate_condition_group(group, path: str = "conditions",
+                             tf: str = "1h") -> list[str]:
     """Standalone validation of one all/any condition group with a fresh
     budget. The screener's whole schema is one such group; validate_spec's
-    per-side entry groups go through the same walker."""
+    per-side entry groups go through the same walker. `tf` is the timeframe the
+    group is evaluated on, which decides whether a cross-timeframe reference
+    inside it has a visibility cutoff at all."""
     errs: list[str] = []
     _check_group(group, path, errs, _Budget())
+    _check_session_aligned_refs(group, tf, path, errs)
     return errs
 
 
