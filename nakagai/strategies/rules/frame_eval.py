@@ -183,3 +183,17 @@ class FrameEval:
                  else self.condition_series(i, tf) for i in items]
         both = pd.concat(parts, axis=1)
         return both.all(axis=1) if key == "all" else both.any(axis=1)
+
+    def driving_group(self, group: dict, tf: str) -> pd.Series:
+        """`group` as a boolean series on the DRIVING index, computed once.
+
+        This is what the signal path reads at its cursor, and it has to be
+        memoized like series() is. group_series walks the tree and to_driving
+        lifts the result; both are O(frame), so calling them once per bar would
+        put replay straight back on O(bars x history) with the indicator cache
+        doing nothing but hiding it.
+        """
+        key = ("group", tf, json.dumps(group, sort_keys=True))
+        if key not in self._cache:
+            self._cache[key] = self.to_driving(self.group_series(group, tf), tf)
+        return self._cache[key]
