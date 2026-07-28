@@ -1,4 +1,8 @@
-"""Shared ICT market-structure primitives: swings and ATR."""
+"""Shared ICT market-structure primitives: the swing mask and ATR.
+
+Both are consumed by `strategies/rules/primitives.py`, which wraps
+`_strict_extrema` as the registered `swing_high`/`swing_low` primitives.
+"""
 
 import numpy as np
 import pandas as pd
@@ -24,18 +28,6 @@ def _strict_extrema(values: np.ndarray, k: int, find_max: bool) -> np.ndarray:
         right = s[::-1].rolling(k).min().shift(1).to_numpy()[::-1]
         mask = (values < left) & (values < right)
     return mask
-
-
-def swing_highs(df: pd.DataFrame, k: int = 2) -> pd.Series:
-    h = df["high"]
-    mask = _strict_extrema(h.to_numpy(dtype="float64"), k, find_max=True)
-    return pd.Series(h.to_numpy(dtype="float64")[mask], index=h.index[mask], dtype="float64")
-
-
-def swing_lows(df: pd.DataFrame, k: int = 2) -> pd.Series:
-    l = df["low"]
-    mask = _strict_extrema(l.to_numpy(dtype="float64"), k, find_max=False)
-    return pd.Series(l.to_numpy(dtype="float64")[mask], index=l.index[mask], dtype="float64")
 
 
 def atr(df: pd.DataFrame, n: int = 14) -> float:

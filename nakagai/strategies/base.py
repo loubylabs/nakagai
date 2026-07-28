@@ -83,9 +83,6 @@ class Strategy(ABC):
     timeframe: ClassVar[str] = "15m"  # driving timeframe for entries
     PARAMS: ClassVar[dict[str, ParamSpec]] = {}
     DEFAULT_PARAMS: ClassVar[dict] = {}
-    # Named param bundles ("Turtle S1", "Connors RSI-2"): the productized
-    # version of MetaTrader .set preset files.
-    PRESETS: ClassVar[dict[str, dict]] = {}
     # Cross-param ordering rules: each (a, b) means effective a must stay
     # strictly below effective b (fast_n < slow_n). Validated at save/backtest
     # and surfaced to the UI; on_bar guards remain the backstop.

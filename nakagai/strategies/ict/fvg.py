@@ -51,7 +51,3 @@ def find_fvgs(df: pd.DataFrame, min_size_atr: float = 0.25,
                 state = "open"
             out.append((FVG(df.index[i], Direction.SHORT, float(top), float(bottom)), state))
     return out
-
-
-def find_unfilled_fvgs(df: pd.DataFrame, min_size_atr: float = 0.25, lookback: int = 40) -> list[FVG]:
-    return [f for f, state in find_fvgs(df, min_size_atr, lookback) if state == "open"]

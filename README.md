@@ -8,9 +8,8 @@ a screener compiler.
 ## What is here
 
 - `data/`: `BarCache`/`MemoryBars` over local parquet, the `DataProvider` contract
-  and its Alpaca implementation (single-symbol and batched multi-symbol),
-  agent-mediated Robinhood bar normalization (no network code), and a sync routine
-  that keeps the cache current.
+  and its Alpaca implementation (single-symbol and batched multi-symbol), and a
+  sync routine that keeps the cache current.
 - `engine/`: the walk-forward backtester itself, point-in-time `MarketContext`
   assembly, T+1 cash settlement, run metrics, and the bar-permutation Monte Carlo null.
 - `strategies/`: rule-based (`rules/`), boolean-composed (`composite/`), and
