@@ -30,6 +30,88 @@ def test_opening_range_high_is_per_session_and_constant_after_window():
     assert pd.isna(orh.iloc[0])                        # NaN until the window completes
 
 
+def _reference_opening_range(bars, minutes, col, how):
+    """The obvious per-session loop, kept as the definition of correct.
+
+    The shipped primitive is vectorized for speed; this stays as the thing it
+    must agree with, so the rewrite is checked against something readable
+    rather than against itself.
+    """
+    from nakagai.strategies.util import NY
+    out = pd.Series(np.nan, index=bars.index)
+    days = np.asarray(bars.index.tz_convert(NY).date)
+    for _, day in bars.groupby(days):
+        start = day.index[0]
+        window = day[day.index < start + pd.Timedelta(minutes=minutes)]
+        done = day.index >= start + pd.Timedelta(minutes=minutes)
+        if done.any():
+            out.loc[day.index[done]] = getattr(window[col], how)()
+    return out
+
+
+def _ragged_sessions():
+    """Sessions the tidy fixture does not cover: a half day that closes before
+    the opening range completes, a late open, and a normal day."""
+    spans = [("2026-01-05 14:30", "2026-01-05 20:45"),   # full session
+             ("2026-01-06 14:30", "2026-01-06 14:45"),   # closes inside the 30m window
+             ("2026-01-07 15:30", "2026-01-07 18:00"),   # late open, short session
+             ("2026-01-08 14:30", "2026-01-08 21:00")]
+    idx = pd.DatetimeIndex([t for a, b in spans
+                            for t in pd.date_range(a, b, freq="15min", tz="UTC")])
+    close = np.linspace(100, 130, len(idx))
+    return pd.DataFrame({"open": close - 0.1, "high": close + 0.5, "low": close - 0.5,
+                         "close": close, "volume": 1000.0}, index=idx)
+
+
+def test_opening_range_matches_the_reference_loop_on_ragged_sessions():
+    """A session that ends before its opening range completes must stay NaN,
+    and a late open must measure from its own first bar, not from the clock."""
+    from nakagai.strategies.rules.primitives import _opening_range
+    bars = _ragged_sessions()
+    for col, how in (("high", "max"), ("low", "min")):
+        got = _opening_range(bars, 30, col, how)
+        want = _reference_opening_range(bars, 30, col, how)
+        pd.testing.assert_series_equal(got, want, check_names=False)
+
+
+def test_opening_range_of_an_empty_frame_is_empty():
+    from nakagai.strategies.rules.primitives import _opening_range
+    empty = pd.DataFrame({"high": [], "low": []},
+                         index=pd.DatetimeIndex([], tz="UTC"))
+    assert _opening_range(empty, 30, "high", "max").empty
+
+
+def test_opening_range_cost_does_not_grow_with_history():
+    """The regression guard.
+
+    This primitive is called once per replayed bar, so any per-session Python
+    loop inside it makes a window replay O(sessions x bars) and gets heavier
+    every month as history accumulates. That is not hypothetical: the loop this
+    replaced is why the proving farm's permutation step burned its 90-minute
+    budget every week without finishing a single permutation, for every play
+    that reads an opening range.
+
+    Measured on three years of 15m bars (750 sessions): the loop 90ms per call,
+    vectorized 2.6ms. The 25ms bound sits between them with room on both sides,
+    so a slow or loaded machine does not flake and the loop cannot come back.
+    """
+    import time
+    from nakagai.strategies.rules.primitives import _opening_range
+    idx = pd.DatetimeIndex([t for d in pd.bdate_range("2023-07-03", periods=750)
+                            for t in pd.date_range(f"{d.date()} 14:30", f"{d.date()} 20:45",
+                                                   freq="15min", tz="UTC")])
+    close = np.linspace(100, 400, len(idx))
+    bars = pd.DataFrame({"open": close, "high": close + 0.5, "low": close - 0.5,
+                         "close": close, "volume": 1000.0}, index=idx)
+    _opening_range(bars, 30, "high", "max")        # warm pandas' caches
+    t0 = time.perf_counter()
+    _opening_range(bars, 30, "high", "max")
+    elapsed = time.perf_counter() - t0
+    assert elapsed < 0.025, (
+        f"opening_range took {elapsed*1000:.0f}ms over {len(idx)} bars; it is called "
+        "once per replayed bar, so this is a per-bar cost, not a per-run one")
+
+
 def test_prev_session_close_and_gap_pct():
     from nakagai.strategies.rules.primitives import PRIMITIVES
     bars = _session_bars()
