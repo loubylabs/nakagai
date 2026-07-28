@@ -60,7 +60,7 @@ def window_icir(spec: dict, cache, symbol: str, window: Window,
     bars = frames.get(tf)
     if bars is None or bars.empty:
         return out
-    fe = FrameEval(frames, tfs, symbol)
+    fe = FrameEval(frames, tfs)
     in_win = bars.index[(bars.index >= window.test_start)
                         & (bars.index < window.test_end)]
     if not len(in_win):

@@ -5,9 +5,12 @@ frame at row i equals what the per-bar path computed over the prefix ending at
 i. If this fails, stored evidence is no longer reproducible.
 
 EVERY_NODE is meant to be exhaustive over node KINDS, and a test asserts that it
-is: every indicator name, every primitive name, and every math op has to appear.
-Adding a name to the grammar without adding it here fails that test rather than
-quietly shrinking the gate.
+is: every indicator name, every primitive name, every math op, and every FIELD
+of a multi-field indicator has to appear. A name alone is not coverage: ichimoku
+and bollinger compute several series each, they reach the frame through
+different code, and a name-only gate let four of those fields go untested.
+Adding a name or a field to the grammar without adding it here fails that test
+rather than quietly shrinking the gate.
 
 The oracle lives in tests/whole_frame_oracle.py and shares only the function
 lookup tables with FrameEval, never the walk, so a bug in one cannot hide by
@@ -22,7 +25,7 @@ from nakagai.data.schema import DEFAULT_TIMEFRAMES as TFS
 from nakagai.engine.context import closed_before, visible_counts
 from nakagai.strategies.rules.frame_eval import FrameEval
 from nakagai.strategies.rules.primitives import PRIMITIVES
-from nakagai.strategies.rules.spec import INDICATORS, MATH_OPS
+from nakagai.strategies.rules.spec import ARG_DEFAULTS, INDICATORS, MATH_OPS
 from tests.whole_frame_oracle import prefix_value
 
 EVERY_NODE = [
@@ -32,20 +35,32 @@ EVERY_NODE = [
     {"ind": "highest", "n": 20}, {"ind": "lowest", "n": 20},
     {"ind": "stdev", "n": 20},
     {"ind": "macd", "fast": 12, "slow": 26, "signal": 9, "field": "macd"},
+    {"ind": "macd", "fast": 12, "slow": 26, "signal": 9, "field": "signal"},
     {"ind": "macd", "fast": 12, "slow": 26, "signal": 9, "field": "hist"},
+    {"ind": "bb", "n": 20, "k": 2.0, "field": "upper"},
+    {"ind": "bb", "n": 20, "k": 2.0, "field": "mid"},
     {"ind": "bb", "n": 20, "k": 2.0, "field": "lower"},
     {"ind": "atr", "n": 14}, {"ind": "donchian", "n": 20, "field": "upper"},
+    {"ind": "donchian", "n": 20, "field": "mid"},
+    {"ind": "donchian", "n": 20, "field": "lower"},
     {"ind": "supertrend", "n": 10, "mult": 3.0, "field": "line"},
     {"ind": "supertrend", "n": 10, "mult": 3.0, "field": "direction"},
     {"ind": "vwap"}, {"ind": "stoch", "n": 14, "d": 3, "field": "k"},
+    {"ind": "stoch", "n": 14, "d": 3, "field": "d"},
     {"ind": "adx", "n": 14}, {"ind": "obv"},
     {"ind": "ichimoku", "tenkan_n": 9, "kijun_n": 26, "senkou_n": 52,
      "disp": 26, "field": "tenkan"},
-    # senkou_a is the one displaced field: it reads a value computed `disp`
-    # bars back. Displacement is causal, so it belongs in the gate.
+    {"ind": "ichimoku", "tenkan_n": 9, "kijun_n": 26, "senkou_n": 52,
+     "disp": 26, "field": "kijun"},
+    # senkou_a and senkou_b are the displaced fields: they read a value
+    # computed `disp` bars back. Displacement is causal, so it belongs here.
     {"ind": "ichimoku", "tenkan_n": 9, "kijun_n": 26, "senkou_n": 52,
      "disp": 26, "field": "senkou_a"},
+    {"ind": "ichimoku", "tenkan_n": 9, "kijun_n": 26, "senkou_n": 52,
+     "disp": 26, "field": "senkou_b"},
     {"ind": "keltner", "n": 20, "mult": 2.0, "field": "upper"},
+    {"ind": "keltner", "n": 20, "mult": 2.0, "field": "mid"},
+    {"ind": "keltner", "n": 20, "mult": 2.0, "field": "lower"},
     {"ind": "cci", "n": 20}, {"ind": "mfi", "n": 14}, {"ind": "wpr", "n": 14},
     # `of` routes a series indicator through another node instead of close.
     {"ind": "rsi", "n": 14, "of": {"src": "high"}},
@@ -59,7 +74,9 @@ EVERY_NODE = [
     # The end-anchored pair. FrameEval cannot broadcast these, so it replays
     # them row by row over its span; the oracle calls the same scalar function
     # on the prefix. What is under test is the span, the offset and the
-    # placement back onto the frame's index, not the primitive's arithmetic.
+    # placement back onto the frame's index, not the primitive's arithmetic,
+    # which is why the test below declares a span that starts partway into the
+    # frame: at lo=0 the offset is the identity and proves nothing.
     {"prim": "fvg_nearest", "direction": "long", "field": "top", "state": "open"},
     {"prim": "fvg_nearest", "direction": "long", "field": "mid", "state": "inverted"},
     {"prim": "order_block", "direction": "long", "field": "bottom", "body_atr": 0.8},
@@ -115,6 +132,14 @@ def frames():
             "1d": b15.resample("1D").agg(agg).dropna()}
 
 
+def _nodes_of(kind):
+    """Every EVERY_NODE entry of one kind, including the ones nested as math
+    args, which is where several indicators only ever appear."""
+    return [n for n in EVERY_NODE if kind in n] + [
+        a for n in EVERY_NODE if "op" in n for a in n["args"]
+        if isinstance(a, dict) and kind in a]
+
+
 def test_every_node_kind_in_the_grammar_is_covered():
     """The gate is only a gate while the list is exhaustive.
 
@@ -122,19 +147,35 @@ def test_every_node_kind_in_the_grammar_is_covered():
     here would leave a hole that reads as coverage, so name the omission out
     loud instead.
     """
-    def named(kind):
-        return {n[kind] for n in EVERY_NODE if kind in n} | {
-            a[kind] for n in EVERY_NODE if "op" in n for a in n["args"]
-            if isinstance(a, dict) and kind in a}
-
-    assert named("ind") == set(INDICATORS)
-    assert named("prim") == set(PRIMITIVES)
+    assert {n["ind"] for n in _nodes_of("ind")} == set(INDICATORS)
+    assert {n["prim"] for n in _nodes_of("prim")} == set(PRIMITIVES)
     assert {n["op"] for n in EVERY_NODE if "op" in n} == set(MATH_OPS)
+
+
+def test_every_field_of_a_multi_field_indicator_is_covered():
+    """A NAME is not coverage for an indicator that computes several series.
+
+    ichimoku's four lines and bollinger's three bands are separate columns of
+    one frame, selected after the fact, and a name-only gate passed while
+    kijun, senkou_b and two of the three bands were never evaluated at all.
+    """
+    for name, schema in sorted(INDICATORS.items()):
+        want = set(schema.get("field", ()))
+        if not want:
+            continue
+        got = {n.get("field", ARG_DEFAULTS[name]["field"])
+               for n in _nodes_of("ind") if n["ind"] == name}
+        assert got == want, f"{name}: fields {sorted(want - got)} not covered"
 
 
 @pytest.mark.parametrize("node", EVERY_NODE, ids=lambda n: str(n))
 def test_whole_frame_equals_prefix_at_every_probe_row(node, frames):
-    fe = FrameEval(frames, TFS, "SPY")
+    fe = FrameEval(frames, TFS)
+    # A span that starts partway into the frame, so the end-anchored rows
+    # really do exercise the offset and the placement back onto the frame's
+    # index. At the whole-frame default lo is 0 and the offset is the identity,
+    # which is the one arrangement that cannot catch an off-by-one there.
+    fe.set_span("15m", 300, len(frames["15m"]))
     whole = fe.series(node, "15m")
     driving = frames["15m"]
     rows = list(range(300, len(driving), 37))

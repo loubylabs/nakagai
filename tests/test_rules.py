@@ -23,7 +23,7 @@ def _frames(b15, b1h=None, b1d=None) -> dict:
 
 
 def _fe(b15, b1h=None, b1d=None) -> FrameEval:
-    return FrameEval(_frames(b15, b1h, b1d), TFS, "SPY")
+    return FrameEval(_frames(b15, b1h, b1d), TFS)
 
 
 def _ctx(b15, b1h=None, b1d=None) -> MarketContext:
@@ -31,7 +31,7 @@ def _ctx(b15, b1h=None, b1d=None) -> MarketContext:
     over them, and a cursor on the last row of each."""
     frames = _frames(b15, b1h, b1d)
     return MarketContext("SPY", b15.index[-1] + pd.Timedelta(minutes=15),
-                         bars=frames, tfs=TFS, fe=FrameEval(frames, TFS, "SPY"),
+                         bars=frames, tfs=TFS, fe=FrameEval(frames, TFS),
                          cursor={tf: len(f) - 1 for tf, f in frames.items()})
 
 

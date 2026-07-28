@@ -42,9 +42,28 @@ def _cross_prev(node, v: pd.Series) -> pd.Series:
     them would test the earlier bar against L[i-1] instead, which is a real
     semantic change that moves trades on every play crossing one of them.
     Reproduce the broadcast: an end-anchored operand has no honest history to
-    shift, so its "previous" value is the current row's. Everything else was a
-    genuine series before, where .shift(1) is exactly `.iloc[-2]`. Do not
-    collapse this back into a plain shift on both sides.
+    shift, so its "previous" value is the current row's.
+
+    What the .shift(1) on everything else preserves, exactly, and what it does
+    not:
+
+    - A NATIVE-timeframe operand is preserved. Row i-1 of the whole-frame
+      series is what the prefix ending at i-1 computed, which is what
+      `.iloc[-2]` of the cut frame read.
+    - A CROSS-TIMEFRAME operand is NOT. The number moved on this branch, and it
+      is not lookahead. exprs._align used to ffill by LABEL out of a source
+      frame already cut at `now`, so a 15m spec reading 1h at now=16:00 had a
+      cut 1h frame ending at the bar labelled 15:00, and row -2 (labelled
+      15:30) inherited that bar even though it does not close until 16:00.
+      _align now asks when each destination bar closed, so row -2 gets the bar
+      labelled 14:00, the last one closed at 15:45. Both values were on the
+      desk when the decision was taken, so neither reads the future; the
+      earlier bar is now compared against the reference IT could see rather
+      than the one the current bar can. No catalog play puts a cross-timeframe
+      operand inside a cross, which is why the differential corpus over the
+      catalog stayed byte-identical across this branch.
+
+    Do not collapse this back into a plain shift on both sides.
     """
     if isinstance(node, dict) and node.get("prim") in END_ANCHORED:
         return v
@@ -54,11 +73,9 @@ def _cross_prev(node, v: pd.Series) -> pd.Series:
 class FrameEval:
     """Replay-scoped node cache over one symbol's untruncated frames."""
 
-    def __init__(self, frames: dict, tfs: TimeframeSet = DEFAULT_TIMEFRAMES,
-                 symbol: str = ""):
+    def __init__(self, frames: dict, tfs: TimeframeSet = DEFAULT_TIMEFRAMES):
         self._frames = {tf: f for tf, f in frames.items()}
         self.tfs = tfs
-        self.symbol = symbol
         self._cache: dict = {}
         self._maps: dict = {}
         self._spans: dict = {}

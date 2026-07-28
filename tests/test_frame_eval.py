@@ -45,7 +45,7 @@ def _frames(n=400):
 @pytest.mark.parametrize("node", NODES, ids=lambda n: str(n))
 def test_whole_frame_row_equals_prefix_last_row(node):
     frames = _frames()
-    fe = FrameEval(frames, TFS, "SPY")
+    fe = FrameEval(frames, TFS)
     whole = fe.series(node, "15m")
     driving = frames["15m"]
     for i in (120, 200, 311, len(driving) - 1):
@@ -57,7 +57,7 @@ def test_whole_frame_row_equals_prefix_last_row(node):
 
 def test_cross_timeframe_node_never_sees_an_unclosed_bar():
     frames = _frames()
-    fe = FrameEval(frames, TFS, "SPY")
+    fe = FrameEval(frames, TFS)
     node = {"src": "close", "tf": "1h"}
     got = fe.series(node, "15m")
     driving, hourly = frames["15m"], frames["1h"]
@@ -77,7 +77,7 @@ def test_nothing_visible_yet_is_nan_not_the_last_bar():
     That is the worst-shaped lookahead bug there is: silent, and profitable.
     """
     frames = _frames()
-    fe = FrameEval(frames, TFS, "SPY")
+    fe = FrameEval(frames, TFS)
     got = fe.series({"src": "close", "tf": "1d"}, "15m")
     driving = frames["15m"]
     blind = [i for i in range(len(driving))
@@ -103,7 +103,7 @@ def test_end_anchored_primitive_matches_prefix_over_its_span(node):
     is computed on its own full prefix, so the span needs no warm-up margin, and
     a margin would only cost calls no reader can reach."""
     frames = _frames()
-    fe = FrameEval(frames, TFS, "SPY")
+    fe = FrameEval(frames, TFS)
     fe.set_span("15m", 300, 340)
     got = fe.series(node, "15m")
     for i in range(300, 340):
@@ -147,7 +147,7 @@ def test_a_point_in_time_context_walks_one_row_not_the_whole_frame(monkeypatch):
 
 
 def test_series_is_memoized_per_node():
-    fe = FrameEval(_frames(), TFS, "SPY")
+    fe = FrameEval(_frames(), TFS)
     a = fe.series({"ind": "sma", "n": 20}, "15m")
     b = fe.series({"ind": "sma", "n": 20}, "15m")
     assert a is b
@@ -163,7 +163,7 @@ def test_moving_the_span_after_a_node_is_cached_is_refused():
     built for a single span.
     """
     frames = _frames()
-    fe = FrameEval(frames, TFS, "SPY")
+    fe = FrameEval(frames, TFS)
     fe.set_span("15m", 300, 340)
     fe.series({"prim": "fvg_nearest", "direction": "long", "field": "top"}, "15m")
     with pytest.raises(ValueError, match="span moved"):
@@ -173,7 +173,7 @@ def test_moving_the_span_after_a_node_is_cached_is_refused():
 def test_declaring_a_span_after_the_default_was_used_is_refused():
     """The whole-frame default is a span too, and a node computed under it is
     just as stale once a real one is declared."""
-    fe = FrameEval(_frames(), TFS, "SPY")
+    fe = FrameEval(_frames(), TFS)
     fe.series({"ind": "sma", "n": 20}, "15m")
     with pytest.raises(ValueError, match="span moved"):
         fe.set_span("15m", 100, 200)
@@ -184,7 +184,7 @@ def test_restating_the_same_span_is_allowed():
     changes nothing, and refusing it would make set_span order-sensitive for no
     reason."""
     frames = _frames()
-    fe = FrameEval(frames, TFS, "SPY")
+    fe = FrameEval(frames, TFS)
     fe.set_span("15m", 300, 340)
     fe.series({"ind": "sma", "n": 20}, "15m")
     fe.set_span("15m", 300, 340)
@@ -202,7 +202,7 @@ def test_memo_key_separates_evaluation_timeframes():
     be off by whatever the two indexes disagree about.
     """
     frames = _frames()
-    fe = FrameEval(frames, TFS, "SPY")
+    fe = FrameEval(frames, TFS)
     node = {"src": "close"}
     at15, at1h = fe.series(node, "15m"), fe.series(node, "1h")
     assert at15 is not at1h
@@ -227,7 +227,7 @@ def test_cross_reads_the_bar_before_never_the_bar_after():
     NEXT bar, which is lookahead that no metric would flag.
     """
     frames = _closes([1.0, 2.0, 4.0, 5.0, 2.0, 6.0])
-    fe = FrameEval(frames, TFS, "SPY")
+    fe = FrameEval(frames, TFS)
     cond = {"lhs": {"src": "close"}, "op": "crosses_above", "rhs": 3.0}
     got = fe.condition_series(cond, "15m")
     assert got.dtype == bool
@@ -241,7 +241,7 @@ def test_cross_reads_the_bar_before_never_the_bar_after():
 
 def test_cross_below_reads_the_bar_before():
     frames = _closes([6.0, 5.0, 2.0, 1.0, 4.0, 1.0])
-    fe = FrameEval(frames, TFS, "SPY")
+    fe = FrameEval(frames, TFS)
     cond = {"lhs": {"src": "close"}, "op": "crosses_below", "rhs": 3.0}
     got = fe.condition_series(cond, "15m")
     assert list(got) == [False, False, True, False, False, True]
@@ -258,7 +258,7 @@ def test_cross_against_an_end_anchored_level_keeps_the_scalar_broadcast():
     give, and it must not match.
     """
     frames = _frames()
-    fe = FrameEval(frames, TFS, "SPY")
+    fe = FrameEval(frames, TFS)
     lo, hi = 200, 400
     fe.set_span("15m", lo, hi)
     node = {"prim": "fvg_nearest", "direction": "long", "field": "top"}
@@ -291,7 +291,7 @@ def test_a_higher_timeframe_condition_is_false_until_its_bar_has_closed():
     """
     frames = _frames()
     frames["1h"] = frames["1h"].iloc[8:]
-    fe = FrameEval(frames, TFS, "SPY")
+    fe = FrameEval(frames, TFS)
     group = {"all": [{"lhs": {"src": "close"}, "op": ">", "rhs": 0.0},
                      {"lhs": {"src": "high"}, "op": ">=", "rhs": {"src": "low"}}]}
     out = fe.driving_group(group, "1h")
@@ -326,7 +326,7 @@ def test_a_daily_bar_is_invisible_within_its_own_session():
     frames = {"15m": _hand_bars([100.0] * 26, "2026-01-06 14:30", "15min"),
               "1h": _hand_bars([100.0] * 8, "2026-01-06 14:00", "1h"),
               "1d": _hand_bars([95.0, 96.0], "2026-01-05 00:00", "1D")}
-    fe = FrameEval(frames, TFS, "SPY")
+    fe = FrameEval(frames, TFS)
     assert (fe.series({"src": "close", "tf": "1d"}, "15m") == 95.0).all()
 
 
@@ -343,7 +343,7 @@ def test_a_tf_qualified_primitive_evaluates_on_its_native_frame():
     frames = {"15m": _hand_bars([100.0] * 8, "2026-01-06 14:30", "15min"),
               "1h": b1h,
               "1d": _hand_bars([95.0, 96.0], "2026-01-05 00:00", "1D")}
-    fe = FrameEval(frames, TFS, "SPY")
+    fe = FrameEval(frames, TFS)
     out = fe.series({"prim": "prev_session_high", "tf": "1h"}, "15m")
     assert out.index.equals(frames["15m"].index)
     assert (out == 202.0).all()
@@ -352,6 +352,6 @@ def test_a_tf_qualified_primitive_evaluates_on_its_native_frame():
 def test_session_aligned_destination_timeframe_is_refused():
     """A daily bar's label carries no close time, so its visibility cutoff
     would have to be guessed. _positions refuses rather than guess."""
-    fe = FrameEval(_frames(), TFS, "SPY")
+    fe = FrameEval(_frames(), TFS)
     with pytest.raises(ValueError, match="session-aligned"):
         fe.series({"src": "close", "tf": "15m"}, "1d")

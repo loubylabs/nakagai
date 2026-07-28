@@ -101,7 +101,7 @@ def test_window_icir_end_anchored_factor_is_not_broadcast():
     # simple monotone function of close, so its rank would equal close's rank.
     frame = _order_block_frame()
     node = {"prim": "order_block", "direction": "long", "field": "top"}
-    fe = FrameEval({"15m": frame}, TFS, "SPY")
+    fe = FrameEval({"15m": frame}, TFS)
     in_win = frame.index[200:]
     fe.set_span("15m", 200, len(frame))
     level = fe.series(node, "15m").loc[in_win]

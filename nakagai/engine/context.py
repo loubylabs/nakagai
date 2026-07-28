@@ -23,8 +23,7 @@ class PreloadedBars:
     def __init__(self, cache, symbol: str, tfs: TimeframeSet = DEFAULT_TIMEFRAMES):
         from nakagai.strategies.rules.frame_eval import FrameEval
         self._frames = {tf: cache.load(symbol, tf) for tf in tfs.all}
-        self.tfs = tfs
-        self.fe = FrameEval(self._frames, tfs, symbol)
+        self.fe = FrameEval(self._frames, tfs)
 
     def load(self, symbol: str, timeframe: str):
         return self._frames[timeframe]
@@ -105,7 +104,7 @@ def build_context(cache: BarCache, symbol: str, now: pd.Timestamp,
     # of semantics rather than a point-in-time walker beside a whole-frame one.
     fe = getattr(cache, "fe", None)
     if fe is None:
-        fe = FrameEval(bars, tfs, symbol)
+        fe = FrameEval(bars, tfs)
         # The span is not optional here. A point-in-time caller can only ever
         # read the LAST row of each frame, because the frames were just cut at
         # `now`; without a span the end-anchored primitives default to the whole

@@ -25,7 +25,7 @@ def _bars(closes, start="2026-01-05 14:30", freq="15min"):
 
 def _fe(b15, b1h=None, b1d=None):
     return FrameEval({"15m": b15, "1h": b1h if b1h is not None else b15,
-                      "1d": b1d if b1d is not None else b15}, TFS, "SPY")
+                      "1d": b1d if b1d is not None else b15}, TFS)
 
 
 def test_icir_no_longer_abstains_on_end_anchored_specs():
