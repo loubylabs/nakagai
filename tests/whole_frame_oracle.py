@@ -8,6 +8,8 @@ so a bug in FrameEval cannot hide by being mirrored here.
 Test-only. Never imported by library code.
 """
 
+import operator
+
 import pandas as pd
 
 from nakagai.data.schema import DEFAULT_TIMEFRAMES, TimeframeSet
@@ -19,6 +21,32 @@ from nakagai.strategies.rules.spec import ARG_DEFAULTS, BAR_INDICATORS
 
 _OPS = {"+": lambda a, b: a + b, "-": lambda a, b: a - b,
         "*": lambda a, b: a * b, "/": lambda a, b: a / b}
+_CMP = {">": operator.gt, "<": operator.lt,
+        ">=": operator.ge, "<=": operator.le}
+
+
+def _condition_mask(cond: dict, bars: pd.DataFrame, frames: dict, tf: str,
+                    tfs: TimeframeSet) -> pd.Series:
+    """The condition row by row, every row under the same prefix rule.
+
+    bars_since is the one primitive that wants a whole boolean series rather
+    than a single value, and the old path built it by evaluating the condition
+    as one series over the prefix frame. Every node in the grammar is causal,
+    which is the property the equivalence test pins for the operands
+    themselves, so row j of that series is the operand's own prefix value at
+    row j. Building it that way keeps this file to a single rule, cut and take
+    the last value, instead of growing a second series walker that could mirror
+    FrameEval's mistakes. Comparisons against NaN are False here exactly as
+    they are in pandas.
+    """
+    if tf in tfs.session_aligned:
+        raise ValueError("the oracle evaluates bars_since on intraday frames only")
+    delta = tfs.deltas[tf]
+    cmp = _CMP[cond["op"]]
+    vals = [(prefix_value(cond["lhs"], frames, tf, ts + delta, tfs),
+             prefix_value(cond["rhs"], frames, tf, ts + delta, tfs))
+            for ts in bars.index]
+    return pd.Series([bool(cmp(a, b)) for a, b in vals], index=bars.index)
 
 
 def prefix_value(node, frames: dict, eval_tf: str, now: pd.Timestamp,
@@ -62,5 +90,7 @@ def prefix_value(node, frames: dict, eval_tf: str, now: pd.Timestamp,
     name = node["prim"]
     a = {**PRIM_DEFAULTS.get(name, {}),
          **{k: v for k, v in node.items() if k not in ("prim", "tf")}}
+    if name == "bars_since":
+        a["eval_fn"] = lambda cond, b: _condition_mask(cond, b, frames, src_tf, tfs)
     out = PRIMITIVES[name]["fn"](None, bars, **a)
     return float(out.iloc[-1]) if isinstance(out, pd.Series) else float(out)
