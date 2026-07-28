@@ -1,14 +1,16 @@
-"""RuleSpec v2 expression evaluator: vectorized pandas over MarketContext."""
+"""RuleSpec v2 indicator dispatch tables and scalar/series math helpers.
 
-import json
+Not a walker. The one walk over the grammar lives in frame_eval.FrameEval;
+this module holds only what that walk dispatches into: the three indicator
+tables (series-of-a-series, frame-returning, whole-bar) plus the arithmetic
+helpers. Keeping them here rather than in frame_eval.py lets the test oracle
+share the function lookup without sharing the walk, so a bug in the walker
+cannot hide by being mirrored in its own oracle.
+"""
 
 import pandas as pd
 
 from nakagai.strategies import indicators as ind
-from nakagai.strategies.base import MarketContext
-from nakagai.strategies.rules.primitives import ARG_DEFAULTS as PRIM_DEFAULTS
-from nakagai.strategies.rules.primitives import PRIMITIVES
-from nakagai.strategies.rules.spec import ARG_DEFAULTS, BAR_INDICATORS
 
 _SERIES_FNS = {"sma": lambda s, n: ind.sma(s, n), "ema": lambda s, n: ind.ema(s, n),
                "rsi": lambda s, n: ind.rsi(s, n), "roc": lambda s, n: ind.roc(s, n),
@@ -29,63 +31,6 @@ _BAR_FNS = {"atr": lambda b, a: ind.atr(b, a["n"]),
             "cci": lambda b, a: ind.cci(b, a["n"]),
             "mfi": lambda b, a: ind.mfi(b, a["n"]),
             "wpr": lambda b, a: ind.wpr(b, a["n"])}
-
-
-def _align(v, bars: pd.DataFrame):
-    """Bring a series computed on another timeframe onto the driving index.
-    Frames only contain CLOSED bars (build_context), so ffill is lookahead-safe."""
-    if isinstance(v, pd.Series) and not v.index.equals(bars.index):
-        return v.reindex(bars.index.union(v.index)).ffill().reindex(bars.index)
-    return v
-
-
-def eval_expr(node, ctx: MarketContext, bars: pd.DataFrame, memo: dict):
-    if isinstance(node, (int, float)):
-        return float(node)
-    # Frame-aware key: the same sub-node evaluated against different driving
-    # frames (e.g. inside a tf indicator's `of`) must not share a memo slot.
-    # id(bars) is stable for the memo's lifetime (one on_bar call).
-    key = (id(bars), json.dumps(node, sort_keys=True))
-    if key in memo:
-        return memo[key]
-    memo[key] = out = _eval(node, ctx, bars, memo)
-    return out
-
-
-def _eval(node: dict, ctx: MarketContext, bars: pd.DataFrame, memo: dict):
-    tf_bars = ctx.bars[node["tf"]] if "tf" in node else bars
-    if "src" in node:
-        return _align(tf_bars[node["src"]], bars)
-    if "op" in node:
-        args = [eval_expr(a, ctx, bars, memo) for a in node["args"]]
-        return _math(node["op"], args)
-    if "ind" in node:
-        name = node["ind"]
-        a = {**ARG_DEFAULTS.get(name, {}),
-             **{k: v for k, v in node.items() if k not in ("ind", "of", "tf")}}
-        if name in BAR_INDICATORS:
-            out = _BAR_FNS[name](tf_bars, a)
-        else:
-            # Evaluate `of` with tf_bars as the driving frame so the indicator
-            # computes over native tf bars; only the final result is aligned
-            # back to the driving index (mirrors the bar-indicator branch).
-            of = node.get("of", {"src": "close"})
-            series = eval_expr(of, ctx, tf_bars, memo)
-            if isinstance(series, float):
-                series = pd.Series(series, index=tf_bars.index)
-            fn = _SERIES_FNS.get(name)
-            out = fn(series, a["n"]) if fn else _FRAME_FNS[name](series, a)
-        if isinstance(out, pd.DataFrame):
-            out = out[a["field"]]
-        return _align(out, bars)
-    name = node["prim"]
-    a = {**PRIM_DEFAULTS.get(name, {}),
-         **{k: v for k, v in node.items() if k not in ("prim", "tf")}}
-    if name == "bars_since":
-        a["eval_fn"] = lambda cond, b: eval_condition_series(cond, ctx, b, memo)
-    # Primitives compute on their (possibly higher) timeframe's closed bars;
-    # _align ffills series results onto the driving index, scalars pass through.
-    return _align(PRIMITIVES[name]["fn"](ctx, tf_bars, **a), bars)
 
 
 def _math(op: str, args: list):
@@ -114,43 +59,3 @@ def _as_series(v, like):
         return v
     idx = like.index if isinstance(like, pd.Series) else None
     return pd.Series(v, index=idx)
-
-
-def _last(v) -> float:
-    return float(v.iloc[-1]) if isinstance(v, pd.Series) else float(v)
-
-
-def eval_condition_series(cond: dict, ctx, bars, memo: dict) -> pd.Series:
-    """Elementwise boolean series (comparison ops only; used by bars_since)."""
-    lhs = eval_expr(cond["lhs"], ctx, bars, memo)
-    rhs = eval_expr(cond["rhs"], ctx, bars, memo)
-    if not isinstance(lhs, pd.Series):
-        lhs = pd.Series(lhs, index=bars.index)
-    op = cond["op"]
-    out = {">": lhs > rhs, "<": lhs < rhs, ">=": lhs >= rhs, "<=": lhs <= rhs}[op]
-    return out.fillna(False)
-
-
-def eval_condition(cond: dict, ctx, bars, memo: dict) -> bool:
-    lhs = eval_expr(cond["lhs"], ctx, bars, memo)
-    rhs = eval_expr(cond["rhs"], ctx, bars, memo)
-    op = cond["op"]
-    if op == "crosses_above":
-        if not isinstance(lhs, pd.Series):
-            return False
-        return ind.crossed_above(lhs, rhs)
-    if op == "crosses_below":
-        if not isinstance(lhs, pd.Series):
-            return False
-        return ind.crossed_below(lhs, rhs)
-    a, b = _last(lhs), _last(rhs)
-    if pd.isna(a) or pd.isna(b):
-        return False
-    return {">": a > b, "<": a < b, ">=": a >= b, "<=": a <= b}[op]
-
-
-def eval_group(group: dict, ctx, bars, memo: dict) -> bool:
-    key, items = next(iter(group.items()))
-    results = (eval_group(i, ctx, bars, memo) if ("all" in i or "any" in i)
-               else eval_condition(i, ctx, bars, memo) for i in items)
-    return all(results) if key == "all" else any(results)

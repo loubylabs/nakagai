@@ -38,10 +38,12 @@ class MarketContext:
     now: pd.Timestamp
     bars: dict[str, pd.DataFrame]
     tfs: TimeframeSet = DEFAULT_TIMEFRAMES
-    # Replay-scoped whole-frame evaluation. Present during Engine.run; None for
-    # point-in-time callers (the scanner, the screener) that build a context for
-    # a single `now`. `cursor[tf]` is the row index of the bar closing at `now`,
-    # or -1 when that timeframe has nothing visible yet.
+    # Whole-frame node evaluation, the one walker over the rule grammar.
+    # build_context always supplies one: a replay's covers the untruncated
+    # frames, a point-in-time caller's covers the frames already cut at `now`.
+    # It defaults to None only so a hand-built context stays constructible for
+    # the strategies that never touch the grammar. `cursor[tf]` is the row index
+    # of the bar closing at `now`, or -1 when that timeframe has nothing visible.
     fe: object | None = None
     cursor: dict[str, int] = field(default_factory=dict)
 

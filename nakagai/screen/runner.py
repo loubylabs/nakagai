@@ -12,7 +12,6 @@ from nakagai.data.sync import fetch_incremental
 from nakagai.engine.context import build_context
 from nakagai.screen.spec import is_intraday, max_lookback, referenced_timeframes
 from nakagai.screen.universe import DAILY, FULL
-from nakagai.strategies.rules.exprs import eval_group
 
 
 def _row(symbol: str, tier: str, matched=None, last_close=None,
@@ -73,7 +72,12 @@ def run_screen(spec: dict, tiers: dict[str, str], cache, now=None,
                                  note=f"{sync_note}; {note}" if sync_note else note))
                 skipped += 1
                 continue
-            matched = bool(eval_group(spec["conditions"], ctx, bars, {}))
+            # ctx.fe walks the frames build_context already cut at `now`, so the
+            # last row of the screen's own timeframe IS the bar being screened.
+            # Reading that row is the whole-frame spelling of "evaluate the tree
+            # at now"; the driving index never enters it, and must not, because a
+            # daily-tier symbol has no intraday bars to carry a cursor.
+            matched = bool(ctx.fe.group_series(spec["conditions"], tf).iloc[-1])
             rows.append(_row(sym, tier, matched=matched,
                              last_close=float(bars["close"].iloc[-1]),
                              bar_time=bars.index[-1].isoformat(),

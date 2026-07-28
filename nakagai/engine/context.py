@@ -96,8 +96,13 @@ def build_context(cache: BarCache, symbol: str, now: pd.Timestamp,
     non-rule strategy read it. Removing it would trade that 1.5% for a new
     invariant to defend.
     """
+    from nakagai.strategies.rules.frame_eval import FrameEval
     frames = {tf: cache.load(symbol, tf) for tf in tfs.all}
     bars = {tf: closed_before(frames[tf], tf, now, tfs) for tf in tfs.all}
-    return MarketContext(symbol=symbol, now=now, tfs=tfs, bars=bars,
-                         fe=getattr(cache, "fe", None),
+    # A replay hands its own FrameEval over the untruncated frames (PreloadedBars);
+    # a scanner or screener has no replay, so it gets one over the cut frames, whose
+    # last row IS `now`. Both index the same way, so there is one walker and one set
+    # of semantics rather than a point-in-time walker beside a whole-frame one.
+    fe = getattr(cache, "fe", None) or FrameEval(bars, tfs, symbol)
+    return MarketContext(symbol=symbol, now=now, tfs=tfs, bars=bars, fe=fe,
                          cursor={tf: len(bars[tf]) - 1 for tf in tfs.all})

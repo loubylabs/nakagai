@@ -231,6 +231,47 @@ def test_a_higher_timeframe_condition_is_false_until_its_bar_has_closed():
     assert out.iloc[seeing].all(), "the visible rows must still read satisfied"
 
 
+def _hand_bars(closes, start, freq):
+    idx = pd.date_range(start, periods=len(closes), freq=freq, tz="UTC")
+    c = pd.Series(closes, index=idx, dtype=float)
+    return pd.DataFrame({"open": c, "high": c + 0.5, "low": c - 0.5,
+                         "close": c, "volume": 1000.0}, index=idx)
+
+
+def test_a_daily_bar_is_invisible_within_its_own_session():
+    """Jan 6 rows see Jan 5's daily close, never Jan 6's own.
+
+    A daily bar is labeled at midnight UTC of the session it summarizes, so a
+    plain label-ordered ffill hands every row of Jan 6 the close of the session
+    it is still living through. That is the sharpest lookahead the grammar can
+    express, and the one a session-aligned visibility rule exists to refuse.
+    """
+    frames = {"15m": _hand_bars([100.0] * 26, "2026-01-06 14:30", "15min"),
+              "1h": _hand_bars([100.0] * 8, "2026-01-06 14:00", "1h"),
+              "1d": _hand_bars([95.0, 96.0], "2026-01-05 00:00", "1D")}
+    fe = FrameEval(frames, TFS, "SPY")
+    assert (fe.series({"src": "close", "tf": "1d"}, "15m") == 95.0).all()
+
+
+def test_a_tf_qualified_primitive_evaluates_on_its_native_frame():
+    """prev_session_high[1h] reads the 1h frame, then lands by visibility.
+
+    The primitive has to see hourly bars to have an hourly answer; evaluating
+    it against the driving frame and relabeling would give a 15m answer wearing
+    an hourly name. The Jan 5 session's hourly high is 202.0, and every Jan 6
+    driving row carries it once the hourly bars that establish it have closed.
+    """
+    b1h = pd.concat([_hand_bars([199.5, 201.5], "2026-01-05 13:00", "1h"),
+                     _hand_bars([190.0, 191.0], "2026-01-06 13:00", "1h")])
+    frames = {"15m": _hand_bars([100.0] * 8, "2026-01-06 14:30", "15min"),
+              "1h": b1h,
+              "1d": _hand_bars([95.0, 96.0], "2026-01-05 00:00", "1D")}
+    fe = FrameEval(frames, TFS, "SPY")
+    out = fe.series({"prim": "prev_session_high", "tf": "1h"}, "15m")
+    assert out.index.equals(frames["15m"].index)
+    assert (out == 202.0).all()
+
+
 def test_session_aligned_destination_timeframe_is_refused():
     """A daily bar's label carries no close time, so its visibility cutoff
     would have to be guessed. _positions refuses rather than guess."""

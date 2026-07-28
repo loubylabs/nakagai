@@ -10,7 +10,6 @@ import pandas as pd
 from nakagai.strategies import indicators as ind
 from nakagai.strategies.base import Direction, MarketContext, PositionAction, Signal, Strategy
 from nakagai.strategies.risk import stop_target
-from nakagai.strategies.rules.exprs import eval_group
 from nakagai.strategies.rules.spec import validate_spec
 from nakagai.strategies.util import fresh_bar, first_bar_of_session, rr_signal
 
@@ -55,12 +54,9 @@ class RuleStrategy(Strategy):
         The tree is evaluated on the SPEC's timeframe (so `crosses_above`
         compares consecutive spec-timeframe bars, as the per-bar path did) and
         the resulting boolean is lifted onto the driving index, where the
-        cursor reads it. A point-in-time context has no replay, so it falls
-        back to evaluating the tree directly.
+        cursor reads it.
         """
         tf = self.spec.get("timeframe", "1h")
-        if ctx.fe is None:
-            return eval_group(group, ctx, self._bars_for(ctx), {})
         i = ctx.cursor.get(ctx.tfs.driving, -1)
         if i < 0:
             return False

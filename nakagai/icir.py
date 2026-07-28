@@ -18,25 +18,11 @@ import pandas as pd
 from nakagai.data.schema import DEFAULT_TIMEFRAMES, TimeframeSet
 from nakagai.engine.context import closed_before
 from nakagai.engine.windows import Window
-from nakagai.strategies.base import MarketContext
+from nakagai.strategies.rules.frame_eval import FrameEval
 from nakagai.strategies.rules.margins import spec_margin
 
 IC_HORIZONS = (1, 5, 20)
 MIN_IC_OBS = 10
-
-END_ANCHORED_PRIMS = frozenset({"fvg_nearest", "order_block"})
-
-
-def _uses_end_anchored(node) -> bool:
-    """True when a spec fragment contains a primitive whose vectorized value
-    is anchored to the end of the evaluation frame (lookahead if broadcast)."""
-    if isinstance(node, dict):
-        if node.get("prim") in END_ANCHORED_PRIMS:
-            return True
-        return any(_uses_end_anchored(v) for v in node.values())
-    if isinstance(node, list):
-        return any(_uses_end_anchored(v) for v in node)
-    return False
 
 
 def empty_ic_fields() -> dict:
@@ -69,19 +55,22 @@ def window_icir(spec: dict, cache, symbol: str, window: Window,
     itself has 20 more bars, even if they fall outside this window."""
     out = empty_ic_fields()
     tf = spec.get("timeframe", "1h")
-    if _uses_end_anchored(spec.get("long")) or _uses_end_anchored(spec.get("short")):
-        return out
     frames = {t: closed_before(cache.load(symbol, t), t, window.test_end, tfs)
               for t in tfs.all}
     bars = frames.get(tf)
     if bars is None or bars.empty:
         return out
-    ctx = MarketContext(symbol=symbol, now=window.test_end, bars=frames, tfs=tfs)
+    fe = FrameEval(frames, tfs, symbol)
     in_win = bars.index[(bars.index >= window.test_start)
                         & (bars.index < window.test_end)]
     if not len(in_win):
         return out
-    margin = spec_margin(spec, ctx, in_win)
+    # The end-anchored primitives are row-wise, but only over a declared span:
+    # tell FrameEval the window it must cover so their per-row values are the
+    # ones the window's own rows would have seen.
+    fe.set_span(tf, int(bars.index.searchsorted(in_win[0], side="left")),
+                int(bars.index.searchsorted(in_win[-1], side="right")))
+    margin = spec_margin(spec, fe, in_win)
     if margin.empty:
         return out
     full_close = cache.load(symbol, tf)["close"]
