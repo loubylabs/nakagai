@@ -10,8 +10,17 @@ plan's documented fallback, not its headline REPLICATES = 40,
 PERMUTATIONS = 24. trial_pf was measured at roughly 0.68 seconds per call
 over 2 symbols and 3 windows on this machine, which puts the headline
 configuration at roughly 45 minutes and this fallback at roughly 18 minutes
-in estimate. The actual measured wall clock for both tests together was
-1439 seconds, roughly 24 minutes: budget for that before running this file.
+in estimate.
+
+The work is roughly 13,000 replays: 32 replicates, each one study pass plus
+PERMUTATIONS null passes, each of those TRIALS trials over 2 symbols and 3
+windows. Replicates run across processes (see `_replicates`), so the wall
+clock is that work divided by however many workers the box allows, and the
+1439 seconds this file once took single-threaded is now the CPU total rather
+than the elapsed time. Do not read a wall clock here as a per-replay cost, and
+do not compare one machine's number with another's: on the self-hosted CI
+runners, which are laptops also running the proving farm, the same work has
+ranged over a 2.2x spread from contention alone.
 
 Two symbols are pooled per replicate, not one: a single-symbol trial places
 roughly 3 to 26 trades (measured on BASE_SPEC itself, not its mutants, which
@@ -30,8 +39,12 @@ Marked slow: each replicate replays hundreds of backtests. Run with
 `uv run pytest -m slow tests/test_lab_calibration.py -v`.
 """
 
+import os
 import statistics
+from concurrent.futures import ProcessPoolExecutor
+from contextlib import contextmanager
 from dataclasses import dataclass
+from pathlib import Path
 
 import pytest
 
@@ -48,6 +61,90 @@ TRIALS = 4
 PERMUTATIONS = 16
 
 SYMBOLS = ("TEST", "TEST2")
+
+WORKERS_ENV = "NAKAGAI_LAB_WORKERS"
+
+# One worker is a fresh interpreter holding pandas, numpy, this module and one
+# replicate's bars: 106 MiB measured at that point. The figure below leaves
+# room for the permuted copies a replicate allocates on top of it.
+WORKER_FOOTPRINT = 256 * 1024 * 1024
+
+
+def _memory_limit() -> int | None:
+    """This process's memory cap in bytes, or None when it is not capped.
+
+    Sizing a pool by core count alone is wrong wherever cores and memory are
+    rationed differently, and the platform's core-integration runner is exactly
+    that: a container with no CPU limit, which therefore sees all fifteen of
+    the laptop's cores, and a 4 GiB memory cap. Fifteen workers fit the cores
+    and not the memory.
+    """
+    for path in ("/sys/fs/cgroup/memory.max",                    # cgroup v2
+                 "/sys/fs/cgroup/memory/memory.limit_in_bytes"):  # cgroup v1
+        try:
+            raw = Path(path).read_text().strip()
+        except OSError:
+            continue
+        if raw == "max":
+            return None
+        try:
+            limit = int(raw)
+        except ValueError:
+            continue
+        # v1 reports a huge sentinel rather than "max" when uncapped.
+        return None if limit > (1 << 60) else limit
+    return None
+
+
+_THREAD_VARS = ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
+                "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS")
+
+
+@contextmanager
+def _one_thread_per_worker():
+    """Hold numpy to one thread per worker for the life of a pool.
+
+    A replicate is a long run of small pandas and numpy work, so there is
+    nothing here for a threaded backend to win, and by default each worker
+    opens a thread per core: eight workers times fifteen threads is how a pool
+    ends up slower than the loop it replaced, and how a run gets itself killed
+    under memory pressure. Measured on a laptop under exactly that
+    oversubscription, fifteen workers returned only 4.25x.
+
+    Set in the parent rather than in a pool initializer, because a spawned child
+    imports numpy while unpickling the work and has fixed its thread count
+    before any initializer of ours could run. Children inherit this environment;
+    the parent does no array work while the pool is up.
+    """
+    saved = {var: os.environ.get(var) for var in _THREAD_VARS}
+    os.environ.update({var: "1" for var in _THREAD_VARS})
+    try:
+        yield
+    finally:
+        for var, was in saved.items():
+            if was is None:
+                del os.environ[var]
+            else:
+                os.environ[var] = was
+
+
+def _workers(n: int) -> int:
+    """How many of n replicates to run at once.
+
+    Bounded by what the operator asked for, the cores this process may use, and
+    the memory its container allows. Half the cap rather than all of it: the
+    parent holds pytest and its own frames, and a pool that OOM-kills a worker
+    turns a slow gate into a failing one.
+    """
+    override = os.environ.get(WORKERS_ENV)
+    if override:
+        return max(1, min(int(override), n))
+    cores = (len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity")
+             else os.cpu_count() or 1)
+    limit = _memory_limit()
+    if limit is not None:
+        cores = min(cores, max(1, (limit // 2) // WORKER_FOOTPRINT))
+    return max(1, min(cores, n))
 
 
 def _pooled_frames(frame_fn, seed_a: int, seed_b: int) -> dict:
@@ -106,14 +203,71 @@ def _run_replicate(frames, seed: int) -> _Replicate | None:
         n_nulls=len(nulls))
 
 
+def _noise_replicate(i: int) -> _Replicate | None:
+    """Replicate i of the null calibration. A pure function of i."""
+    return _run_replicate(_pooled_frames(random_walk_frames, 1000 + i, 5000 + i),
+                          seed=i)
+
+
+def _effect_replicate(i: int) -> _Replicate | None:
+    """Replicate i of the positive control. A pure function of i."""
+    return _run_replicate(_pooled_frames(oscillating_frames, 2000 + i, 6000 + i),
+                          seed=i)
+
+
+def _replicates(replicate, n: int) -> list:
+    """Every replicate, in index order, across as many cores as we may use.
+
+    Replicates are independent by construction: each builds its own bars from
+    its own seeds and each permutation draws from `permutation_seed`, so no
+    number here depends on execution order, and `map` returns results in index
+    order whatever order the workers finish in. That makes this a pure wall
+    clock change, and the reason it is worth making is that the loop it
+    replaces was the whole cost of this file: 32 replicates times 17 study
+    passes times 4 trials times 6 backtests is roughly 13,000 replays, run one
+    at a time on a box with more than a dozen idle cores.
+
+    Sequential on a single core, so a one-core run pays no pool overhead and
+    stays trivially debuggable under a profiler.
+    """
+    workers = _workers(n)
+    if workers <= 1:
+        return [replicate(i) for i in range(n)]
+    with _one_thread_per_worker():
+        with ProcessPoolExecutor(max_workers=workers) as pool:
+            return list(pool.map(replicate, range(n)))
+
+
+def _small_null(seed: int) -> list[float]:
+    """A cheap null computed from a seed alone, for the child-vs-parent check."""
+    frames = random_walk_frames("TEST", seed=seed)
+    study = StudySpec(trials=tuple(literal_trials(BASE_SPEC, n=2, seed=seed)),
+                      symbols=("TEST",),
+                      windows=tuple(short_windows(frames, "TEST", count=1)),
+                      seed=seed)
+    return best_of_n_null(frames, study, lab_registry(), 2, epoch="determinism")
+
+
+def test_a_child_process_scores_a_null_identically():
+    """The property every parallel replicate rests on, held cheaply.
+
+    Each seed in this pipeline is explicit and `permutation_seed` is a sha256 of
+    its inputs, so no number here can depend on which process computed it. That
+    is what makes `_replicates` a pure wall clock change. If someone later
+    reaches for a module-level Generator or the global numpy RNG, the
+    replicates quietly stop being reproducible and the slow tests above would
+    still pass: this is the test that would not.
+    """
+    here = _small_null(7)
+    with ProcessPoolExecutor(max_workers=1) as pool:
+        there = pool.submit(_small_null, 7).result()
+    assert here == there
+
+
 @pytest.mark.slow
 def test_p_values_are_uniform_on_pure_noise():
-    replicates = []
-    for i in range(REPLICATES):
-        frames = _pooled_frames(random_walk_frames, 1000 + i, 5000 + i)
-        r = _run_replicate(frames, seed=i)
-        if r is not None:
-            replicates.append(r)
+    replicates = [r for r in _replicates(_noise_replicate, REPLICATES)
+                  if r is not None]
 
     ps = [r.p_value for r in replicates]
     # Printed unconditionally (run with -s to see it) so the acceptance gate's
@@ -171,12 +325,7 @@ def test_p_values_are_uniform_on_pure_noise():
 def test_a_real_effect_is_still_detected():
     """The other failure direction. A null so conservative that nothing ever
     survives would pass the uniformity test above by being uniformly useless."""
-    replicates = []
-    for i in range(8):
-        frames = _pooled_frames(oscillating_frames, 2000 + i, 6000 + i)
-        r = _run_replicate(frames, seed=i)
-        if r is not None:
-            replicates.append(r)
+    replicates = [r for r in _replicates(_effect_replicate, 8) if r is not None]
 
     ps = [r.p_value for r in replicates]
     print(f"\n[calibration] positive control p-values: {ps}")
