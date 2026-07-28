@@ -153,6 +153,45 @@ def test_series_is_memoized_per_node():
     assert a is b
 
 
+def test_moving_the_span_after_a_node_is_cached_is_refused():
+    """The span is a correctness input the memo key does not carry.
+
+    Every END_ANCHORED node's value depends on the span, and the node cache is
+    keyed on (tf, node) alone. Reusing one FrameEval across walk-forward
+    windows is the obvious next optimization and it would silently serve window
+    one's rows for window two. Latent today only because each FrameEval is
+    built for a single span.
+    """
+    frames = _frames()
+    fe = FrameEval(frames, TFS, "SPY")
+    fe.set_span("15m", 300, 340)
+    fe.series({"prim": "fvg_nearest", "direction": "long", "field": "top"}, "15m")
+    with pytest.raises(ValueError, match="span moved"):
+        fe.set_span("15m", 100, 200)
+
+
+def test_declaring_a_span_after_the_default_was_used_is_refused():
+    """The whole-frame default is a span too, and a node computed under it is
+    just as stale once a real one is declared."""
+    fe = FrameEval(_frames(), TFS, "SPY")
+    fe.series({"ind": "sma", "n": 20}, "15m")
+    with pytest.raises(ValueError, match="span moved"):
+        fe.set_span("15m", 100, 200)
+
+
+def test_restating_the_same_span_is_allowed():
+    """Only a MOVE is a lie about the cache. Restating what is already in force
+    changes nothing, and refusing it would make set_span order-sensitive for no
+    reason."""
+    frames = _frames()
+    fe = FrameEval(frames, TFS, "SPY")
+    fe.set_span("15m", 300, 340)
+    fe.series({"ind": "sma", "n": 20}, "15m")
+    fe.set_span("15m", 300, 340)
+    fe.set_span("1h", 0, len(frames["1h"]))   # the default, said out loud
+    assert fe._span("15m") == (300, 340)
+
+
 def test_memo_key_separates_evaluation_timeframes():
     """The same node at two timeframes is two different series.
 

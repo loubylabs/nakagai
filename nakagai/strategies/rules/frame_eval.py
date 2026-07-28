@@ -67,7 +67,30 @@ class FrameEval:
         return self._frames[tf]
 
     def set_span(self, tf: str, lo: int, hi: int) -> None:
-        self._spans[tf] = (max(int(lo), 0), int(hi))
+        """Declare the rows of `tf` the END_ANCHORED primitives are computed on.
+
+        The span is a correctness input for every end-anchored node, and it is
+        deliberately NOT part of the memo key: keying on it would let one
+        FrameEval hold two answers for the same node, and only one of them can
+        be the values the caller's rows actually saw. So the span is fixed for
+        the life of the cache, and moving it once anything is cached raises
+        rather than serving the previous span's rows from behind the memo.
+
+        Raising rather than dropping the affected entries is the deliberate
+        half of that choice. This is the trap waiting for the next person to
+        reuse one FrameEval across walk-forward windows: silence would make
+        that reuse legal and wrong, while quietly invalidating would make it
+        legal and pointless, since every node would be recomputed and the memo
+        is the entire reason to reuse. An error puts the decision in front of
+        whoever tries it. Build one FrameEval per span; both callers do.
+        """
+        span = (max(int(lo), 0), int(hi))
+        if self._cache and self._span(tf) != span:
+            raise ValueError(
+                f"the {tf!r} span moved from {self._span(tf)} to {span} after "
+                "nodes were already computed under the old one; build a new "
+                "FrameEval per replay window rather than re-spanning this one")
+        self._spans[tf] = span
 
     def _span(self, tf: str) -> tuple[int, int]:
         return self._spans.get(tf, (0, len(self._frames[tf])))
