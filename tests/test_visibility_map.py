@@ -47,6 +47,21 @@ def test_map_matches_closed_before_for_the_driving_frame_itself():
     assert list(got) == want
 
 
+def test_map_matches_closed_before_across_dst_transitions():
+    """The session-aligned branch is vectorized as tz_convert + normalize +
+    relocalize (see the comment in visible_counts). That is exactly the kind
+    of expression a DST bug hides in, so exercise both 2026 US transitions:
+    spring forward on 2026-03-08 and fall back on 2026-11-01."""
+    march = pd.date_range("2026-03-06 00:00", "2026-03-10 23:45", freq="15min", tz="UTC")
+    november = pd.date_range("2026-10-30 00:00", "2026-11-03 23:45", freq="15min", tz="UTC")
+    driving = march.append(november)
+    src = _daily(400, start="2026-01-01")
+    closes = driving + TFS.step
+    got = visible_counts(src.index, closes, "1d", TFS)
+    want = [len(closed_before(src, "1d", now, TFS)) for now in closes]
+    assert list(got) == want
+
+
 def test_empty_source_is_all_zero():
     driving = _frame(10, "15min")
     empty = pd.DatetimeIndex([], tz="UTC")

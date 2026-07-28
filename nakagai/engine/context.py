@@ -65,8 +65,17 @@ def visible_counts(src_index: pd.DatetimeIndex, dst_close_times: pd.DatetimeInde
     if not len(src_index):
         return np.zeros(len(dst_close_times), dtype=np.int64)
     if timeframe in tfs.session_aligned:
-        cutoffs = pd.DatetimeIndex(
-            [pd.Timestamp(t.tz_convert(NY).date(), tz="UTC") for t in dst_close_times])
+        # A proved pair replays this map thousands of times (permutations x
+        # windows), so a Python-level loop building one pd.Timestamp per
+        # destination row here is not a stylistic nicety, it is millions of
+        # constructions per pair. tz_convert + normalize + relocalize computes
+        # the same "NY calendar date, as midnight UTC" cutoff for every row in
+        # one vectorized pass: convert to NY wall time, floor to that day's
+        # midnight (still NY-tz-aware, so it is correct across DST changes),
+        # drop the tz, then relabel the naive midnight as UTC. Do not
+        # re-simplify this back into a per-row comprehension.
+        cutoffs = (dst_close_times.tz_convert(NY).normalize()
+                   .tz_localize(None).tz_localize("UTC"))
         return src_index.searchsorted(cutoffs, side="left").astype(np.int64)
     delta = tfs.deltas[timeframe]
     return src_index.searchsorted(dst_close_times - delta, side="right").astype(np.int64)
