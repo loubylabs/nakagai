@@ -18,7 +18,10 @@ resulting p-value means nothing:
     observed = run_study(cache, study, registry)
     nulls = best_of_n_null(frames, study, registry, n_permutations=200)
     verdict = study_verdict(observed.best.pf, nulls,
-                            n_trades=sum(r.n_trades for r in observed.results))
+                            n_trades=observed.best.n_trades)
+
+`n_trades` is the winning trial's own ledger, not the sum across the set: the
+sum would clear a trade floor the winner alone would fail.
 """
 
 from nakagai.lab.mutate import (Site, Trial, composite_trials, literal_trials,

@@ -240,3 +240,55 @@ def test_verdict_with_no_observed_cannot_survive():
 
 def test_verdict_reports_the_permutation_count():
     assert study_verdict(2.0, [1.0] * 7, n_trades=40)["n_permutations"] == 7
+
+
+def test_on_progress_ticks_once_per_permutation():
+    """The null is the entire compute cost of a study, and a caller that cannot
+    see inside it can only show a spinner for minutes.
+
+    The tick carries (done, total) and no phase name: the core does not know
+    what the caller's other phases are.
+    """
+    frames = random_walk_frames("TEST", seed=3)
+    seen = []
+    best_of_n_null(frames, _study(frames), lab_registry(), n_permutations=4,
+                   on_progress=lambda done, total: seen.append((done, total)))
+
+    assert seen == [(1, 4), (2, 4), (3, 4), (4, 4)]
+
+
+def test_should_cancel_stops_at_a_permutation_boundary():
+    """Consulted between permutations, the only clean stopping point: a
+    permutation is a whole replay of the search, and a half-replayed one has no
+    number to report.
+
+    A short list is how a caller learns it was cancelled.
+    """
+    frames = random_walk_frames("TEST", seed=3)
+    asked = {"n": 0}
+
+    def stop_after_two():
+        asked["n"] += 1
+        return asked["n"] > 2
+
+    nulls = best_of_n_null(frames, _study(frames), lab_registry(),
+                           n_permutations=5, should_cancel=stop_after_two)
+
+    assert len(nulls) == 2
+
+
+def test_neither_hook_can_move_a_number():
+    """The invariant the whole lab rests on: the observed value and every null
+    replay come out of one procedure. A hook that could change a number would
+    break that silently.
+    """
+    frames = random_walk_frames("TEST", seed=3)
+    study = _study(frames)
+    plain = best_of_n_null(frames, study, lab_registry(), n_permutations=3,
+                           epoch="fixed")
+    hooked = best_of_n_null(frames, study, lab_registry(), n_permutations=3,
+                            epoch="fixed",
+                            on_progress=lambda done, total: None,
+                            should_cancel=lambda: False)
+
+    assert plain == hooked

@@ -223,3 +223,45 @@ def test_the_subprocess_agrees_with_this_process():
     here = [[r.trial_id, r.spec_hash, r.pf, r.n_trades]
             for r in run_study(memory_cache(frames), study, lab_registry()).results]
     assert here == _in_subprocess()
+
+
+def test_sink_receives_every_run_with_its_trial():
+    """The sink sees one call per (trial, symbol, window), carrying the Trial.
+
+    A run dict knows its symbol and window and nothing about which mutant
+    produced it. The platform names the evidence store's strategy column per
+    trial, so the trial has to arrive with the run or the caller cannot tell
+    them apart.
+    """
+    frames = random_walk_frames("TEST", seed=1)
+    windows = short_windows(frames, "TEST")
+    trials = tuple(literal_trials(BASE_SPEC, n=3, seed=11))
+    study = StudySpec(trials=trials, symbols=("TEST",),
+                      windows=tuple(windows), seed=11)
+    seen = []
+    run_study(memory_cache(frames), study, lab_registry(),
+              sink=lambda trial, run: seen.append((trial.id, run["symbol"])))
+
+    assert len(seen) == len(trials) * 1 * len(windows)
+    assert {t for t, _ in seen} == {t.id for t in trials}
+    assert {s for _, s in seen} == {"TEST"}
+
+
+def test_sink_does_not_change_the_number():
+    """The statistic is identical with and without a sink attached.
+
+    This is the invariant the whole lab rests on: the observed value and every
+    null replay come out of one procedure. A sink that could move the number
+    would break that silently.
+    """
+    frames = random_walk_frames("TEST", seed=1)
+    windows = short_windows(frames, "TEST")
+    trials = tuple(literal_trials(BASE_SPEC, n=3, seed=11))
+    study = StudySpec(trials=trials, symbols=("TEST",),
+                      windows=tuple(windows), seed=11)
+    without = run_study(memory_cache(frames), study, lab_registry())
+    with_sink = run_study(memory_cache(frames), study, lab_registry(),
+                          sink=lambda trial, run: None)
+
+    assert [r.pf for r in without.results] == [r.pf for r in with_sink.results]
+    assert [r.n_trades for r in without.results] == [r.n_trades for r in with_sink.results]

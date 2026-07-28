@@ -21,7 +21,8 @@ from nakagai.stats import pf_from_trades
 
 def trial_pf(cache, trial: Trial, symbols: Sequence[str],
              windows: Sequence[Window], registry,
-             tfs: TimeframeSet = DEFAULT_TIMEFRAMES) -> tuple[float, int]:
+             tfs: TimeframeSet = DEFAULT_TIMEFRAMES, *,
+             sink=None) -> tuple[float, int]:
     """Pooled profit factor for one trial across every symbol and window.
 
     Pooled, not averaged: one ledger built from every replay, so a trial that
@@ -30,13 +31,26 @@ def trial_pf(cache, trial: Trial, symbols: Sequence[str],
 
     Returns 0.0 for an empty ledger. pf_from_trades returns None there, and
     None cannot be compared against an observed PF when the nulls are ranked.
+
+    `sink`, when given, is called as sink(trial, run) for every run_one result
+    as it is produced, and its return value is ignored. It exists so a caller
+    can persist the underlying runs without this function accumulating them:
+    at a full study's scale the ledgers are the bulk of the memory, and a
+    caller that streams them keeps a worker process flat. It cannot move the
+    number, since the statistic is computed from `rows` either way, and the
+    null never passes one. The trial is passed alongside the run because a run
+    dict records its symbol and window and carries nothing identifying which
+    mutant produced it.
     """
     rows = []
     for symbol in symbols:
         for window in windows:
-            rows.append(run_one(cache, trial.strategy, {"spec": trial.spec},
-                                symbol, window, tfs=tfs, registry=registry,
-                                icir=False))
+            run = run_one(cache, trial.strategy, {"spec": trial.spec},
+                          symbol, window, tfs=tfs, registry=registry,
+                          icir=False)
+            if sink is not None:
+                sink(trial, run)
+            rows.append(run)
     trades = pd.DataFrame([t for r in rows for t in r["trades"]])
     return float(pf_from_trades(trades) or 0.0), int(len(trades))
 
@@ -71,18 +85,21 @@ class StudyResult:
 
 
 def run_study(cache, study: StudySpec, registry,
-              tfs: TimeframeSet = DEFAULT_TIMEFRAMES) -> StudyResult:
+              tfs: TimeframeSet = DEFAULT_TIMEFRAMES, *,
+              sink=None) -> StudyResult:
     """Score every trial in the frozen set and report the best.
 
     Results are returned in the trial set's own order, so a caller comparing
     two runs compares like with like without sorting first.
+
+    `sink` is forwarded to trial_pf unchanged; see its docstring.
     """
     if not study.trials:
         raise ValueError("a study needs at least one trial")
     results = []
     for trial in study.trials:
         pf, n_trades = trial_pf(cache, trial, study.symbols, study.windows,
-                                registry, tfs=tfs)
+                                registry, tfs=tfs, sink=sink)
         results.append(TrialResult(trial_id=trial.id, spec_hash=trial.spec_hash,
                                    pf=pf, n_trades=n_trades))
     best = max(results, key=lambda r: r.pf) if results else None
