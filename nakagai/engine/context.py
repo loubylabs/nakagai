@@ -4,10 +4,8 @@ import numpy as np
 import pandas as pd
 
 from nakagai.data.cache import BarCache
-from nakagai.data.schema import DEFAULT_TIMEFRAMES, TimeframeSet
+from nakagai.data.schema import DEFAULT_TIMEFRAMES, EXCHANGE_TZ, TimeframeSet
 from nakagai.strategies.base import MarketContext
-
-NY = "America/New_York"
 
 
 class PreloadedBars:
@@ -48,7 +46,7 @@ def closed_before(df: pd.DataFrame, timeframe: str, now: pd.Timestamp,
         # date, which for these labels is exactly ts < that date's UTC
         # midnight. Comparing NY-converted timestamps instead would shift a
         # midnight-UTC bar back a day and leak a bar into its own session.
-        cutoff = pd.Timestamp(now.tz_convert(NY).date(), tz="UTC")
+        cutoff = pd.Timestamp(now.tz_convert(EXCHANGE_TZ).date(), tz="UTC")
         return df.iloc[:df.index.searchsorted(cutoff, side="left")]
     delta = tfs.deltas[timeframe]
     return df.iloc[:df.index.searchsorted(now - delta, side="right")]
@@ -78,7 +76,7 @@ def visible_counts(src_index: pd.DatetimeIndex, dst_close_times: pd.DatetimeInde
         # midnight (still NY-tz-aware, so it is correct across DST changes),
         # drop the tz, then relabel the naive midnight as UTC. Do not
         # re-simplify this back into a per-row comprehension.
-        cutoffs = (dst_close_times.tz_convert(NY).normalize()
+        cutoffs = (dst_close_times.tz_convert(EXCHANGE_TZ).normalize()
                    .tz_localize(None).tz_localize("UTC"))
         return src_index.searchsorted(cutoffs, side="left").astype(np.int64)
     delta = tfs.deltas[timeframe]
