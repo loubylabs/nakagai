@@ -162,12 +162,44 @@ def test_an_end_anchored_level_on_the_left_of_a_cross_is_rejected(node):
     assert any(node["prim"] in e and "series" in e for e in errs), errs
 
 
+NEST = [
+    ({"op": "*", "args": [FVG, 1.0]}, "one math op"),
+    ({"op": "+", "args": [{"op": "*", "args": [OB, 1.0]}, 0.0]}, "two math ops"),
+    ({"ind": "ema", "n": 3, "of": FVG}, "an indicator's `of`"),
+]
+
+
+@pytest.mark.parametrize("side", ["lhs", "rhs"])
+@pytest.mark.parametrize("node,how", NEST, ids=[h for _, h in NEST])
+def test_an_end_anchored_level_nested_in_a_cross_operand_is_rejected(node, how, side):
+    """series_required only ever looked at the operand's TOP node, so every one
+    of these validated, on either side. That is not the supported reading read
+    from one level down, it is the other reading: _cross_prev matches on the
+    node itself, so nesting hides the primitive and the whole computed series
+    gets .shift(1). It is also span-dependent, since an end-anchored primitive
+    is NaN outside its span, which is exactly what makes the bars_since case
+    below illegal."""
+    other = {"src": "close"}
+    cond = {"lhs": node if side == "lhs" else other, "op": "crosses_above",
+            "rhs": node if side == "rhs" else other}
+    errs = validate_spec({**ORB, "long": {"all": [cond]}})
+    assert any("nested inside a cross" in e for e in errs), errs
+
+
+def test_a_bare_end_anchored_level_on_the_right_is_not_caught_by_the_nesting_check():
+    """The nesting check must not swallow the one shape the catalog uses.
+    fvg_bounce, ifvg_reversal, ob_bounce and smc_confluence all depend on it."""
+    spec = {**ORB, "long": {"all": [
+        {"lhs": {"src": "close"}, "op": "crosses_above", "rhs": FVG}]}}
+    assert validate_spec(spec) == []
+
+
 @pytest.mark.parametrize("node", [FVG, OB], ids=lambda n: n["prim"])
 def test_bars_since_over_an_end_anchored_level_is_rejected(node):
-    """bars_since ffills over the whole mask, so it is the one reader that
-    looks outside the span the end-anchored primitives are evaluated over.
-    Outside it they are NaN and the condition False, so the same bar would
-    count differently depending on which walk-forward window replayed it."""
+    """bars_since ffills over the whole mask, so it reaches rows outside the
+    span the end-anchored primitives are evaluated over. Outside it they are
+    NaN and the condition False, so the same bar would count differently
+    depending on which walk-forward window replayed it."""
     spec = {**ORB, "long": {"all": [
         {"lhs": {"prim": "bars_since",
                  "cond": {"lhs": {"src": "close"}, "op": ">", "rhs": node}},
