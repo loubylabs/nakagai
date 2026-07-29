@@ -4,7 +4,7 @@ import datetime as dt
 
 import pandas as pd
 
-NY = "America/New_York"
+from nakagai.data.schema import EXCHANGE_TZ
 
 
 def _next_weekday(d: dt.date) -> dt.date:
@@ -20,7 +20,7 @@ class SettledLedger:
         self._pending: list[tuple[dt.date, float]] = []  # (settle_date_NY, amount)
 
     def settled(self, now: pd.Timestamp) -> float:
-        today = now.tz_convert(NY).date()
+        today = now.tz_convert(EXCHANGE_TZ).date()
         still = []
         for settle_date, amount in self._pending:
             if settle_date <= today:
@@ -47,4 +47,4 @@ class SettledLedger:
         return sum(amount for _, amount in self._pending)
 
     def credit(self, amount: float, now: pd.Timestamp):
-        self._pending.append((_next_weekday(now.tz_convert(NY).date()), float(amount)))
+        self._pending.append((_next_weekday(now.tz_convert(EXCHANGE_TZ).date()), float(amount)))

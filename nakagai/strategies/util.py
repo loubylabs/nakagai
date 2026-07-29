@@ -8,9 +8,8 @@ driving-timeframe bar.
 
 import pandas as pd
 
+from nakagai.data.schema import EXCHANGE_TZ, SESSION_OPEN
 from nakagai.strategies.base import Direction, MarketContext, Signal
-
-NY = "America/New_York"
 
 
 def fresh_bar(ctx: MarketContext, timeframe: str) -> bool:
@@ -22,14 +21,44 @@ def fresh_bar(ctx: MarketContext, timeframe: str) -> bool:
     return (ctx.now - close_ts) < ctx.tfs.step
 
 
+def session_open(ts: pd.Timestamp) -> pd.Timestamp:
+    """The regular open of the NY session `ts` falls in, in UTC.
+
+    Built from the exchange-local calendar fields rather than by adding 9h30m
+    to midnight, so it stays the 09:30 WALL time across a DST change instead of
+    drifting an hour on the two Sundays a year the offset moves.
+    """
+    ny = ts.tz_convert(EXCHANGE_TZ)
+    return pd.Timestamp(year=ny.year, month=ny.month, day=ny.day,
+                        hour=SESSION_OPEN[0], minute=SESSION_OPEN[1],
+                        tz=EXCHANGE_TZ).tz_convert("UTC")
+
+
 def first_bar_of_session(ctx: MarketContext) -> bool:
-    """True on the first completed driving bar of a new NY session: the
-    once-a-day gate for strategies driven by session-aligned bars."""
-    b = ctx.driving_bars
-    if len(b) < 2:
-        return len(b) == 1
-    ny = b.index.tz_convert(NY)
-    return ny[-1].date() != ny[-2].date()
+    """True on the driving bar that OPENS a new regular session: the once-a-day
+    gate for strategies driven by session-aligned bars.
+
+    Anchored on the 09:30 open, not on the calendar date changing. Those look
+    equivalent and are not, because the caches are not RTH-only: providers
+    return sporadic pre-market prints, and on roughly half of the sessions in a
+    three-year SPY cache the first bar of the date is one of them, at 08:00 or
+    08:15. Under the date-change reading the gate fired on THAT bar, which no
+    live scanner ever visits (it wakes 09:45-16:00), so every daily play went
+    dark for the whole session while the same play entered normally in replay.
+    The two agree again now, and they agree on the bar a daily signal actually
+    means: the one the session opens on.
+
+    A session whose 09:30 bar is missing fires on the first bar that is there,
+    one bar late, which is the honest answer rather than skipping the day.
+
+    Cheaper than what it replaces, which matters because a replay calls this
+    once per bar per daily play: converting the whole index to New York was
+    O(history) per bar, and this is a binary search plus one construction.
+    """
+    idx = ctx.driving_bars.index
+    if not len(idx):
+        return False
+    return idx.searchsorted(session_open(idx[-1]), side="left") == len(idx) - 1
 
 
 def rr_signal(ctx: MarketContext, direction: Direction, stop: float, rr: float,

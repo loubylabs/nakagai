@@ -7,6 +7,19 @@ import pandas as pd
 
 BAR_COLUMNS = ["open", "high", "low", "close", "volume"]
 
+# The exchange's own conventions, in one place because three modules were each
+# carrying their own copy of the timezone and the platform carried a fourth of
+# the opening bell. Everything session-shaped in the engine is expressed
+# against these: which UTC date a daily bar's label belongs to
+# (engine/context.closed_before) and when a new regular session begins
+# (strategies/util.first_bar_of_session).
+EXCHANGE_TZ = "America/New_York"
+# The regular session's open, as (hour, minute) of EXCHANGE_TZ. Deliberately
+# the REGULAR open and not the first bar of the calendar date: caches are not
+# RTH-only, so the first bar of a date is whatever pre-market print the
+# provider happened to return, which is not a fact about the session.
+SESSION_OPEN = (9, 30)
+
 
 def empty_bars() -> pd.DataFrame:
     """The canonical "no bars" frame: right columns, right dtypes, UTC index.

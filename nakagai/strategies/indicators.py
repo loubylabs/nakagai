@@ -8,7 +8,7 @@ value uses only rows at or before its own timestamp.
 import numpy as np
 import pandas as pd
 
-NY = "America/New_York"
+from nakagai.data.schema import EXCHANGE_TZ
 
 
 def sma(close: pd.Series, n: int) -> pd.Series:
@@ -81,7 +81,7 @@ def session_vwap(bars: pd.DataFrame) -> pd.Series:
     """Volume-weighted average price, reset each NY session date."""
     typical = (bars["high"] + bars["low"] + bars["close"]) / 3
     pv = typical * bars["volume"]
-    dates = bars.index.tz_convert(NY).date
+    dates = bars.index.tz_convert(EXCHANGE_TZ).date
     grouped_pv = pd.Series(pv.values, index=bars.index).groupby(dates).cumsum()
     grouped_v = bars["volume"].groupby(dates).cumsum()
     return grouped_pv / grouped_v.replace(0, np.nan)

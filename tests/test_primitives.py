@@ -37,9 +37,9 @@ def _reference_opening_range(bars, minutes, col, how):
     must agree with, so the rewrite is checked against something readable
     rather than against itself.
     """
-    from nakagai.strategies.util import NY
+    from nakagai.data.schema import EXCHANGE_TZ
     out = pd.Series(np.nan, index=bars.index)
-    days = np.asarray(bars.index.tz_convert(NY).date)
+    days = np.asarray(bars.index.tz_convert(EXCHANGE_TZ).date)
     for _, day in bars.groupby(days):
         start = day.index[0]
         window = day[day.index < start + pd.Timedelta(minutes=minutes)]

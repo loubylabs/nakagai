@@ -11,11 +11,11 @@ import pandas as pd
 from nakagai.strategies.base import Direction, MarketContext
 from nakagai.strategies.ict.fvg import find_fvgs
 from nakagai.strategies.ict.primitives import _strict_extrema, atr as _ict_atr
-from nakagai.strategies.util import NY
+from nakagai.data.schema import EXCHANGE_TZ
 
 
 def _ny_dates(bars: pd.DataFrame) -> np.ndarray:
-    return np.asarray(bars.index.tz_convert(NY).date)
+    return np.asarray(bars.index.tz_convert(EXCHANGE_TZ).date)
 
 
 def _session_groups(bars: pd.DataFrame):
@@ -145,7 +145,7 @@ def day_of_week(ctx: MarketContext, bars: pd.DataFrame) -> pd.Series:
     so exact-midnight labels read the UTC calendar day instead."""
     idx = bars.index
     midnight_utc = (idx.hour == 0) & (idx.minute == 0)
-    dow = np.where(midnight_utc, idx.dayofweek, idx.tz_convert(NY).dayofweek)
+    dow = np.where(midnight_utc, idx.dayofweek, idx.tz_convert(EXCHANGE_TZ).dayofweek)
     return pd.Series(dow.astype(float), index=idx)
 
 
