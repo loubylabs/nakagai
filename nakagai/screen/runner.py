@@ -1,44 +1,35 @@
 """Deterministic one-shot screen evaluation. No LLM anywhere in this path.
 
-Providers, when given, sync full-tier symbols incrementally before evaluating
-(only for the timeframes the spec references). Daily-tier symbols are never
-synced here: the nightly cron owns their freshness. A sync failure never
-aborts evaluation: it is noted on the row and cached bars still evaluate.
-Every row carries its own bar_time so staleness is visible, never hidden."""
+Providers, when given, sync each symbol incrementally before evaluating (only
+for the timeframes the spec references). A sync failure never aborts
+evaluation: it is noted on the row and cached bars still evaluate. Every row
+carries its own bar_time so staleness is visible, never hidden."""
 
 import pandas as pd
 
 from nakagai.data.sync import fetch_incremental
 from nakagai.engine.context import build_context
-from nakagai.screen.spec import is_intraday, max_lookback, referenced_timeframes
-from nakagai.screen.universe import DAILY, FULL
+from nakagai.screen.spec import max_lookback, referenced_timeframes
 
 
-def _row(symbol: str, tier: str, matched=None, last_close=None,
+def _row(symbol: str, matched=None, last_close=None,
          bar_time: str = "", note: str = "") -> dict:
-    return {"symbol": symbol, "tier": tier, "matched": matched,
+    return {"symbol": symbol, "matched": matched,
             "last_close": last_close, "bar_time": bar_time, "note": note}
 
 
-def run_screen(spec: dict, tiers: dict[str, str], cache, now=None,
+def run_screen(spec: dict, symbols: list[str], cache, now=None,
                providers: dict | None = None, sync_days: int = 60) -> dict:
     now = now if now is not None else pd.Timestamp.now(tz="UTC")
     tf = spec.get("tf", "1d")
     needed = referenced_timeframes(spec)
-    intraday = is_intraday(spec)
     lookback = max_lookback(spec)
     rows: list[dict] = []
     errors: list[str] = []
     skipped = 0
-    for sym in sorted(tiers):
-        tier = tiers[sym]
+    for sym in sorted(symbols):
         sync_note = ""
-        if intraday and tier == DAILY:
-            rows.append(_row(sym, tier,
-                             note="intraday screen: no intraday data for this tier"))
-            skipped += 1
-            continue
-        if providers and tier == FULL:
+        if providers:
             for sync_tf, provider in providers.items():
                 if sync_tf not in needed:
                     continue
@@ -61,14 +52,14 @@ def run_screen(spec: dict, tiers: dict[str, str], cache, now=None,
             bars = ctx.bars[tf]
             if bars.empty:
                 note = f"no {tf} bars cached"
-                rows.append(_row(sym, tier,
+                rows.append(_row(sym,
                                  note=f"{sync_note}; {note}" if sync_note else note))
                 skipped += 1
                 continue
             if len(bars) < lookback:
                 note = (f"only {len(bars)} bars cached; the screen's "
                         f"longest indicator needs {lookback}")
-                rows.append(_row(sym, tier,
+                rows.append(_row(sym,
                                  note=f"{sync_note}; {note}" if sync_note else note))
                 skipped += 1
                 continue
@@ -76,22 +67,21 @@ def run_screen(spec: dict, tiers: dict[str, str], cache, now=None,
             # last row of the screen's own timeframe IS the bar being screened.
             # Reading that row is the whole-frame spelling of "evaluate the tree
             # at now"; the driving index never enters it, and must not, because a
-            # daily-tier symbol has no intraday bars to carry a cursor.
+            # symbol screened on an intraday timeframe may have no intraday bars
+            # to carry a cursor.
             matched = bool(ctx.fe.group_series(spec["conditions"], tf).iloc[-1])
-            rows.append(_row(sym, tier, matched=matched,
+            rows.append(_row(sym, matched=matched,
                              last_close=float(bars["close"].iloc[-1]),
                              bar_time=bars.index[-1].isoformat(),
                              note=sync_note))
         except Exception as e:  # partial failure: other symbols still screen
             errors.append(f"{sym}: {e}")
             note = f"error: {e}"
-            rows.append(_row(sym, tier,
+            rows.append(_row(sym,
                              note=f"{sync_note}; {note}" if sync_note else note))
             skipped += 1
     rows.sort(key=lambda r: (r["matched"] is not True, r["symbol"]))
     return {"bar_close": now.isoformat(),
             "rows": rows,
-            "universe": {"full": sum(1 for t in tiers.values() if t == FULL),
-                         "daily": sum(1 for t in tiers.values() if t == DAILY),
-                         "skipped": skipped},
+            "universe": {"screened": len(symbols), "skipped": skipped},
             "errors": errors}

@@ -6,7 +6,6 @@ import pytest
 
 from nakagai.data.cache import BarCache
 from nakagai.screen.runner import run_screen
-from nakagai.screen.universe import DAILY, FULL
 
 NOW = pd.Timestamp("2026-07-17 20:05", tz="UTC")
 
@@ -39,27 +38,30 @@ ABOVE_SMA20 = {"version": 1, "tf": "1d", "conditions": {"all": [
 
 
 def test_run_screen_matches_and_sorts_matched_first(cache):
-    result = run_screen(ABOVE_SMA20, {"DOWN": DAILY, "UP": DAILY}, cache, now=NOW)
+    result = run_screen(ABOVE_SMA20, ["DOWN", "UP"], cache, now=NOW)
     assert [r["symbol"] for r in result["rows"]] == ["UP", "DOWN"]
     up, down = result["rows"]
     assert up["matched"] is True and down["matched"] is False
     assert up["last_close"] == pytest.approx(100.0)
     assert up["bar_time"].startswith("2026-07-16")
-    assert result["universe"] == {"full": 0, "daily": 2, "skipped": 0}
+    assert result["universe"] == {"screened": 2, "skipped": 0}
     assert result["errors"] == []
 
 
-def test_run_screen_skips_daily_tier_on_an_intraday_spec(cache):
-    spec = {**ABOVE_SMA20, "tf": "1h"}
-    result = run_screen(spec, {"UP": DAILY, "DOWN": FULL}, cache, now=NOW)
-    by_sym = {r["symbol"]: r for r in result["rows"]}
-    assert by_sym["UP"]["matched"] is None
-    assert "intraday screen" in by_sym["UP"]["note"]
-    assert result["universe"]["skipped"] == 1
+def test_run_screen_rows_carry_no_tier(cache):
+    result = run_screen(ABOVE_SMA20, ["UP"], cache, now=NOW)
+    assert result["rows"], "fixture produced no rows"
+    assert all("tier" not in row for row in result["rows"])
+
+
+def test_run_screen_universe_counts_screened_and_skipped(cache):
+    result = run_screen(ABOVE_SMA20, ["UP"], cache, now=NOW)
+    assert set(result["universe"]) == {"screened", "skipped"}
+    assert result["universe"]["screened"] == 1
 
 
 def test_run_screen_notes_missing_bars(cache):
-    result = run_screen(ABOVE_SMA20, {"GHOST": FULL}, cache, now=NOW)
+    result = run_screen(ABOVE_SMA20, ["GHOST"], cache, now=NOW)
     row = result["rows"][0]
     assert row["matched"] is None and "no 1d bars cached" in row["note"]
 
@@ -67,7 +69,7 @@ def test_run_screen_notes_missing_bars(cache):
 def test_run_screen_notes_short_history(cache):
     spec = {"version": 1, "tf": "1d", "conditions": {"all": [
         {"lhs": {"src": "close"}, "op": ">", "rhs": {"ind": "sma", "n": 200}}]}}
-    result = run_screen(spec, {"UP": DAILY}, cache, now=NOW)
+    result = run_screen(spec, ["UP"], cache, now=NOW)
     row = result["rows"][0]
     assert row["matched"] is None and "60 bars cached" in row["note"]
 
@@ -83,14 +85,16 @@ def test_run_screen_isolates_a_bad_symbol(cache, monkeypatch):
         return real(cache_, sym, now)
 
     monkeypatch.setattr(runner_mod, "build_context", boom)
-    result = run_screen(ABOVE_SMA20, {"UP": DAILY, "DOWN": DAILY}, cache, now=NOW)
+    result = run_screen(ABOVE_SMA20, ["UP", "DOWN"], cache, now=NOW)
     by_sym = {r["symbol"]: r for r in result["rows"]}
     assert by_sym["DOWN"]["matched"] is False
     assert by_sym["UP"]["matched"] is None and "error" in by_sym["UP"]["note"]
     assert any("UP" in e for e in result["errors"])
 
 
-def test_run_screen_syncs_full_tier_only(cache):
+def test_run_screen_syncs_every_symbol_when_providers_given(cache):
+    # There is no tier left to exempt: on-demand fetch means every symbol in
+    # the request gets the same sync treatment.
     calls = []
 
     class _Provider:
@@ -98,10 +102,10 @@ def test_run_screen_syncs_full_tier_only(cache):
             calls.append((symbol, timeframe))
             return _daily_bars([1.0])
 
-    run_screen(ABOVE_SMA20, {"UP": FULL, "DOWN": DAILY}, cache, now=NOW,
+    run_screen(ABOVE_SMA20, ["UP", "DOWN"], cache, now=NOW,
                providers={"1d": _Provider()})
     assert ("UP", "1d") in calls
-    assert all(sym != "DOWN" for sym, _ in calls)
+    assert ("DOWN", "1d") in calls
 
 
 def test_run_screen_widens_the_1d_sync_window_for_a_long_lookback(cache):
@@ -114,7 +118,7 @@ def test_run_screen_widens_the_1d_sync_window_for_a_long_lookback(cache):
 
     sma200 = {"version": 1, "tf": "1d", "conditions": {"all": [
         {"lhs": {"src": "close"}, "op": ">", "rhs": {"ind": "sma", "n": 200}}]}}
-    run_screen(sma200, {"UP": FULL}, cache, now=NOW,
+    run_screen(sma200, ["UP"], cache, now=NOW,
                providers={"1d": _RecordingProvider()})
     assert starts and (NOW - starts[0]) >= pd.Timedelta(days=399)
 
@@ -124,7 +128,7 @@ def test_run_screen_evaluates_cached_bars_when_sync_fails(cache):
         def fetch_bars(self, symbol, timeframe, start, end):
             raise RuntimeError("429 rate limited")
 
-    result = run_screen(ABOVE_SMA20, {"UP": FULL}, cache, now=NOW,
+    result = run_screen(ABOVE_SMA20, ["UP"], cache, now=NOW,
                         providers={"1d": _FlakyProvider()})
     row = result["rows"][0]
     assert row["symbol"] == "UP"
