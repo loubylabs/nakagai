@@ -1,11 +1,11 @@
 """The best-of-N permutation null: what the luckiest of N trials looks like
 when there is nothing there to find.
 
-nakagai/stats.py::null_batch replays ONE play per permutation and yields that
-play's null PF, which is the right null for a single hypothesis. A search is
-not a single hypothesis. Here every trial in the frozen set is replayed on the
-SAME permuted copy of the bars and only the maximum is kept, which is exactly
-the distribution of "best of N under the null".
+A single-hypothesis null replays ONE play per permutation and yields that
+play's null PF. A search is not a single hypothesis. Here every trial in the
+frozen set is replayed on the SAME permuted copy of the bars and only the
+maximum is kept, which is exactly the distribution of "best of N under the
+null".
 
 That distinction is the entire statistical content of the lab. Comparing an
 observed best-of-60 against a single-hypothesis null would clear roughly one
@@ -41,8 +41,8 @@ def best_of_n_null(frames: dict, study: StudySpec, registry,
     the three. On the observed bars the three timeframes are mutually
     consistent because `1h` and `1d` are resampled up from `15m`; on a
     permuted copy they are not, since each was permuted on its own. This
-    matches the shipped `nakagai/stats.py::null_batch` exactly and is
-    deliberate existing convention, not something introduced here.
+    is deliberate existing convention, carried over from the single-hypothesis
+    permutation code this module superseded, not something introduced here.
 
     Every trial in the frozen set is scored with `trial_pf`, the same
     function `run_study` uses for the observed statistic, so the null and the

@@ -10,7 +10,9 @@ path. Overlapping k-bar forward returns across rows are not independent
 observations, so n_obs inflates relative to the effective sample size.
 
 Import discipline: the engine runner imports this module, so it must never
-import nakagai.engine.runner or nakagai.stats.
+import nakagai.engine.runner. nakagai.stats used to be banned here for the
+same reason, since it pulled in the runner itself; it is a leaf on pandas
+now, so importing it would no longer close a cycle.
 """
 
 import pandas as pd
