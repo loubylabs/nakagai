@@ -70,6 +70,10 @@ EVERY_NODE = [
     {"prim": "prev_session_close"}, {"prim": "gap_pct"},
     {"prim": "swing_high", "k": 3}, {"prim": "swing_low", "k": 3},
     {"prim": "day_of_week"}, {"prim": "minutes_into_session"},
+    # A 5-session window rather than the default 20: this frame is 40 sessions
+    # long and the probe rows below start at 300 (session 12), so the default
+    # would spend the first third of the probes comparing NaN against NaN.
+    {"prim": "rvol", "sessions": 5},
     {"prim": "leg_retrace", "direction": "long", "k": 3},
     # The end-anchored pair. FrameEval cannot broadcast these, so it replays
     # them row by row over its span; the oracle calls the same scalar function

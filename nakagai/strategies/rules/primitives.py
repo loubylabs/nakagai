@@ -154,6 +154,61 @@ def minutes_into_session(ctx: MarketContext, bars: pd.DataFrame) -> pd.Series:
     return ((bars.index.to_series() - starts).dt.total_seconds() / 60).astype(float)
 
 
+def rvol(ctx: MarketContext, bars: pd.DataFrame, sessions: int = 20) -> pd.Series:
+    """This bar's volume over the MEDIAN volume of the same clock time across
+    the trailing `sessions` sessions, the current session excluded.
+
+    What this replaces is the catalog's own idiom, a volume threshold written
+    against `sma(50, of=volume)`, which on intraday bars reads the clock rather
+    than the tape. Volume has a session shape: the bars just after the open and
+    just before the close carry a multiple of what midday carries, every single
+    day, whether or not anything is happening. Measured on three years of 15m
+    bars, the median 09:30 bar already sits at 2.78x its own rolling 50-bar
+    mean for NVDA, 2.21x for AAPL and 1.27x for JNJ, while the 12:30 bar sits
+    near 0.55x for all three. So one written threshold asks two different
+    questions: `> 3x mean` fires on roughly half of NVDA's ordinary mornings,
+    and at midday demands about 5.7x the genuine normal. Comparing a bar only
+    against other bars from its own place in the session takes the shape out,
+    so the threshold means the same thing at 09:30 as it does at 12:30.
+
+    Three choices worth naming, because each has a plausible-looking
+    alternative that is wrong:
+
+    The baseline is a median, not a mean. Ordinary is the thing being measured,
+    and one halted or news-driven session inside the window drags a mean far
+    enough to hide the next genuine surge behind it.
+
+    It is shifted by one occurrence, so a session is never part of its own
+    baseline. Without that, a large bar lifts the median it is measured against
+    and reads tamer than it is, exactly when it matters.
+
+    It buckets on the EXCHANGE clock, not on the UTC label. The 09:30 bar is
+    14:30 UTC in winter and 13:30 UTC in summer, so a UTC bucket splits in two
+    every March and November and blanks the primitive for `sessions` days each
+    time.
+
+    NaN until a bucket holds `sessions` earlier occurrences: half a window is a
+    different measurement, not a rough one.
+    """
+    n = int(sessions)
+    ny = bars.index.tz_convert(EXCHANGE_TZ)
+    clock = ny.hour * 60 + ny.minute
+    # Shift INSIDE the bucket, so the step back is one occurrence of this clock
+    # time rather than one calendar session. Half days and late opens are
+    # ordinary: a session with no 15:45 bar should simply not be in the 15:45
+    # bucket, rather than punch a hole through the next `sessions` days of it.
+    # The lambda is a Python loop over buckets, but a bucket is one clock time,
+    # so their number is bounded by the bars in a session and does not grow as
+    # history accumulates, which is the property _opening_range's cost guard
+    # exists to protect.
+    baseline = bars["volume"].groupby(clock).transform(
+        lambda v: v.shift(1).rolling(n).median())
+    # A zero baseline means the symbol did not trade at this clock time in most
+    # of the trailing window. That is not an infinite surge, it is an absence of
+    # anything to compare against, and a condition reads NaN as False.
+    return (bars["volume"] / baseline.where(baseline > 0)).rename(None)
+
+
 def bars_since(ctx: MarketContext, bars: pd.DataFrame, cond: dict, eval_fn=None) -> pd.Series:
     """Bars elapsed since `cond` was last elementwise-true. NaN before the
     first True. eval_fn(cond, bars) -> boolean Series is injected by the
@@ -202,6 +257,7 @@ PRIMITIVES: dict[str, dict] = {
     "swing_low": {"args": {"k": (1, 10)}, "fn": swing_low},
     "day_of_week": {"args": {}, "fn": day_of_week},
     "minutes_into_session": {"args": {}, "fn": minutes_into_session},
+    "rvol": {"args": {"sessions": (5, 60)}, "fn": rvol},
     "bars_since": {"args": {"cond": "condition"}, "fn": bars_since},
     "fvg_nearest": {"args": {"direction": ("long", "short"),
                              "field": ("top", "bottom", "mid"),
@@ -216,22 +272,28 @@ PRIMITIVES: dict[str, dict] = {
                     "fn": order_block},
 }
 # Session/calendar-scoped primitives read the driving frame's own session or
-# calendar structure (session-open windows, elapsed session minutes, the bar's
-# calendar weekday) rather than plain OHLCV structure. Feeding them a `tf` swaps
-# in a different frame's bars, which silently degenerates: opening_range_* on
-# "1d" bars (one bar per session) never sees its window elapse and is NaN
-# forever, on "1h" bars a minutes=30 window is measured in whole-hour steps;
-# minutes_into_session on "1d" bars is 0 everywhere (one bar per session group);
-# day_of_week reads calendar identity that belongs to the spec's own session,
-# so answering it from a foreign frame is a category error even though the
-# primitive itself now handles midnight-UTC daily labels. These primitives
-# must always run on the spec's own driving bars, so `tf` is rejected outright.
+# calendar structure (session-open windows, elapsed session minutes, a bar's
+# place in the session's volume shape, the bar's calendar weekday) rather than
+# plain OHLCV structure. Feeding them a `tf` swaps in a different frame's bars,
+# which silently degenerates: opening_range_* on "1d" bars (one bar per session)
+# never sees its window elapse and is NaN forever, on "1h" bars a minutes=30
+# window is measured in whole-hour steps; minutes_into_session on "1d" bars is 0
+# everywhere (one bar per session group); rvol on "1d" bars has one bar per
+# session, so its same-clock-time bucket is the whole series and the primitive
+# quietly becomes a plain trailing-median volume ratio, a different measurement
+# wearing the same name, while on "1h" bars the buckets are whole hours, so a
+# 15m spec's 09:30 bar is answered from a 09:30-to-10:30 aggregate; day_of_week
+# reads calendar identity that belongs to the spec's own session, so answering
+# it from a foreign frame is a category error even though the primitive itself
+# now handles midnight-UTC daily labels. These primitives must always run on the
+# spec's own driving bars, so `tf` is rejected outright.
 SESSION_SCOPED_PRIMS = frozenset({
-    "opening_range_high", "opening_range_low", "minutes_into_session", "day_of_week",
+    "opening_range_high", "opening_range_low", "minutes_into_session",
+    "day_of_week", "rvol",
 })
 ARG_DEFAULTS: dict[str, dict] = {
     "opening_range_high": {"minutes": 30}, "opening_range_low": {"minutes": 30},
-    "swing_high": {"k": 3}, "swing_low": {"k": 3},
+    "swing_high": {"k": 3}, "swing_low": {"k": 3}, "rvol": {"sessions": 20},
     "fvg_nearest": {"direction": "long", "field": "top", "state": "open",
                     "min_size_atr": 0.25, "lookback": 40},
     "leg_retrace": {"direction": "long", "k": 3},
