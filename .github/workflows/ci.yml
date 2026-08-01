@@ -5,6 +5,10 @@ on:
     branches: [main]
   pull_request:
 
+# Read-only by default. The one job that needs more says so itself.
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -31,3 +35,93 @@ jobs:
           uv build --wheel -o dist/
           uv run --isolated --no-project --with dist/nakagai-*.whl \
             python -c "import nakagai.engine.engine; import nakagai.strategies.rules; import nakagai.screen.compiler; print('ok')"
+
+  publish:
+    name: publish to PyPI
+    # Here rather than in a publish.yml of its own because `needs` is how GitHub
+    # says "the tests passed", and it only reaches inside a single workflow. A
+    # separate file would have to re-run the suite or chain off workflow_run.
+    needs: [test, wheel]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    # The environment is the real fence, not the `if` above. An OIDC token is
+    # minted only for a job asking for id-token: write, and a fork's pull request
+    # cannot reach an environment, so ci.yml running on untrusted PRs cannot
+    # reach the trusted publisher.
+    environment: pypi
+    permissions:
+      id-token: write
+    concurrency:
+      group: publish-pypi
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+
+      - name: Has this version already been published?
+        id: gate
+        env:
+          # Fastly caches the simple index by full URL. A unique query string per
+          # run is therefore always a cache MISS, which is the point: see below.
+          CACHE_BUSTER: ${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          uv run --no-project --python 3.12 python - <<'PY'
+          import json
+          import os
+          import tomllib
+          import urllib.error
+          import urllib.request
+
+          # The gate is "this version is not on the index yet", not "the version
+          # line changed in this commit". A diff against the parent breaks on a
+          # workflow re-run, on the first publish, and on any squash that
+          # rewrites the parent. Asking the index holds however the commit got here.
+          #
+          # The query string is not decoration. PyPI's CDN was observed serving a
+          # cached 404 for a project for minutes after it went live (see
+          # loubylabs/nakagai-edge#17). Read that stale 404 and the gate concludes
+          # "nothing is published", so an ordinary merge that does not touch
+          # `version` stops being a no-op and becomes a duplicate upload, which
+          # fails and reddens main. A unique URL per run cannot be served from
+          # cache, so the gate always sees origin.
+          version = tomllib.load(open("pyproject.toml", "rb"))["project"]["version"]
+          req = urllib.request.Request(
+              f"https://pypi.org/simple/nakagai/?_={os.environ['CACHE_BUSTER']}",
+              headers={"Accept": "application/vnd.pypi.simple.v1+json"})
+          try:
+              with urllib.request.urlopen(req, timeout=30) as r:
+                  data = json.load(r)
+          except urllib.error.HTTPError as e:
+              if e.code != 404:
+                  raise
+              # No such project yet. That is the first publish, not an error.
+              data = {"versions": []}
+
+          if "versions" not in data:
+              raise SystemExit(
+                  "PyPI's simple index returned no PEP 700 `versions` key, so the "
+                  "gate cannot prove this version is unpublished. Refusing to guess.")
+
+          fresh = version not in set(data["versions"])
+          print(f"::notice::{version} " + ("is not on PyPI; publishing."
+                                           if fresh else "is already on PyPI; skipping."))
+          with open(os.environ["GITHUB_OUTPUT"], "a") as fh:
+              fh.write(f"version={version}\nshould_publish={str(fresh).lower()}\n")
+          PY
+
+      - name: Build the sdist and the wheel
+        if: steps.gate.outputs.should_publish == 'true'
+        run: uv build -o dist/
+
+      - name: Upload to PyPI
+        if: steps.gate.outputs.should_publish == 'true'
+        # Trusted publishing (OIDC): no API token lives in this repo. The action
+        # also attaches PEP 740 attestations, so a consumer can verify the wheel
+        # was built by this workflow from this commit.
+        #
+        # `skip-existing` is deliberately unset. The gate above already prevents
+        # a duplicate; if one reaches here anyway the gate is wrong, and that
+        # should fail loudly rather than pass quietly.
+        uses: pypa/gh-action-pypi-publish@release/v1
