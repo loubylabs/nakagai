@@ -10,6 +10,7 @@ readback; canon.py owns identity hashing.
 
 from nakagai.data.schema import DEFAULT_TIMEFRAMES
 from nakagai.strategies.rules.primitives import ARG_DEFAULTS as PRIM_DEFAULTS
+from nakagai.strategies.rules.primitives import DRIVING_FRAME_INTRADAY_PRIMS
 from nakagai.strategies.rules.primitives import END_ANCHORED, PRIMITIVES
 from nakagai.strategies.rules.primitives import SESSION_SCOPED_PRIMS
 
@@ -119,22 +120,53 @@ def _prims_in(node, names) -> set[str]:
     return found
 
 
+# What a one-bar session does to each primitive that cannot survive it. Said
+# per primitive because the NL compiler retries against this text, and "needs
+# intraday bars" alone gives it nothing to reason with.
+_ONE_BAR_SESSION = {
+    "opening_range_high": "the opening-range window never elapses, so the "
+                          "level is NaN on every bar",
+    "opening_range_low": "the opening-range window never elapses, so the "
+                         "level is NaN on every bar",
+    "minutes_into_session": "every bar sits 0 minutes into its own session",
+    "rvol": "every bar shares one clock time, so the same-clock-time baseline "
+            "becomes the whole series and this reads as a plain "
+            "trailing-median volume ratio (a daily relative-volume measure "
+            "would be a separate primitive with its own name)",
+}
+
+
 def _check_session_aligned_refs(node, eval_tf: str, path: str,
                                 errs: list[str]) -> None:
-    """Refuse a cross-timeframe reference evaluated on a session-aligned frame.
+    """Refuse what a session-aligned frame cannot answer. Two rules live here.
 
-    frame_eval carries a series from one timeframe onto another by asking when
-    each DESTINATION bar closed, and a session-aligned label carries no close
-    time: a daily bar's label holds the session date, not the 16:00 NY bell.
-    The evaluator refuses to guess, but it does so per symbol at evaluation
-    time, inside the screener's per-symbol try/except, where a daily screen
-    with one intraday reference writes an error note on every row and reads as
-    a screen that simply matched nothing. Say it once here instead, where the
-    NL compiler's retry loop can see it; the runtime guard stays as a backstop.
+    The first: a cross-timeframe reference evaluated on a session-aligned
+    frame. frame_eval carries a series from one timeframe onto another by
+    asking when each DESTINATION bar closed, and a session-aligned label
+    carries no close time: a daily bar's label holds the session date, not the
+    16:00 NY bell. The evaluator refuses to guess, but it does so per symbol at
+    evaluation time, inside the screener's per-symbol try/except, where a daily
+    screen with one intraday reference writes an error note on every row and
+    reads as a screen that simply matched nothing. Say it once here instead,
+    where the NL compiler's retry loop can see it; the runtime guard stays as a
+    backstop.
+
+    The second: an intraday-only primitive whose EFFECTIVE frame is session
+    aligned. That fires whether or not a foreign timeframe is involved, so it
+    reads src_tf rather than comparing it to the parent's. A spec declaring
+    "timeframe": "1d" and using opening_range_high used to validate clean and
+    then read NaN forever; nothing raised, because the only primitive rule was
+    the foreign-`tf` one, which such a spec never trips.
+
+    The two rules run over two different sets, deliberately: see
+    DRIVING_FRAME_INTRADAY_PRIMS on why day_of_week is refused a foreign `tf`
+    and welcome on daily bars.
 
     `eval_tf` follows the evaluator: a node's own `tf` is the frame its
     children are computed on, which is how a bars_since with a tf, or an
     indicator's `of`, moves the destination frame out from under a subtree.
+    That is also what lets the second rule catch a primitive whose parent
+    carries the tf, a shape the own-`tf` check in _check_expr cannot see.
     Iterative for the same reason _prims_in is.
     """
     stack, seen = [(node, eval_tf, path)], set()
@@ -150,11 +182,19 @@ def _check_session_aligned_refs(node, eval_tf: str, path: str,
         if not isinstance(item, dict):
             continue
         seen.add(key)
+        # src_tf is the frame THIS node is evaluated on: its own tf when it
+        # carries one, otherwise the frame it inherited.
         src_tf = item.get("tf", tf) if isinstance(item.get("tf", tf), str) else tf
         if src_tf != tf and tf in SESSION_ALIGNED:
             errs.append(f"{at}: {tf} is session-aligned, so a reference to "
                         f"{src_tf!r} has no well-defined visibility cutoff; "
                         "move it to an intraday timeframe")
+        prim = item.get("prim")
+        if prim in DRIVING_FRAME_INTRADAY_PRIMS and src_tf in SESSION_ALIGNED:
+            errs.append(f"{at}: {prim} needs intraday bars and this one is "
+                        f"evaluated on {src_tf!r}, where "
+                        f"{_ONE_BAR_SESSION[prim]}; move it to an intraday "
+                        "timeframe")
         stack.extend((v, src_tf, f"{at}.{k}")
                      for k, v in item.items() if k != "tf")
 

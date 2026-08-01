@@ -61,6 +61,19 @@ _Donch = type("_Donch", (RuleStrategy,), {
 _MEMBERS = {"rules": RuleStrategy, "donchian_breakout": _Donch}
 
 
+def test_prompt_flags_the_primitives_a_daily_spec_cannot_use():
+    """validate_spec refuses these on a 1d driving frame, so the prompt says it
+    up front rather than spending a retry on the refusal. day_of_week is not
+    flagged: it takes no tf, but on daily bars its reading is exactly right."""
+    lines = render_system_prompt().splitlines()
+    for name in ("opening_range_high", "opening_range_low",
+                 "minutes_into_session", "rvol"):
+        line = next(ln for ln in lines if ln.startswith(f"- {name}("))
+        assert "intraday spec timeframe" in line, line
+    dow = next(ln for ln in lines if ln.startswith("- day_of_week("))
+    assert "intraday spec timeframe" not in dow, dow
+
+
 def test_prompt_without_members_has_no_composite_section():
     p = render_system_prompt()
     assert "composite" not in p.lower()

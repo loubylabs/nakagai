@@ -3,6 +3,7 @@ import pytest
 from nakagai.strategies.rules import (
     canonical_spec, describe_spec, spec_hash, validate_spec,
 )
+from nakagai.strategies.rules.spec import validate_condition_group
 
 ORB = {
     "version": 2, "name": "orb-volume", "timeframe": "15m",
@@ -252,6 +253,96 @@ def test_the_session_aligned_refusal_covers_the_exit_group():
                  "rhs": {"ind": "sma", "n": 20, "tf": "15m"}}]}}}
     errs = validate_spec(spec)
     assert any("exits.exit" in e and "session-aligned" in e for e in errs), errs
+
+
+DAILY = {"version": 2, "name": "daily", "timeframe": "1d", "risk": ORB["risk"]}
+INTRADAY_ONLY = [
+    {"prim": "opening_range_high", "minutes": 30},
+    {"prim": "opening_range_low", "minutes": 30},
+    {"prim": "minutes_into_session"},
+    {"prim": "rvol", "sessions": 20},
+]
+
+
+def _daily(node):
+    return {**DAILY, "long": {"all": [{"lhs": node, "op": ">", "rhs": 1}]}}
+
+
+@pytest.mark.parametrize("node", INTRADAY_ONLY, ids=lambda n: n["prim"])
+def test_an_intraday_only_primitive_is_refused_on_a_daily_driving_frame(node):
+    """One daily bar IS the whole session, so these read nothing: the opening
+    range never elapses (NaN forever), every bar sits 0 minutes into its
+    session, and rvol's same-clock-time bucket swallows the entire series. The
+    old rule only refused a foreign `tf`, so a 1d spec validated clean and then
+    read something that did not mean what its name says."""
+    errs = validate_spec(_daily(node))
+    assert any(e.startswith("long.all[0].lhs") and node["prim"] in e
+               for e in errs), errs
+
+
+def test_rvol_names_the_door_it_closes():
+    """Refusing rvol on daily bars is a decision, not an oversight: there it
+    collapses to a trailing-median daily volume ratio, a different measurement
+    wearing the same name. The message has to say a daily reading needs its own
+    primitive, because the NL compiler retries against this text."""
+    errs = validate_spec(_daily({"prim": "rvol"}))
+    assert any("rvol" in e and "own name" in e for e in errs), errs
+
+
+def test_day_of_week_is_still_fine_on_a_daily_driving_frame():
+    """The trap in this rule. turnaround_tuesday is a shipped 1d catalog play
+    whose entire premise is day_of_week, and on daily bars that reading is
+    RIGHT: a daily bar is one session, so its weekday is exactly the calendar
+    identity the primitive promises. Only the foreign-`tf` rule refuses it."""
+    assert validate_spec(_daily({"prim": "day_of_week"})) == []
+
+
+@pytest.mark.parametrize("tf", ["15m", "1h"])
+@pytest.mark.parametrize("node", INTRADAY_ONLY, ids=lambda n: n["prim"])
+def test_the_same_primitives_are_untouched_on_an_intraday_driving_frame(node, tf):
+    assert validate_spec({**_daily(node), "timeframe": tf}) == []
+
+
+def test_the_refusal_follows_a_tf_that_moves_the_frame_under_a_subtree():
+    """The spec is 15m, but the indicator's `tf` puts its `of` subtree on daily
+    bars. The primitive carries no tf of its own, so the own-`tf` check cannot
+    see this; the walker, which tracks the effective frame, can."""
+    spec = {**DAILY, "timeframe": "15m", "long": {"all": [
+        {"lhs": {"ind": "sma", "n": 5, "tf": "1d",
+                 "of": {"prim": "minutes_into_session"}},
+         "op": ">", "rhs": 1}]}}
+    errs = validate_spec(spec)
+    assert any(e.startswith("long.all[0].lhs.of") and "minutes_into_session" in e
+               for e in errs), errs
+
+
+def test_the_refusal_covers_the_exit_group_too():
+    spec = {**DAILY, "long": {"all": [{"lhs": {"src": "close"}, "op": ">", "rhs": 1}]},
+            "exits": {"exit": {"all": [
+                {"lhs": {"prim": "minutes_into_session"}, "op": ">", "rhs": 120}]}}}
+    errs = validate_spec(spec)
+    assert any(e.startswith("exits.exit") and "minutes_into_session" in e
+               for e in errs), errs
+
+
+def test_the_foreign_tf_rule_is_unchanged_by_the_driving_frame_rule():
+    """Two rules over two different sets. A weekday read off a 1h frame inside
+    a 15m spec is still a category error, and a 15m spec is still free to look
+    at a daily close."""
+    errs = validate_spec({**DAILY, "timeframe": "15m", "long": {"all": [
+        {"lhs": {"prim": "day_of_week", "tf": "1h"}, "op": ">", "rhs": 1}]}})
+    assert any("day_of_week is session-scoped and takes no tf" in e for e in errs)
+    assert validate_spec(ORB) == []
+
+
+def test_a_daily_screen_refuses_an_intraday_only_primitive():
+    """The screener path: its whole schema is one condition group, and its tf
+    defaults to 1d, so this is the surface most likely to hit the rule."""
+    group = {"all": [{"lhs": {"prim": "rvol"}, "op": ">", "rhs": 2}]}
+    errs = validate_condition_group(group, "conditions", tf="1d")
+    assert any(e.startswith("conditions.all[0].lhs") and "rvol" in e
+               for e in errs), errs
+    assert validate_condition_group(group, "conditions", tf="1h") == []
 
 
 def test_describe_mentions_the_pieces():
