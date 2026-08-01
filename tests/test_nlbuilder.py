@@ -105,7 +105,7 @@ def test_happy_path_returns_spec_and_readback():
 
 
 def test_validation_errors_trigger_retry_with_error_feedback():
-    bad = {**GOOD_SPEC, "timeframe": "4h"}
+    bad = {**GOOD_SPEC, "timeframe": "2h"}
     client = FakeClient([json.dumps({"spec": bad}), json.dumps({"spec": GOOD_SPEC})])
     res = compile_strategy("buy rsi dips", client=client)
     assert res.spec == GOOD_SPEC and res.attempts == 2
@@ -114,7 +114,7 @@ def test_validation_errors_trigger_retry_with_error_feedback():
 
 
 def test_gives_up_after_max_retries():
-    bad = json.dumps({"spec": {**GOOD_SPEC, "timeframe": "4h"}})
+    bad = json.dumps({"spec": {**GOOD_SPEC, "timeframe": "2h"}})
     client = FakeClient([bad, bad, bad])
     res = compile_strategy("x", client=client, max_retries=2)
     assert res.spec is None and res.attempts == 3
@@ -168,7 +168,7 @@ def test_textless_reply_retries_instead_of_crashing():
 
 
 def test_usage_is_summed_across_retries_with_cache_split():
-    bad = {**GOOD_SPEC, "timeframe": "4h"}
+    bad = {**GOOD_SPEC, "timeframe": "2h"}
     client = FakeClient([json.dumps({"spec": bad}), json.dumps({"spec": GOOD_SPEC})])
     res = compile_strategy("buy rsi dips", client=client)
     assert res.attempts == 2
@@ -199,7 +199,7 @@ class _RaisingClient:
 
 
 def test_client_exception_returns_error_result_with_partial_usage():
-    bad = json.dumps({"spec": {**GOOD_SPEC, "timeframe": "4h"}})
+    bad = json.dumps({"spec": {**GOOD_SPEC, "timeframe": "2h"}})
     res = compile_strategy("x", client=_RaisingClient(bad))
     assert "api down" in res.error
     assert res.spec is None
@@ -256,7 +256,7 @@ def test_bad_rules_leg_retries_with_block_prefixed_errors():
     bad = {**GOOD_COMPOSITE,
            "blocks": {"a": {"strategy": "donchian_breakout"},
                       "b": {"strategy": "rules",
-                            "params": {"spec": {**GOOD_SPEC, "timeframe": "4h"}}}}}
+                            "params": {"spec": {**GOOD_SPEC, "timeframe": "2h"}}}}}
     client = FakeClient([json.dumps({"kind": "composite", "spec": bad}),
                          json.dumps({"kind": "composite", "spec": GOOD_COMPOSITE})])
     res = compile_strategy("combine", client=client, members=_MEMBERS)

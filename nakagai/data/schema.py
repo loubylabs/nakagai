@@ -63,10 +63,17 @@ class TimeframeSet:
         return self.deltas[self.driving]
 
 
+# 4h is DERIVED, not fetched: it is resampled from the cached 1h bars against
+# the Eastern wall clock (nakagai/data/resample.py). It is deliberately NOT
+# session-aligned. An ET-anchored bucket labeled 12:00 closes at 16:00, four
+# hours later, so plain label + delta is the exact visibility rule and
+# engine/context.closed_before needs no special case for it. Only the daily
+# bar, whose label carries a date rather than a close time, does.
 DEFAULT_TIMEFRAMES = TimeframeSet(
     driving="15m",
-    higher=("1h", "1d"),
-    deltas={"15m": pd.Timedelta(minutes=15), "1h": pd.Timedelta(hours=1)},
+    higher=("1h", "4h", "1d"),
+    deltas={"15m": pd.Timedelta(minutes=15), "1h": pd.Timedelta(hours=1),
+            "4h": pd.Timedelta(hours=4)},
     session_aligned=frozenset({"1d"}),
 )
 TIMEFRAMES = DEFAULT_TIMEFRAMES.all

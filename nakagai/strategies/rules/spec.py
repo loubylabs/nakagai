@@ -17,7 +17,10 @@ from nakagai.strategies.rules.primitives import SESSION_SCOPED_PRIMS
 VERSION = 2
 SESSION_ALIGNED = DEFAULT_TIMEFRAMES.session_aligned
 SOURCES = ("open", "high", "low", "close", "volume")
-TIMEFRAMES = ("15m", "1h", "1d")
+# The grammar's timeframes ARE the engine's axis. This used to be a second
+# hardcoded tuple sitting two lines under the import it duplicates, so adding a
+# timeframe meant editing both and a spec could name one the engine never loads.
+TIMEFRAMES = DEFAULT_TIMEFRAMES.all
 OPS = (">", "<", ">=", "<=", "crosses_above", "crosses_below")
 CROSS_OPS = ("crosses_above", "crosses_below")
 MATH_OPS: dict[str, tuple[int, int]] = {   # op -> (min arity, max arity)

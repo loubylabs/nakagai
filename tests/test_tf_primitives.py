@@ -82,7 +82,7 @@ def test_validate_accepts_tf_on_prims():
 
 
 def test_validate_rejects_unknown_tf_on_prims():
-    errs = validate_spec(_spec({"lhs": {"prim": "swing_high", "tf": "4h"},
+    errs = validate_spec(_spec({"lhs": {"prim": "swing_high", "tf": "2h"},
                                 "op": "<", "rhs": {"src": "close"}}))
     assert any("tf must be one of" in e for e in errs)
 

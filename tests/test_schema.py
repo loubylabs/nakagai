@@ -34,15 +34,24 @@ def test_validate_rejects_missing_columns(make_bars):
 
 
 def test_constants():
-    assert TIMEFRAMES == ("15m", "1h", "1d")
+    assert TIMEFRAMES == ("15m", "1h", "4h", "1d")
 
 
 def test_default_timeframes_match_legacy_axis():
-    assert DEFAULT_TIMEFRAMES.all == ("15m", "1h", "1d")
+    assert DEFAULT_TIMEFRAMES.all == ("15m", "1h", "4h", "1d")
     assert DEFAULT_TIMEFRAMES.step == pd.Timedelta(minutes=15)
     assert DEFAULT_TIMEFRAMES.deltas["1h"] == pd.Timedelta(hours=1)
+    assert DEFAULT_TIMEFRAMES.deltas["4h"] == pd.Timedelta(hours=4)
     assert DEFAULT_TIMEFRAMES.session_aligned == frozenset({"1d"})
     assert TIMEFRAMES == DEFAULT_TIMEFRAMES.all
+
+
+def test_four_hour_is_not_session_aligned():
+    """4h buckets are anchored on the Eastern wall clock (nakagai/data/resample),
+    so a bucket labeled 12:00 closes at 16:00: label + delta is the whole
+    visibility rule and closed_before needs no special case for it."""
+    assert "4h" not in DEFAULT_TIMEFRAMES.session_aligned
+    assert DEFAULT_TIMEFRAMES.deltas["4h"] == pd.Timedelta(hours=4)
 
 
 def test_timeframe_set_validation():
@@ -51,8 +60,8 @@ def test_timeframe_set_validation():
     with pytest.raises(ValueError):
         TimeframeSet(driving="1d", session_aligned=frozenset({"1d"}))  # driving cannot be session-aligned
     with pytest.raises(ValueError):
-        TimeframeSet(driving="15m", higher=("4h",),
-                     deltas={"15m": pd.Timedelta(minutes=15)})  # 4h has no delta and is not session-aligned
+        TimeframeSet(driving="15m", higher=("2h",),
+                     deltas={"15m": pd.Timedelta(minutes=15)})  # 2h has no delta and is not session-aligned
 
 
 def test_timeframe_set_custom_axis():

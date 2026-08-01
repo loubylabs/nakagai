@@ -8,12 +8,18 @@ cached bar makes a routine sync cost about one request per symbol/timeframe.
 Caveat: bars are split-adjusted at fetch time, so a split after the backfill
 leaves the older cached bars on the pre-split basis. `nakagai sync --full`
 (or deleting the parquet) forces a clean re-fetch.
+
+Not every timeframe is fetched. derive_incremental materializes the derived
+ones (nakagai/data/resample.py) from bars the cache already holds, for no
+provider requests at all; it belongs here because a sync cycle owes it right
+after the source timeframe lands.
 """
 
 import pandas as pd
 
 from nakagai.data.base import DataProvider
 from nakagai.data.cache import BarCache
+from nakagai.data.resample import DERIVED, resample_bars
 
 
 def fetch_incremental(cache: BarCache, provider: DataProvider, symbol: str,
@@ -33,6 +39,52 @@ def fetch_incremental(cache: BarCache, provider: DataProvider, symbol: str,
         if span is not None and start >= span[0]:
             fetch_start = span[1]
     return cache.upsert(symbol, timeframe, provider.fetch_bars(symbol, timeframe, fetch_start, end))
+
+
+def derive_incremental(cache: BarCache, symbol: str, timeframe: str = "4h",
+                       full: bool = False) -> int:
+    """Materialize a derived timeframe into the cache from its source bars.
+
+    The fetch functions above spend provider requests; this one spends nothing
+    but CPU, because a derived timeframe (see nakagai/data/resample.py) is
+    aggregated from bars the cache already holds. It writes through the same
+    cache.upsert, to the same SYMBOL_TF.parquet the backtester reads, so a
+    derived bar is indistinguishable downstream from a fetched one and there is
+    exactly one implementation behind both the live path and a replay.
+
+    Only a bounded trailing window is re-derived, and the resume point is the
+    last derived bar's own LABEL. That label is a bucket boundary by
+    construction, which is the property the window turns on: starting anywhere
+    else would hand resample_bars a truncated first bucket and write a partial
+    bar over a complete one. Re-deriving the boundary bucket itself is
+    deliberate, not waste; it is the bucket most likely to have been withheld
+    as still forming last cycle, and upsert keeps the newer copy, so the
+    operation is idempotent. In steady state this is a handful of source rows
+    per symbol per cycle instead of three years of them.
+
+    A cold derived cache re-derives everything, and so does a source whose
+    history now begins EARLIER than the derived bars do, for the same reason
+    fetch_incremental treats a widened start as a full fetch: otherwise the
+    backfilled history would never be aggregated and the derived frame would
+    keep a hole no later cycle could fill.
+
+    Returns the number of rows upserted.
+    """
+    source_tf = DERIVED.get(timeframe)
+    if source_tf is None:
+        raise ValueError(f"{timeframe!r} is not a derived timeframe "
+                         f"(derived: {sorted(DERIVED)})")
+    src = cache.load(symbol, source_tf)
+    if not len(src.index):
+        return 0
+    if not full:
+        span = cache.coverage(symbol, timeframe)
+        if span is not None and src.index[0] >= span[0]:
+            src = src.loc[src.index >= span[1]]
+    derived = resample_bars(src, timeframe)
+    if derived.empty:
+        return 0
+    return cache.upsert(symbol, timeframe, derived)
 
 
 def fetch_incremental_multi(cache: BarCache, provider, symbols: list[str],

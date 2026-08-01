@@ -9,6 +9,7 @@ from pathlib import Path
 import pandas as pd
 
 from nakagai.data.cache import BarCache
+from nakagai.data.schema import DEFAULT_TIMEFRAMES
 from nakagai.engine.runner import run_grid
 from nakagai.engine.windows import walk_forward
 from nakagai.strategies.catalog import load_catalog
@@ -33,7 +34,8 @@ def test_frames_load_once_per_symbol_not_once_per_window(tmp_path, make_bars, mo
                         lambda self, s, tf: (calls.append((s, tf)), real(self, s, tf))[1])
     run_grid(str(tmp_path / "cache"), ["rsi_reversion"], ["SPY"], windows[:6],
              workers=1, out=str(tmp_path / "runs.parquet"), registry=_registry)
-    assert len(calls) == 3, f"expected 3 loads (one per timeframe), got {len(calls)}"
+    want = len(DEFAULT_TIMEFRAMES.all)
+    assert len(calls) == want, f"expected {want} loads (one per timeframe), got {len(calls)}"
 
 
 # run_id and ts_run are stamped per row and are deliberately non-deterministic.

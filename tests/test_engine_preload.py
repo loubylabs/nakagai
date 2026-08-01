@@ -1,6 +1,7 @@
 import pandas as pd
 
 from nakagai.data.cache import BarCache
+from nakagai.data.schema import DEFAULT_TIMEFRAMES
 from nakagai.engine.context import PreloadedBars, build_context
 from nakagai.engine.engine import Engine
 from nakagai.strategies.base import Strategy
@@ -54,4 +55,5 @@ def test_engine_loads_each_timeframe_once(tmp_path, make_bars):
     counting = CountingCache(cache)
     eng = Engine(Quiet(), counting, "SPY", df.index[0], df.index[-1] + pd.Timedelta(minutes=15))
     eng.run()
-    assert counting.calls == 3  # one load per timeframe, independent of bar count
+    # one load per timeframe on the axis, independent of bar count
+    assert counting.calls == len(DEFAULT_TIMEFRAMES.all)
