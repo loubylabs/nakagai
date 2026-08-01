@@ -170,3 +170,119 @@ def test_day_of_week_reads_the_utc_calendar_day_on_daily_frames():
                          "close": 100.0, "volume": 1000.0}, index=idx)
     dow = PRIMITIVES["day_of_week"]["fn"](None, bars)
     assert list(dow) == [0.0, 1.0, 2.0, 3.0, 4.0]
+
+
+def _ny(day: str, clock: str) -> pd.Timestamp:
+    """A bar's label written on the exchange's clock, returned as the UTC label
+    the bar actually carries."""
+    from nakagai.data.schema import EXCHANGE_TZ
+    return pd.Timestamp(f"{day} {clock}", tz=EXCHANGE_TZ).tz_convert("UTC")
+
+
+def _clock_bars(volumes, start="2026-01-05"):
+    """One bar per (NY session, clock time), with every volume stated outright.
+
+    `volumes` is one dict per session, clock time -> volume. A clock time a
+    session does not list simply has no bar there, which is what a half day or
+    a late open looks like on the tape. The fixture is written on the exchange
+    clock and converted to UTC because that is the direction the fact runs: the
+    09:30 bar is labeled 14:30 UTC in winter and 13:30 UTC in summer.
+    """
+    days = pd.bdate_range(start, periods=len(volumes))
+    rows = [(_ny(str(day.date()), clock), float(v))
+            for day, per_clock in zip(days, volumes)
+            for clock, v in sorted(per_clock.items())]
+    close = np.linspace(100, 110, len(rows))
+    return pd.DataFrame({"open": close, "high": close + 0.5, "low": close - 0.5,
+                         "close": close, "volume": [v for _, v in rows]},
+                        index=pd.DatetimeIndex([ts for ts, _ in rows]))
+
+
+def _rvol(bars, sessions):
+    from nakagai.strategies.rules.primitives import PRIMITIVES
+    return PRIMITIVES["rvol"]["fn"](_ctx(bars), bars, sessions=sessions)
+
+
+def test_rvol_is_this_bars_volume_over_the_same_clock_times_trailing_median():
+    """Five ordinary 09:30 bars, one of them a 10x print, then a 3x session.
+
+    A mean baseline reads 280 across that window and calls the last bar 1.07x,
+    which is the failure the primitive exists to remove: one halted or
+    news-driven morning in the window hides the next genuine surge behind it.
+    The median reads 100 and calls the bar what it is. The 09:45 bucket is
+    deliberately wild and must not move the 09:30 answer by anything at all.
+    """
+    nine30 = [100, 100, 100, 100, 1000, 300]
+    nine45 = [7, 5000, 12, 3, 90000, 4]
+    bars = _clock_bars([{"09:30": a, "09:45": b} for a, b in zip(nine30, nine45)])
+    rvol = _rvol(bars, sessions=5)
+    assert rvol.loc[_ny("2026-01-12", "09:30")] == 3.0
+    # answered from its own bucket, whose trailing median is 12
+    assert rvol.loc[_ny("2026-01-12", "09:45")] == 4 / 12
+
+
+def test_rvol_baseline_excludes_the_current_session():
+    """The easiest thing here to get subtly wrong.
+
+    The five sessions before the last one are [10, 10, 100, 1000, 1000] at
+    09:30, median 100, so a 1000-volume bar is 10x. Let that bar into its own
+    window and the five become [10, 100, 1000, 1000, 1000], median 1000, and
+    the same bar reads 1.0: a completely unremarkable morning. Same bars,
+    opposite verdict, which is why the baseline is shifted.
+    """
+    bars = _clock_bars([{"09:30": v} for v in (10, 10, 100, 1000, 1000, 1000)])
+    assert _rvol(bars, sessions=5).loc[_ny("2026-01-12", "09:30")] == 10.0
+
+
+def test_rvol_is_nan_until_the_bucket_holds_a_full_window():
+    """Half a window is a different measurement, not a rough one."""
+    bars = _clock_bars([{"09:30": 100}] * 6)
+    rvol = _rvol(bars, sessions=5)
+    assert rvol.iloc[:5].isna().all()          # four earlier sessions is not five
+    assert rvol.iloc[5] == 1.0
+
+
+def test_rvol_buckets_on_the_exchange_clock_and_not_on_the_utc_label():
+    """One bucket has to survive the March clock change.
+
+    The 09:30 bar is labeled 14:30 UTC in winter and 13:30 UTC from the second
+    Sunday in March. Bucketing on the UTC label splits that single bucket in
+    two twice a year, and every bar reads NaN for `sessions` days afterwards
+    for want of history it demonstrably has.
+    """
+    bars = _clock_bars([{"09:30": 100}] * 20 + [{"09:30": 300}], start="2026-02-16")
+    assert bars.index[0].hour == 14 and bars.index[-1].hour == 13   # it straddles
+    assert _rvol(bars, sessions=20).iloc[-1] == 3.0
+
+
+def test_rvol_steps_back_by_an_occurrence_of_the_clock_time_not_by_a_session():
+    """A session with no bar at this clock time is simply not in the bucket.
+
+    Half days and late opens are ordinary. Stepping the baseline back by a
+    calendar session rather than by an occurrence drags that hole through the
+    window and blanks the clock time for the next `sessions` days.
+    """
+    volumes = [{"09:30": 100, "10:00": 100} for _ in range(7)]
+    del volumes[3]["10:00"]                    # a session that closed before 10:00
+    volumes[-1]["10:00"] = 300
+    bars = _clock_bars(volumes)
+    assert _rvol(bars, sessions=5).loc[_ny("2026-01-13", "10:00")] == 3.0
+
+
+def test_rvol_of_an_untraded_clock_time_is_nan_and_not_infinite():
+    """A zero baseline is an absence of anything to compare against.
+
+    Illiquid names print zero-volume bars at the same clock time for days on
+    end. Dividing by that median gives inf, which passes every `>` threshold a
+    spec can write; NaN reads False, which is the honest answer.
+    """
+    bars = _clock_bars([{"09:30": 0}] * 5 + [{"09:30": 400}])
+    assert pd.isna(_rvol(bars, sessions=5).iloc[-1])
+
+
+def test_rvol_is_registered_with_its_bounds_and_its_default():
+    from nakagai.strategies.rules.primitives import (ARG_DEFAULTS, PRIMITIVES,
+                                                     SESSION_SCOPED_PRIMS)
+    assert PRIMITIVES["rvol"]["args"] == {"sessions": (5, 60)}
+    assert ARG_DEFAULTS["rvol"] == {"sessions": 20}
+    assert "rvol" in SESSION_SCOPED_PRIMS

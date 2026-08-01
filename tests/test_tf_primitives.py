@@ -97,6 +97,17 @@ def test_validate_rejects_tf_on_session_scoped_prims():
     assert any("opening_range_high is session-scoped and takes no tf" in e for e in errs)
 
 
+def test_validate_rejects_tf_on_rvol():
+    """rvol's baseline is the bar's own place in ITS session's volume shape, so
+    a foreign frame answers a different question under the same name."""
+    errs = validate_spec(_spec({"lhs": {"prim": "rvol", "tf": "1d"},
+                                "op": ">", "rhs": 2}))
+    assert any("rvol is session-scoped and takes no tf" in e for e in errs)
+    # and the bare form stays valid, or the rejection above proves nothing
+    assert validate_spec(_spec({"lhs": {"prim": "rvol", "sessions": 20},
+                                "op": ">", "rhs": 2})) == []
+
+
 def test_validate_rejects_tf_on_day_of_week():
     errs = validate_spec(_spec({"lhs": {"prim": "day_of_week", "tf": "1h"},
                                 "op": "<", "rhs": {"src": "close"}}))
