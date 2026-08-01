@@ -1,9 +1,10 @@
 import pytest
 
+from nakagai.data.schema import DEFAULT_TIMEFRAMES
 from nakagai.strategies.rules import (
     canonical_spec, describe_spec, spec_hash, validate_spec,
 )
-from nakagai.strategies.rules.spec import validate_condition_group
+from nakagai.strategies.rules.spec import TIMEFRAMES, validate_condition_group
 
 ORB = {
     "version": 2, "name": "orb-volume", "timeframe": "15m",
@@ -25,6 +26,21 @@ def test_valid_v2_spec_passes():
     assert validate_spec(ORB) == []
 
 
+def test_a_four_hour_spec_validates():
+    """4h is a real timeframe, derived from cached 1h bars (nakagai/data/
+    resample.py), so the grammar accepts it on the spec and on a leaf."""
+    assert validate_spec({**ORB, "timeframe": "4h"}) == []
+    on_a_leaf = {**ORB, "long": {"all": [{"lhs": {"src": "close", "tf": "4h"},
+                                          "op": ">", "rhs": {"ind": "sma", "n": 20}}]}}
+    assert validate_spec(on_a_leaf) == []
+
+
+def test_the_grammar_takes_its_timeframes_from_the_schema():
+    """One source of truth: spec.TIMEFRAMES is the engine's axis, not a second
+    hardcoded copy that has to be edited alongside it."""
+    assert TIMEFRAMES == DEFAULT_TIMEFRAMES.all == ("15m", "1h", "4h", "1d")
+
+
 def test_version_required_and_v1_rejected():
     assert any("version" in e for e in validate_spec({**ORB, "version": 1}))
     spec = dict(ORB); spec.pop("version")
@@ -36,7 +52,7 @@ def test_version_required_and_v1_rejected():
     (lambda s: s["long"]["all"].__setitem__(0, {"lhs": {"ind": "nope"}, "op": ">", "rhs": 1}), "nope"),
     (lambda s: s["long"]["all"].__setitem__(0, {"lhs": {"op": "%", "args": [1, 2]}, "op": ">", "rhs": 1}), "%"),
     (lambda s: s["long"]["all"].__setitem__(0, {"lhs": {"prim": "wat"}, "op": ">", "rhs": 1}), "wat"),
-    (lambda s: s["long"]["all"].__setitem__(0, {"lhs": {"src": "close", "tf": "4h"}, "op": ">", "rhs": 1}), "4h"),
+    (lambda s: s["long"]["all"].__setitem__(0, {"lhs": {"src": "close", "tf": "2h"}, "op": ">", "rhs": 1}), "2h"),
     (lambda s: s.__setitem__("timeframe", "2h"), "timeframe"),
 ])
 def test_rejections_name_the_problem(mutate, needle):

@@ -63,7 +63,7 @@ def test_valid_blocks_produce_no_errors():
 
 
 def test_rules_block_nested_spec_is_validated():
-    bad = {**_LEG_SPEC, "timeframe": "4h"}
+    bad = {**_LEG_SPEC, "timeframe": "2h"}
     spec = {"blocks": {"a": {"strategy": "rules", "params": {"spec": bad}}}}
     errs = validate_composite_blocks(spec, _MEMBERS)
     assert any(e.startswith("blocks.a: ") and "timeframe" in e for e in errs)
