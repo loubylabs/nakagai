@@ -286,3 +286,18 @@ def test_rvol_is_registered_with_its_bounds_and_its_default():
     assert PRIMITIVES["rvol"]["args"] == {"sessions": (5, 60)}
     assert ARG_DEFAULTS["rvol"] == {"sessions": 20}
     assert "rvol" in SESSION_SCOPED_PRIMS
+
+
+def test_the_two_timeframe_sets_are_not_the_same_set():
+    """Two rules, two sets. A foreign `tf` is refused for every session-scoped
+    primitive; a session-aligned DRIVING frame is refused for the four that a
+    one-bar session cannot answer. day_of_week sits in the first set and not
+    the second, because a daily bar is one session and its weekday is exactly
+    what the primitive promises; turnaround_tuesday, a shipped 1d play, is
+    built on that reading."""
+    from nakagai.strategies.rules.primitives import (
+        DRIVING_FRAME_INTRADAY_PRIMS, SESSION_SCOPED_PRIMS)
+    assert DRIVING_FRAME_INTRADAY_PRIMS < SESSION_SCOPED_PRIMS
+    assert DRIVING_FRAME_INTRADAY_PRIMS == {
+        "opening_range_high", "opening_range_low", "minutes_into_session", "rvol"}
+    assert "day_of_week" not in DRIVING_FRAME_INTRADAY_PRIMS

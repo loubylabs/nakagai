@@ -291,6 +291,35 @@ SESSION_SCOPED_PRIMS = frozenset({
     "opening_range_high", "opening_range_low", "minutes_into_session",
     "day_of_week", "rvol",
 })
+# The primitives a SESSION-ALIGNED driving frame cannot answer at all, because
+# there one bar IS the whole session: the opening-range window never elapses
+# (NaN forever), minutes_into_session is 0 on every bar, and rvol's
+# same-clock-time bucket becomes the entire series.
+#
+# Two different rules, two different sets. SESSION_SCOPED_PRIMS is the right
+# set for the foreign-`tf` rule above and the WRONG set for this one, so this
+# is a second frozenset rather than a reuse of that one. Reading a weekday off
+# a 1h frame inside a 15m spec is a category error, which is why day_of_week
+# takes no tf; reading a weekday off your own daily bars is not, so day_of_week
+# is deliberately absent here. A daily bar is one session, so its weekday is
+# exactly the calendar identity the primitive promises, and day_of_week already
+# special-cases session-aligned daily labels for precisely that reading (see its
+# docstring). turnaround_tuesday is a shipped 1d catalog play whose entire
+# premise is day_of_week; refusing it would break a shipped play over a reading
+# that is right.
+#
+# rvol IS here, and that is a decision rather than an accident of grouping. On
+# daily bars it does not go NaN, it collapses to today's volume over the
+# trailing median daily volume: not meaningless, but a different measurement
+# wearing the same name, and a spec author reading "relative volume" gets the
+# session-shape answer the primitive's docstring promises on no bar of it.
+# Nothing shipped depends on it (capitulation_snap, the only catalog user of
+# rvol, drives off 1h), so refusing costs nothing today. If a daily
+# relative-volume reading is wanted later it is a separate primitive with its
+# own name, never an overload of this one, and the refusal message says so.
+DRIVING_FRAME_INTRADAY_PRIMS = frozenset({
+    "opening_range_high", "opening_range_low", "minutes_into_session", "rvol",
+})
 ARG_DEFAULTS: dict[str, dict] = {
     "opening_range_high": {"minutes": 30}, "opening_range_low": {"minutes": 30},
     "swing_high": {"k": 3}, "swing_low": {"k": 3}, "rvol": {"sessions": 20},

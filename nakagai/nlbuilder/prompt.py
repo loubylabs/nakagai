@@ -83,6 +83,11 @@ def render_system_prompt(members: dict | None = None) -> str:
     prim_lines = "\n".join(
         f"- {name}({_bounds(p['args'])})"
         + (" [session-scoped, no tf]" if name in prims.SESSION_SCOPED_PRIMS else "")
+        # Refused outright on a 1d spec, so say it here rather than spending a
+        # retry on the refusal. day_of_week carries only the first marker: it
+        # takes no tf, but on daily bars it reads exactly right.
+        + (" [needs an intraday spec timeframe]"
+           if name in prims.DRIVING_FRAME_INTRADAY_PRIMS else "")
         for name, p in sorted(prims.PRIMITIVES.items()))
     composite = _composite_section(members) if members else ""
     example = _COMPOSITE_EXAMPLE if members else ""
