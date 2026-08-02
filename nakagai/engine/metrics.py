@@ -25,9 +25,20 @@ def _trade_stats(trades: list[Trade]) -> dict:
         "profit_factor": pf,
         "expectancy_r": float(np.mean([t.r_multiple for t in trades])),
         # Gross sums travel with the ratio so aggregations can recompute PF
-        # over many windows instead of averaging per-window ratios. Four
-        # sites do that today: GET /api/backtests, api/baselines.py,
-        # scan/evidence.py, and web strategies/aggregate.ts.
+        # over many windows instead of averaging per-window ratios.
+        #
+        # The division happens in exactly ONE place, the platform's
+        # web/lib/metrics.ts (profitFactor). Its Python side sums the gross
+        # columns and derives nothing, deliberately: a never-lost aggregate has
+        # an infinite PF, inf is not valid strict JSON, and an agent reads the
+        # null a server would have to send as "insufficient data" rather than
+        # as "never lost". Only the browser can render that honestly.
+        #
+        # This comment named four sites (GET /api/backtests, api/baselines.py,
+        # scan/evidence.py, web strategies/aggregate.ts) until 2026-08-02.
+        # Three of them no longer exist; the platform corrected the same stale
+        # list in its own tree in PR #210 and could not reach this copy across
+        # the repo split. Do not re-derive the site list from an older doc.
         "gross_profit": gross_profit,
         "gross_loss": gross_loss,
     }
@@ -74,6 +85,10 @@ def _daily_stats(daily: pd.Series) -> dict:
     is a statistic. Ratios cannot be averaged back into that, but these four
     sums add, exactly as gross_profit and gross_loss already do for profit
     factor (see _trade_stats).
+
+    Same division-of-labour as the gross sums above: this side emits the sums
+    and derives nothing, so where the pooled ratio is computed stays one
+    decision made in one place rather than drifting per consumer.
 
     An aggregator recovers the pooled figures as:
         mean          = daily_sum / daily_n
