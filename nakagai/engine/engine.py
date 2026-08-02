@@ -45,6 +45,20 @@ class Trade:
     # the broker this platform trades through today; carried per trade anyway
     # so a fee change is re-provable rather than archaeological.
     fees: float = 0.0
+    # Maximum adverse and favorable excursion, in R against the signal's
+    # ORIGINAL stop (the same denominator r_multiple uses, so a ratcheted stop
+    # cannot make two fields on one trade disagree about what 1R meant).
+    #
+    # R rather than dollars, so the figures are comparable across symbols and
+    # price levels: "no trade in this catalog ever went more than 0.6R against
+    # us" is a sentence about stop placement, where the same claim in dollars
+    # is a sentence about share price. The dollar excursion is recoverable as
+    # mae * abs(entry - stop).
+    #
+    # Both are magnitudes and never negative. A trade that only ever went in
+    # our favor has mae 0.0, which is a measurement, not a missing value.
+    mae: float = 0.0
+    mfe: float = 0.0
 
 
 @dataclass
@@ -56,6 +70,28 @@ class _Position:
     reserved: float
     stop: float = 0.0     # live levels; strategies may ratchet via manage()
     target: float = 0.0
+    # Running excursion extremes, in price. Seeded to the entry in __post_init__
+    # so a position that closes on its own entry bar reports 0.0 for both,
+    # rather than an excursion measured from an unset sentinel.
+    worst: float = 0.0
+    best: float = 0.0
+
+    def __post_init__(self):
+        self.worst = self.best = self.entry
+
+    def observe(self, high: float, low: float) -> None:
+        """Fold one bar's extremes into the running excursion.
+
+        Reads only. This is the whole of P0's contact with the bar loop, and
+        it deliberately touches nothing the fill path reads, which is what
+        lets the excursion ship without a re-prove (tests/test_engine_excursion
+        holds the golden that proves it)."""
+        if self.signal.direction == Direction.LONG:
+            self.worst = min(self.worst, low)
+            self.best = max(self.best, high)
+        else:
+            self.worst = max(self.worst, high)
+            self.best = min(self.best, low)
 
 
 @dataclass
@@ -117,8 +153,17 @@ class Engine:
             if position is not None:
                 exit_price, reason = self._check_exit(position, bar)
                 if exit_price is not None:
+                    # The exit price only, never this bar's full range: the
+                    # position was closed partway through the bar and OHLC
+                    # cannot say what happened before that. Folding the whole
+                    # range in would credit the trade with an excursion it was
+                    # no longer open for, which is the one way a favorable
+                    # excursion could flatter a trade that had already exited.
+                    position.observe(exit_price, exit_price)
                     trades.append(self._close(position, now, exit_price, reason, ledger))
                     position = None
+                else:
+                    position.observe(float(bar.high), float(bar.low))
 
             # 2) pending entry fills at this bar's open
             if pending is not None:
@@ -126,12 +171,18 @@ class Engine:
                     position, ok = self._try_fill(pending, ts, float(bar.open), ledger, now)
                     if not ok:
                         rejected += 1
+                    elif position is not None:
+                        # The entry bar counts. The fill is at this bar's open
+                        # and step 1 already ran, so the position is live for
+                        # the whole of this bar by the engine's own model.
+                        position.observe(float(bar.high), float(bar.low))
                 pending = None
 
             # 3) manage + 4) new signals (point-in-time context as of bar close)
             ctx = build_context(view, self.symbol, now, tfs=self.tfs)
             if position is not None:
                 if self.strategy.manage(position, ctx) == PositionAction.EXIT:
+                    position.observe(float(bar.close), float(bar.close))
                     trades.append(self._close(position, now, float(bar.close), "manage", ledger))
                     position = None
             if position is None and pending is None:
@@ -144,6 +195,7 @@ class Engine:
         if position is not None and len(bars):
             last = bars.iloc[-1]
             now = bars.index[-1] + self.tfs.step
+            position.observe(float(last["close"]), float(last["close"]))
             trades.append(self._close(position, now, float(last["close"]), "eod_window", ledger))
             curve[now] = self._mark(ledger, None, float(last["close"]), now)
 
@@ -216,9 +268,20 @@ class Engine:
             pnl = (pos.entry - exit_price) * pos.qty - fees
             ledger.credit(pos.reserved + pnl, now)
         risk = abs(pos.entry - s.stop) * pos.qty
+        # Per-share risk against the SIGNAL's stop, the same denominator
+        # r_multiple uses above. pos.stop may have been ratcheted by manage();
+        # dividing by that instead would make a trade's mae and its r_multiple
+        # disagree about the size of 1R.
+        risk_ps = abs(pos.entry - s.stop)
+        if s.direction == Direction.LONG:
+            adverse, favorable = pos.entry - pos.worst, pos.best - pos.entry
+        else:
+            adverse, favorable = pos.worst - pos.entry, pos.entry - pos.best
         return Trade(self.symbol, s.direction, pos.qty, pos.entry_ts, pos.entry, now, exit_price,
                      pos.stop, pos.target, pnl, pnl / risk if risk else 0.0, s.setup_tags, reason,
-                     fees)
+                     fees,
+                     mae=adverse / risk_ps if risk_ps else 0.0,
+                     mfe=favorable / risk_ps if risk_ps else 0.0)
 
     def _mark(self, ledger: SettledLedger, pos: "_Position | None", price: float, now) -> float:
         # settled() first: it sweeps anything that has matured out of pending,

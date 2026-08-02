@@ -42,6 +42,15 @@ def _trade_rows(trades, run_id: str) -> list[dict]:
             "r_multiple": t.r_multiple,
             "setup_tags": "+".join(t.setup_tags),
             "exit_reason": t.exit_reason,
+            # fees was carried on Trade so a fee change would be re-provable
+            # rather than archaeological, and then dropped here, which is the
+            # one place that claim had to hold. Persisted now.
+            "fees": t.fees,
+            # The excursion, in R. Stopping at the dataclass would make it
+            # write-only: "where should the stop have been" is a question asked
+            # of a catalog of stored trades, not of one in-memory replay.
+            "mae": t.mae,
+            "mfe": t.mfe,
         }
         for t in trades
     ]
