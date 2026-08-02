@@ -162,18 +162,20 @@ def _cagr(curve: pd.Series, starting_equity: float) -> float:
 MIN_SHARPE_OBSERVATIONS = 60
 
 
-def _sharpe(curve: pd.Series) -> float | None:
+def _sharpe(daily: pd.Series) -> float | None:
     """Annualized Sharpe, or None when the sample is too small to mean anything.
+
+    Takes the daily returns rather than the curve, so summarize resamples once
+    and hands the same series to both this and _sortino. Two functions deriving
+    the same returns from the same curve is not only wasted work, it is a
+    second place for the resampling rule to drift.
 
     None rather than 0.0 because they say different things and the old code
     conflated them: 0.0 is "this strategy had no risk-adjusted edge", None is
     "do not read a number here". Every consumer already treats null as
-    insufficient data (see the platform's scan/evidence.py), so None travels
-    correctly through parquet, Postgres and signal JSON alike.
+    insufficient data, so None travels correctly through parquet, Postgres and
+    signal JSON alike.
     """
-    if curve.empty:
-        return None
-    daily = curve.resample("1D").last().dropna().pct_change().dropna()
     if len(daily) < MIN_SHARPE_OBSERVATIONS or daily.std() == 0:
         return None
     return float(daily.mean() / daily.std() * np.sqrt(252))
@@ -213,7 +215,7 @@ def summarize(result: BacktestResult, bh_return: float) -> dict:
     out = {
         **_trade_stats(result.trades),
         "max_drawdown": max_dd,
-        "sharpe": _sharpe(curve),
+        "sharpe": _sharpe(daily),
         "sortino": _sortino(daily),
         "ulcer_index": _ulcer_index(curve),
         "cagr": cagr,
