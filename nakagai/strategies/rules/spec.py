@@ -9,7 +9,9 @@ readback; canon.py owns identity hashing.
 """
 
 from nakagai.data.schema import DEFAULT_TIMEFRAMES
-from nakagai.strategies.rules.vocabulary import Vocabulary, resolve_vocabulary
+from nakagai.strategies.rules.vocabulary import (
+    Vocabulary, is_choice_rule, resolve_vocabulary,
+)
 
 VERSION = 2
 SESSION_ALIGNED = DEFAULT_TIMEFRAMES.session_aligned
@@ -29,6 +31,19 @@ TARGET_KINDS = ("rr", "percent")
 MAX_DEPTH = 8
 MAX_CONDITIONS = 30
 MAX_NODES = 40           # indicator + primitive nodes per spec
+# The risk and exit blocks are the one part of the grammar whose bounds do not
+# come from a Term, so they are named here rather than written inline in the
+# checks below: the Pine compiler puts the same pairs on the inputs it emits,
+# and a bound that drifted between the two would let a chart be set to a value
+# the engine refuses.
+STOP_ATR_MULT_BOUNDS = (0.1, 10.0)
+STOP_ATR_N_BOUNDS = (2, 100)
+STOP_PCT_BOUNDS = (0.05, 50.0)
+TARGET_RR_BOUNDS = (0.1, 20.0)
+TARGET_PCT_BOUNDS = (0.05, 100.0)
+TRAILING_ATR_MULT_BOUNDS = (0.5, 10.0)
+TRAILING_ATR_N_BOUNDS = (2, 100)
+TRAILING_PCT_BOUNDS = (0.1, 50.0)
 TIME_STOP_BOUNDS = (1, 500)
 BREAKEVEN_RR_BOUNDS = (0.1, 10.0)
 
@@ -51,7 +66,7 @@ def _check_args(name: str, given: dict, schema: dict, path: str, errs: list[str]
             errs.append(f"{path}: {name} takes no arg {arg!r} (valid: {sorted(schema)})")
             continue
         rule = schema[arg]
-        if isinstance(rule, tuple) and all(isinstance(r, str) for r in rule):
+        if is_choice_rule(rule):
             if v not in rule:
                 errs.append(f"{path}: {name}.{arg} must be one of {rule}, got {v!r}")
         else:
@@ -362,6 +377,11 @@ def _not_num(v, lo, hi) -> bool:
     return isinstance(v, bool) or not isinstance(v, (int, float)) or not lo <= v <= hi
 
 
+def _span(bounds) -> str:
+    """A bounds pair as the error messages spell it: [0.1, 10], not [0.1, 10.0]."""
+    return f"[{bounds[0]:g}, {bounds[1]:g}]"
+
+
 def _check_exits(exits, errs: list[str], budget: _Budget,
                  vocabulary: Vocabulary) -> None:
     if not isinstance(exits, dict):
@@ -377,16 +397,16 @@ def _check_exits(exits, errs: list[str], budget: _Budget,
         if not isinstance(t, dict) or t.get("kind") not in ("atr", "percent"):
             errs.append("exits.trailing.kind must be 'atr' or 'percent'")
         elif t["kind"] == "atr":
-            if _not_num(t.get("mult", 2.0), 0.5, 10):
-                errs.append("exits.trailing.mult must be in [0.5, 10]")
-            if _not_num(t.get("n", 14), 2, 100):
-                errs.append("exits.trailing.n must be in [2, 100]")
+            if _not_num(t.get("mult", 2.0), *TRAILING_ATR_MULT_BOUNDS):
+                errs.append(f"exits.trailing.mult must be in {_span(TRAILING_ATR_MULT_BOUNDS)}")
+            if _not_num(t.get("n", 14), *TRAILING_ATR_N_BOUNDS):
+                errs.append(f"exits.trailing.n must be in {_span(TRAILING_ATR_N_BOUNDS)}")
             unknown_t = set(t) - {"kind", "mult", "n"}
             if unknown_t:
                 errs.append(f"exits.trailing: unknown keys {sorted(unknown_t)}")
         else:
-            if _not_num(t.get("pct", 2.0), 0.1, 50):
-                errs.append("exits.trailing.pct must be in [0.1, 50]")
+            if _not_num(t.get("pct", 2.0), *TRAILING_PCT_BOUNDS):
+                errs.append(f"exits.trailing.pct must be in {_span(TRAILING_PCT_BOUNDS)}")
             unknown_t = set(t) - {"kind", "pct"}
             if unknown_t:
                 errs.append(f"exits.trailing: unknown keys {sorted(unknown_t)}")
@@ -415,22 +435,22 @@ def validate_risk(risk) -> list[str]:
     elif stop.get("kind") not in STOP_KINDS:
         errs.append(f"risk.stop.kind must be one of {STOP_KINDS}")
     elif stop["kind"] == "atr":
-        if _not_num(stop.get("mult", 2.0), 0.1, 10):
-            errs.append("risk.stop.mult must be in [0.1, 10]")
-        if _not_num(stop.get("n", 14), 2, 100):
-            errs.append("risk.stop.n must be in [2, 100]")
-    elif _not_num(stop.get("pct", 2.0), 0.05, 50):
-        errs.append("risk.stop.pct must be in [0.05, 50]")
+        if _not_num(stop.get("mult", 2.0), *STOP_ATR_MULT_BOUNDS):
+            errs.append(f"risk.stop.mult must be in {_span(STOP_ATR_MULT_BOUNDS)}")
+        if _not_num(stop.get("n", 14), *STOP_ATR_N_BOUNDS):
+            errs.append(f"risk.stop.n must be in {_span(STOP_ATR_N_BOUNDS)}")
+    elif _not_num(stop.get("pct", 2.0), *STOP_PCT_BOUNDS):
+        errs.append(f"risk.stop.pct must be in {_span(STOP_PCT_BOUNDS)}")
     target = risk.get("target", DEFAULT_RISK["target"])
     if not isinstance(target, dict):
         errs.append("risk.target must be an object")
     elif target.get("kind") not in TARGET_KINDS:
         errs.append(f"risk.target.kind must be one of {TARGET_KINDS}")
     elif target["kind"] == "rr":
-        if _not_num(target.get("rr", 2.0), 0.1, 20):
-            errs.append("risk.target.rr must be in [0.1, 20]")
-    elif _not_num(target.get("pct", 4.0), 0.05, 100):
-        errs.append("risk.target.pct must be in [0.05, 100]")
+        if _not_num(target.get("rr", 2.0), *TARGET_RR_BOUNDS):
+            errs.append(f"risk.target.rr must be in {_span(TARGET_RR_BOUNDS)}")
+    elif _not_num(target.get("pct", 4.0), *TARGET_PCT_BOUNDS):
+        errs.append(f"risk.target.pct must be in {_span(TARGET_PCT_BOUNDS)}")
     return errs
 
 

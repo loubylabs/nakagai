@@ -36,10 +36,22 @@ from typing import Literal, TypeAlias
 
 from nakagai.strategies import indicators as ind
 from nakagai.strategies.rules import primitives as prim
+from nakagai.strategies.rules.pine import lowerings as pine
 from nakagai.strategies.rules.pine.model import PineLowering
 
 ArgRule: TypeAlias = tuple[float, float] | tuple[str, ...]
 KINDS = ("series", "frame", "bar", "primitive")
+
+
+def is_choice_rule(rule: ArgRule) -> bool:
+    """True for an arg that names one of a fixed set (field, direction, kind).
+
+    The two arg shapes are told apart by their contents in two places, the
+    validator and the Pine input collector, so the predicate is one function
+    rather than a copy each: a rule read as a range in one and as a choice in
+    the other would validate a spec the compiler then refuses.
+    """
+    return isinstance(rule, tuple) and all(isinstance(r, str) for r in rule)
 
 
 @dataclass(frozen=True)
@@ -72,6 +84,13 @@ class Term:
         if not callable(self.fn):
             raise TypeError(f"term {self.name!r} needs a callable fn, got "
                             f"{type(self.fn).__name__}")
+        # Same reasoning one slot along: a bare emit function passed as `pine=`
+        # is callable and would sail through every isinstance-free reader until
+        # the compiler asked it for `.emit` and reported an AttributeError from
+        # inside the walk, naming no term.
+        if self.pine is not None and not isinstance(self.pine, PineLowering):
+            raise TypeError(f"term {self.name!r} needs a PineLowering in its "
+                            f"pine slot, got {type(self.pine).__name__}")
         args = MappingProxyType(dict(self.args))
         defaults = MappingProxyType(dict(self.defaults))
         undeclared = set(defaults) - set(args)
@@ -118,16 +137,16 @@ class Vocabulary:
 VocabularyFactory: TypeAlias = Callable[[], Vocabulary]
 
 
-def _series(name, args, defaults, fn) -> Term:
-    return Term(name, "series", args, defaults, fn)
+def _series(name, args, defaults, fn, pine) -> Term:
+    return Term(name, "series", args, defaults, fn, pine=pine)
 
 
-def _frame(name, args, defaults, fn) -> Term:
-    return Term(name, "frame", args, defaults, fn)
+def _frame(name, args, defaults, fn, pine) -> Term:
+    return Term(name, "frame", args, defaults, fn, pine=pine)
 
 
-def _bar(name, args, defaults, fn) -> Term:
-    return Term(name, "bar", args, defaults, fn)
+def _bar(name, args, defaults, fn, pine) -> Term:
+    return Term(name, "bar", args, defaults, fn, pine=pine)
 
 
 def _primitive(name, args, defaults, fn, *, end_anchored=False,
@@ -141,65 +160,87 @@ def _primitive(name, args, defaults, fn, *, end_anchored=False,
 def core_vocabulary() -> Vocabulary:
     indicators = (
         _series("sma", {"n": (2, 500)}, {"n": 20},
-                lambda s, a: ind.sma(s, a["n"])),
+                lambda s, a: ind.sma(s, a["n"]),
+                PineLowering(pine.emit_series_call("ta.sma", "n"))),
         _series("ema", {"n": (2, 500)}, {"n": 20},
-                lambda s, a: ind.ema(s, a["n"])),
+                lambda s, a: ind.ema(s, a["n"]),
+                PineLowering(pine.emit_series_call("ta.ema", "n"))),
         _series("rsi", {"n": (2, 100)}, {"n": 14},
-                lambda s, a: ind.rsi(s, a["n"])),
+                lambda s, a: ind.rsi(s, a["n"]),
+                PineLowering(pine.emit_series_call("ta.rsi", "n"))),
         _series("roc", {"n": (1, 500)}, {"n": 20},
-                lambda s, a: ind.roc(s, a["n"])),
+                lambda s, a: ind.roc(s, a["n"]),
+                PineLowering(pine.emit_series_call("ta.roc", "n"))),
         _series("zscore", {"n": (2, 500)}, {"n": 20},
-                lambda s, a: ind.zscore(s, a["n"])),
+                lambda s, a: ind.zscore(s, a["n"]),
+                PineLowering(pine.emit_zscore, helpers=(pine.DIV,))),
         _series("highest", {"n": (2, 500)}, {"n": 20},
-                lambda s, a: ind.highest(s, a["n"])),
+                lambda s, a: ind.highest(s, a["n"]),
+                PineLowering(pine.emit_series_call("ta.highest", "n"))),
         _series("lowest", {"n": (2, 500)}, {"n": 20},
-                lambda s, a: ind.lowest(s, a["n"])),
+                lambda s, a: ind.lowest(s, a["n"]),
+                PineLowering(pine.emit_series_call("ta.lowest", "n"))),
         _series("stdev", {"n": (2, 500)}, {"n": 20},
-                lambda s, a: ind.stdev(s, a["n"])),
+                lambda s, a: ind.stdev(s, a["n"]),
+                PineLowering(pine.emit_series_call("ta.stdev", "n"))),
         _frame("macd", {"fast": (2, 100), "slow": (3, 200),
                          "signal": (2, 100),
                          "field": ("macd", "signal", "hist")},
                {"fast": 12, "slow": 26, "signal": 9, "field": "macd"},
-               lambda s, a: ind.macd(s, a["fast"], a["slow"], a["signal"])),
+               lambda s, a: ind.macd(s, a["fast"], a["slow"], a["signal"]),
+               PineLowering(pine.emit_macd)),
         _frame("bb", {"n": (2, 200), "k": (0.5, 5.0),
                        "field": ("upper", "mid", "lower")},
                {"n": 20, "k": 2.0, "field": "mid"},
-               lambda s, a: ind.bollinger(s, a["n"], a["k"])),
+               lambda s, a: ind.bollinger(s, a["n"], a["k"]),
+               PineLowering(pine.emit_bb)),
         _bar("atr", {"n": (2, 100)}, {"n": 14},
-             lambda b, a: ind.atr(b, a["n"])),
+             lambda b, a: ind.atr(b, a["n"]),
+             PineLowering(pine.emit_bar_call("ta.atr", "n"))),
         _bar("donchian", {"n": (2, 300),
                            "field": ("upper", "lower", "mid")},
              {"n": 20, "field": "upper"},
-             lambda b, a: ind.donchian(b, a["n"])),
+             lambda b, a: ind.donchian(b, a["n"]),
+             PineLowering(pine.emit_donchian)),
         _bar("supertrend", {"n": (2, 100), "mult": (0.5, 10.0),
                              "field": ("line", "direction")},
              {"n": 10, "mult": 3.0, "field": "line"},
-             lambda b, a: ind.supertrend(b, a["n"], a["mult"])),
-        _bar("vwap", {}, {}, lambda b, _a: ind.session_vwap(b)),
+             lambda b, a: ind.supertrend(b, a["n"], a["mult"]),
+             PineLowering(pine.emit_supertrend)),
+        _bar("vwap", {}, {}, lambda b, _a: ind.session_vwap(b),
+             PineLowering(pine.emit_vwap)),
         _bar("stoch", {"n": (2, 100), "d": (1, 50),
                         "field": ("k", "d")},
              {"n": 14, "d": 3, "field": "k"},
-             lambda b, a: ind.stoch(b, a["n"], a["d"])),
+             lambda b, a: ind.stoch(b, a["n"], a["d"]),
+             PineLowering(pine.emit_stoch)),
         _bar("adx", {"n": (2, 100)}, {"n": 14},
-             lambda b, a: ind.adx(b, a["n"])),
-        _bar("obv", {}, {}, lambda b, _a: ind.obv(b)),
+             lambda b, a: ind.adx(b, a["n"]),
+             PineLowering(pine.emit_adx)),
+        _bar("obv", {}, {}, lambda b, _a: ind.obv(b),
+             PineLowering(pine.emit_builtin("ta.obv"))),
         _bar("ichimoku", {"tenkan_n": (2, 100), "kijun_n": (2, 200),
                            "senkou_n": (2, 300), "disp": (1, 100),
                            "field": ("tenkan", "kijun", "senkou_a", "senkou_b")},
              {"tenkan_n": 9, "kijun_n": 26, "senkou_n": 52, "disp": 26,
               "field": "tenkan"},
              lambda b, a: ind.ichimoku(b, a["tenkan_n"], a["kijun_n"],
-                                        a["senkou_n"], a["disp"])),
+                                        a["senkou_n"], a["disp"]),
+             PineLowering(pine.emit_ichimoku)),
         _bar("keltner", {"n": (2, 200), "mult": (0.5, 10.0),
                           "field": ("upper", "mid", "lower")},
              {"n": 20, "mult": 2.0, "field": "mid"},
-             lambda b, a: ind.keltner(b, a["n"], a["mult"])),
+             lambda b, a: ind.keltner(b, a["n"], a["mult"]),
+             PineLowering(pine.emit_keltner)),
         _bar("cci", {"n": (2, 200)}, {"n": 20},
-             lambda b, a: ind.cci(b, a["n"])),
+             lambda b, a: ind.cci(b, a["n"]),
+             PineLowering(pine.emit_bar_call("ta.cci", "n", source="hlc3"))),
         _bar("mfi", {"n": (2, 100)}, {"n": 14},
-             lambda b, a: ind.mfi(b, a["n"])),
+             lambda b, a: ind.mfi(b, a["n"]),
+             PineLowering(pine.emit_bar_call("ta.mfi", "n", source="hlc3"))),
         _bar("wpr", {"n": (2, 100)}, {"n": 14},
-             lambda b, a: ind.wpr(b, a["n"])),
+             lambda b, a: ind.wpr(b, a["n"]),
+             PineLowering(pine.emit_bar_call("ta.wpr", "n"))),
     )
     # session_scoped, on the terms below that carry it: these read the driving
     # frame's own session or calendar structure (session-open windows, elapsed

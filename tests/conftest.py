@@ -1,6 +1,12 @@
+import json
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import pytest
+
+CATALOG_SPECS = (Path(__file__).resolve().parents[1]
+                 / "nakagai" / "strategies" / "catalog" / "specs")
 
 
 @pytest.fixture
@@ -24,3 +30,18 @@ def make_bars():
         return df
 
     return _make
+
+
+@pytest.fixture
+def load_spec():
+    """Factory: one shipped catalog spec by name, read fresh from its JSON.
+
+    Read rather than taken from catalog.load_entries because that loader is
+    @cache'd and hands every caller the same dict; a test that mutated it would
+    poison the rest of the session.
+    """
+
+    def _load(name: str) -> dict:
+        return json.loads((CATALOG_SPECS / f"{name}.json").read_text())["spec"]
+
+    return _load

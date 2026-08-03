@@ -19,14 +19,18 @@ def _num(v):
     return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else v
 
 
-def _canon_expr(node, vocabulary: Vocabulary):
+def canonical_expr(node, vocabulary: Vocabulary):
+    """One expression node in canonical form: defaults materialized, numeric
+    scalars normalized to float. Public because the Pine compiler keys its
+    node memo and its shared inputs on exactly this form, and a second
+    canonicalizer beside it would be a second definition of "the same node"."""
     if isinstance(node, (int, float)):
         return float(node)
     if "src" in node:
         return {"src": node["src"], **({"tf": node["tf"]} if "tf" in node else {})}
     if "op" in node:
         return {"op": node["op"],
-                "args": [_canon_expr(a, vocabulary) for a in node["args"]]}
+                "args": [canonical_expr(a, vocabulary) for a in node["args"]]}
     if "ind" in node:
         name = node["ind"]
         term = vocabulary.indicators[name]
@@ -34,7 +38,7 @@ def _canon_expr(node, vocabulary: Vocabulary):
                 **{k: v for k, v in node.items() if k not in ("ind", "of", "tf")}}
         out = {"ind": name, **{k: _num(v) for k, v in args.items()}}
         if term.kind != "bar":
-            out["of"] = _canon_expr(node.get("of", {"src": "close"}), vocabulary)
+            out["of"] = canonical_expr(node.get("of", {"src": "close"}), vocabulary)
         if "tf" in node:
             out["tf"] = node["tf"]
         return out
@@ -48,8 +52,8 @@ def _canon_expr(node, vocabulary: Vocabulary):
 
 
 def _canon_cond(c, vocabulary: Vocabulary):
-    return {"lhs": _canon_expr(c["lhs"], vocabulary), "op": c["op"],
-            "rhs": _canon_expr(c["rhs"], vocabulary)}
+    return {"lhs": canonical_expr(c["lhs"], vocabulary), "op": c["op"],
+            "rhs": canonical_expr(c["rhs"], vocabulary)}
 
 
 def _canon_group(g, vocabulary: Vocabulary):
