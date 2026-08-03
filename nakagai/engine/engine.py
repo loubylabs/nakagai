@@ -124,7 +124,8 @@ class Engine:
 
     def run(self) -> BacktestResult:
         vocabulary = getattr(self.strategy, "vocabulary", core_vocabulary())
-        view = PreloadedBars(self.cache, self.symbol, self.tfs, vocabulary)
+        view = PreloadedBars(self.cache, self.symbol, self.tfs,
+                             vocabulary=vocabulary)
         bars = view.load(self.symbol, self.tfs.driving)
         bars = bars[(bars.index >= self.start) & (bars.index < self.end)]
         # End-anchored primitives (fvg_nearest, order_block) are evaluated row

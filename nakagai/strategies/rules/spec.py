@@ -120,8 +120,8 @@ def _check_session_aligned_refs(node, eval_tf: str, path: str,
     the foreign-`tf` one, which such a spec never trips.
 
     The two rules run over two different sets, deliberately: see
-    DRIVING_FRAME_INTRADAY_PRIMS on why day_of_week is refused a foreign `tf`
-    and welcome on daily bars.
+    Term.driving_frame_intraday in vocabulary.py on why day_of_week is refused
+    a foreign `tf` and welcome on daily bars.
 
     `eval_tf` follows the evaluator: a node's own `tf` is the frame its
     children are computed on, which is how a bars_since with a tf, or an
@@ -237,11 +237,11 @@ def _check_expr(node, path: str, errs: list[str], budget: _Budget,
         term = vocabulary.primitives[name]
         if series_required and term.end_anchored:
             # An end-anchored primitive is one level read from the tail of the
-            # frame, not a series, which is exactly what this module's own
-            # END_ANCHORED set means. crossed_above's scalar branch only ever
-            # covered the RHS, and the old eval_condition returned False
-            # outright for a non-Series LHS, so a spec shaped this way was
-            # permanently dead. _cross_prev is symmetric, so it would now fire.
+            # frame, not a series, which is exactly what Term.end_anchored
+            # means. crossed_above's scalar branch only ever covered the RHS,
+            # and the old eval_condition returned False outright for a
+            # non-Series LHS, so a spec shaped this way was permanently dead.
+            # _cross_prev is symmetric, so it would now fire.
             errs.append(f"{path}: the left side of a cross must be a series; "
                         f"{name} is a level read from the end of the frame")
         schema = term.args
@@ -479,13 +479,23 @@ def validate_spec(spec, vocabulary: Vocabulary | None = None) -> list[str]:
 
 
 def validate_condition_group(group, path: str = "conditions",
-                             tf: str = "1h",
+                             tf: str = "1h", *,
                              vocabulary: Vocabulary | None = None) -> list[str]:
     """Standalone validation of one all/any condition group with a fresh
     budget. The screener's whole schema is one such group; validate_spec's
     per-side entry groups go through the same walker. `tf` is the timeframe the
     group is evaluated on, which decides whether a cross-timeframe reference
-    inside it has a visibility cutoff at all."""
+    inside it has a visibility cutoff at all.
+
+    `vocabulary` is keyword-only, and that is load-bearing rather than a style
+    choice. It sits behind `tf`, so a caller writing the shape that reads
+    naturally, validate_condition_group(group, "conditions", vocab), would bind
+    the Vocabulary to `tf` and leave vocabulary None. Nothing would raise: both
+    `tf in SESSION_ALIGNED` and `tf if tf in TIMEFRAMES else "1h"` simply read
+    False for a non-string, so the call would return a clean-looking error list
+    validated against the CORE vocabulary while the caller believed it had
+    injected one. A keyword-only parameter turns that into a TypeError at the
+    call site."""
     vocabulary = resolve_vocabulary(vocabulary)
     errs: list[str] = []
     _check_group(group, path, errs, _Budget(), vocabulary)

@@ -75,8 +75,27 @@ def run_one(cache_root, strategy_name: str, params: dict, symbol: str,
             "returning {name: Strategy class}")
     strategy_cls = registry()[strategy_name]
     if issubclass(strategy_cls, RuleStrategy):
+        # A vocabulary, not a bound subclass. RuleStrategy.__init__ already
+        # takes one, and bound() mints a throwaway class per call, which across
+        # a grid is thousands of classes that differ in nothing but a factory
+        # reference. bound() belongs to load_catalog, where the class IS the
+        # product and is built once. Read the factory off the CLASS: a plain
+        # function stored as a class attribute is a descriptor, so instance
+        # access would bind the strategy as its first argument.
         factory = vocabulary_factory or strategy_cls.VOCABULARY_FACTORY
-        strategy = strategy_cls.bound(factory)(params)
+        strategy = strategy_cls(params, vocabulary=factory())
+    elif vocabulary_factory is not None:
+        # Refuse rather than drop it. A non-rule strategy has no vocabulary to
+        # inject into: Engine falls back to core_vocabulary() for it, by
+        # design, because its context may still host composite RuleSpec
+        # members. Accepting the factory and ignoring it would let a caller
+        # believe a whole grid ran on an injected vocabulary when part of it
+        # ran on core, which is exactly the silent no-op this seam exists to
+        # prevent. Split the grid instead.
+        raise ValueError(
+            f"vocabulary_factory was passed for strategy {strategy_name!r}, "
+            "which is not a RuleStrategy and cannot carry an injected "
+            "vocabulary; run non-rule strategies in a separate call")
     else:
         strategy = strategy_cls(params)
     # `params` are the caller's overrides on top of the spec's defaults, and

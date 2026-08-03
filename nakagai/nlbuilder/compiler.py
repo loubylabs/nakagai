@@ -77,11 +77,12 @@ def _check(kind: str, spec, members: dict | None, vocabulary: Vocabulary):
 
 def compile_strategy(description: str, current_spec: dict | None = None,
                      client=None, model: str = MODEL,
-                     max_retries: int = 2, members: dict | None = None,
+                     max_retries: int = 2, members: dict | None = None, *,
                      vocabulary: Vocabulary | None = None) -> CompileResult:
     vocabulary = resolve_vocabulary(vocabulary)
     client = _client_or_default(client)
-    system = [{"type": "text", "text": render_system_prompt(members, vocabulary),
+    system = [{"type": "text",
+               "text": render_system_prompt(members, vocabulary=vocabulary),
                "cache_control": {"type": "ephemeral"}}]
     user = description.strip()
     if current_spec is not None:

@@ -1,3 +1,33 @@
+"""The vocabulary: one Term per name the RuleSpec grammar admits.
+
+A Term owns a name's WHOLE contract in one place: its argument schema and
+bounds, its defaults, the executable function, the doc line the NL prompts
+render, the three causal flags described below, and the slot a Pine lowering
+attaches to. Nothing about a name lives anywhere else, so declaring one is one
+statement and injecting one is one `with_terms` call.
+
+A Vocabulary holds two namespaces, indicators and primitives, because the
+grammar spells them differently ({"ind": ...} against {"prim": ...}). Names are
+unique across BOTH namespaces, so no name is ever reachable under two readings.
+
+The three causal flags, and what each one refuses:
+
+- `end_anchored`: the term reads ONE level off the end of the frame it is
+  handed, not a causal series. A whole-frame pass may not broadcast such a
+  value across history (that would be lookahead), so it is evaluated row by row
+  over the replay's bounded span instead, and the grammar refuses the shapes
+  that would read it outside that span.
+- `session_scoped`: the term reads its own frame's session or calendar
+  structure rather than plain OHLCV structure, so it is refused a foreign `tf`
+  outright.
+- `driving_frame_intraday`: the term cannot be answered at all on a
+  session-aligned driving frame, where one bar IS the whole session.
+
+The last two are two different rules over two deliberately different sets, not
+one set read twice. The per-term comments in core_vocabulary() say why each
+term carries the flags it carries; read them before moving a flag.
+"""
+
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from functools import cache
@@ -9,6 +39,7 @@ from nakagai.strategies.rules import primitives as prim
 from nakagai.strategies.rules.pine.model import PineLowering
 
 ArgRule: TypeAlias = tuple[float, float] | tuple[str, ...]
+KINDS = ("series", "frame", "bar", "primitive")
 
 
 @dataclass(frozen=True)
@@ -25,8 +56,31 @@ class Term:
     pine: PineLowering | None = None
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "args", MappingProxyType(dict(self.args)))
-        object.__setattr__(self, "defaults", MappingProxyType(dict(self.defaults)))
+        # The Literal annotation is documentation, not a runtime check, and
+        # every reader routes on `kind` by asking whether it equals one known
+        # value. An injected Term(kind="seires") would therefore land in the
+        # indicator namespace and be evaluated as a series indicator, quietly,
+        # with the typo never surfacing. Same for a non-callable fn (a
+        # TypeError from deep inside the evaluator, one frame short of naming
+        # the term) and for a default whose arg the schema does not declare
+        # (it merges into the call and _check_args never sees it, because
+        # _check_args only walks the keys the SPEC supplied). Refuse all three
+        # where the term is built, so the message names the term.
+        if self.kind not in KINDS:
+            raise ValueError(f"term {self.name!r} has unknown kind "
+                             f"{self.kind!r} (valid: {KINDS})")
+        if not callable(self.fn):
+            raise TypeError(f"term {self.name!r} needs a callable fn, got "
+                            f"{type(self.fn).__name__}")
+        args = MappingProxyType(dict(self.args))
+        defaults = MappingProxyType(dict(self.defaults))
+        undeclared = set(defaults) - set(args)
+        if undeclared:
+            raise ValueError(f"term {self.name!r} defaults "
+                             f"{sorted(undeclared)} are not in its arg schema "
+                             f"{sorted(args)}")
+        object.__setattr__(self, "args", args)
+        object.__setattr__(self, "defaults", defaults)
 
 
 @dataclass(frozen=True)
@@ -147,6 +201,32 @@ def core_vocabulary() -> Vocabulary:
         _bar("wpr", {"n": (2, 100)}, {"n": 14},
              lambda b, a: ind.wpr(b, a["n"])),
     )
+    # session_scoped, on the terms below that carry it: these read the driving
+    # frame's own session or calendar structure (session-open windows, elapsed
+    # session minutes, a bar's place in the session's volume shape, the bar's
+    # calendar weekday) rather than plain OHLCV structure. Feeding them a `tf`
+    # swaps in a different frame's bars, which silently degenerates:
+    # opening_range_* on "1d" bars (one bar per session) never sees its window
+    # elapse and is NaN forever, and on "1h" bars a minutes=30 window is
+    # measured in whole-hour steps; minutes_into_session on "1d" bars is 0
+    # everywhere (one bar per session group); rvol on "1d" bars has one bar per
+    # session, so its same-clock-time bucket is the whole series and the
+    # primitive quietly becomes a plain trailing-median volume ratio, a
+    # different measurement wearing the same name, while on "1h" bars the
+    # buckets are whole hours, so a 15m spec's 09:30 bar is answered from a
+    # 09:30-to-10:30 aggregate; day_of_week reads calendar identity that
+    # belongs to the spec's own session, so answering it from a foreign frame
+    # is a category error even though the primitive itself now handles
+    # midnight-UTC daily labels. These must always run on the spec's own
+    # driving bars, so `tf` is rejected outright.
+    #
+    # driving_frame_intraday is the SECOND rule and a second set: what a
+    # session-aligned driving frame cannot answer at all, because there one bar
+    # IS the whole session. The opening-range window never elapses (NaN
+    # forever), minutes_into_session is 0 on every bar, and rvol's
+    # same-clock-time bucket becomes the entire series. session_scoped is the
+    # right set for the foreign-`tf` rule and the WRONG set for this one, which
+    # is why the two flags do not track each other; see day_of_week and rvol.
     primitives = (
         _primitive("opening_range_high", {"minutes": (5, 120)}, {"minutes": 30},
                    prim.opening_range_high, session_scoped=True,
@@ -160,12 +240,38 @@ def core_vocabulary() -> Vocabulary:
         _primitive("gap_pct", {}, {}, prim.gap_pct),
         _primitive("swing_high", {"k": (1, 10)}, {"k": 3}, prim.swing_high),
         _primitive("swing_low", {"k": (1, 10)}, {"k": 3}, prim.swing_low),
+        # Session-scoped, and deliberately NOT driving_frame_intraday. Reading
+        # a weekday off a 1h frame inside a 15m spec is a category error, which
+        # is why it takes no tf; reading a weekday off your own daily bars is
+        # not. A daily bar is one session, so its weekday is exactly the
+        # calendar identity the primitive promises, and day_of_week already
+        # special-cases session-aligned daily labels for precisely that reading
+        # (see its docstring). turnaround_tuesday is a shipped 1d catalog play
+        # whose entire premise is day_of_week; refusing it would break a
+        # shipped play over a reading that is right.
         _primitive("day_of_week", {}, {}, prim.day_of_week, session_scoped=True),
         _primitive("minutes_into_session", {}, {}, prim.minutes_into_session,
                    session_scoped=True, driving_frame_intraday=True),
+        # driving_frame_intraday, and that is a decision rather than an
+        # accident of grouping. On daily bars rvol does not go NaN, it
+        # collapses to today's volume over the trailing median daily volume:
+        # not meaningless, but a different measurement wearing the same name,
+        # and a spec author reading "relative volume" gets the session-shape
+        # answer the primitive's docstring promises on no bar of it. Nothing
+        # shipped depends on it (capitulation_snap, the only catalog user of
+        # rvol, drives off 1h), so refusing costs nothing today. If a daily
+        # relative-volume reading is wanted later it is a separate term with
+        # its own name, never an overload of this one, and the refusal message
+        # in spec.py says so.
         _primitive("rvol", {"sessions": (5, 60)}, {"sessions": 20}, prim.rvol,
                    session_scoped=True, driving_frame_intraday=True),
         _primitive("bars_since", {"cond": "condition"}, {}, prim.bars_since),
+        # end_anchored, here and on order_block: the value is anchored to the
+        # END of the frame handed in, one float off the tail rather than a
+        # causal series. A whole-frame pass may not broadcast that across
+        # history (it would be lookahead), so these are evaluated row by row
+        # over a bounded span instead. Bounded by `lookback`, so this costs
+        # what the per-bar path always cost.
         _primitive("fvg_nearest", {"direction": ("long", "short"),
                                     "field": ("top", "bottom", "mid"),
                                     "state": ("open", "inverted"),

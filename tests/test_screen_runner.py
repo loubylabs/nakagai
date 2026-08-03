@@ -6,6 +6,7 @@ import pytest
 
 from nakagai.data.cache import BarCache
 from nakagai.screen.runner import run_screen
+from nakagai.strategies.rules.vocabulary import Term, core_vocabulary
 
 NOW = pd.Timestamp("2026-07-17 20:05", tz="UTC")
 
@@ -35,6 +36,31 @@ def cache(tmp_path):
 
 ABOVE_SMA20 = {"version": 1, "tf": "1d", "conditions": {"all": [
     {"lhs": {"src": "close"}, "op": ">", "rhs": {"ind": "sma", "n": 20}}]}}
+
+
+DOUBLE_CLOSE = {"version": 1, "tf": "1d", "conditions": {"all": [
+    {"lhs": {"ind": "double_close"}, "op": ">", "rhs": {"src": "close"}}]}}
+
+
+def _injected():
+    return core_vocabulary().with_terms(
+        Term("double_close", "series", {}, {}, lambda s, _a: s * 2))
+
+
+def test_run_screen_evaluates_an_injected_term(cache):
+    """The evaluation half of the screen surface reads the same vocabulary.
+
+    Threading the validator alone would pass a screen that then errors per
+    symbol, which reads on the rows as a screen that simply matched nothing.
+    """
+    result = run_screen(DOUBLE_CLOSE, ["UP"], cache, now=NOW,
+                        vocabulary=_injected())
+    assert result["errors"] == []
+    assert result["rows"][0]["matched"] is True
+
+    fallback = run_screen(DOUBLE_CLOSE, ["UP"], cache, now=NOW)
+    assert fallback["rows"][0]["matched"] is None
+    assert fallback["errors"] and "double_close" in fallback["errors"][0]
 
 
 def test_run_screen_matches_and_sorts_matched_first(cache):
@@ -79,10 +105,10 @@ def test_run_screen_isolates_a_bad_symbol(cache, monkeypatch):
 
     real = runner_mod.build_context
 
-    def boom(cache_, sym, now):
+    def boom(cache_, sym, now, **kwargs):
         if sym == "UP":
             raise RuntimeError("corrupt parquet")
-        return real(cache_, sym, now)
+        return real(cache_, sym, now, **kwargs)
 
     monkeypatch.setattr(runner_mod, "build_context", boom)
     result = run_screen(ABOVE_SMA20, ["UP", "DOWN"], cache, now=NOW)

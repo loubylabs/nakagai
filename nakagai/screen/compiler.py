@@ -11,15 +11,23 @@ from nakagai.nlbuilder.compiler import (
 )
 from nakagai.screen.prompt import render_screen_prompt
 from nakagai.screen.spec import describe_screen, validate_screen_spec
+from nakagai.strategies.rules.vocabulary import Vocabulary, resolve_vocabulary
 
 MODEL = "claude-opus-4-8"
 MAX_TOKENS = 4000
 
 
 def compile_screen(description: str, client=None, model: str = MODEL,
-                   max_retries: int = 2) -> CompileResult:
+                   max_retries: int = 2, *,
+                   vocabulary: Vocabulary | None = None) -> CompileResult:
+    # One vocabulary for the whole loop. The prompt advertises exactly the
+    # terms the validator will accept and the readback will render, so an
+    # injected term cannot be offered to the model and then refused on the way
+    # back (or accepted and then rendered against a name the renderer lacks).
+    vocabulary = resolve_vocabulary(vocabulary)
     client = _client_or_default(client)
-    system = [{"type": "text", "text": render_screen_prompt(),
+    system = [{"type": "text",
+               "text": render_screen_prompt(vocabulary),
                "cache_control": {"type": "ephemeral"}}]
     messages = [{"role": "user", "content": description.strip()}]
     result = CompileResult()
@@ -50,10 +58,10 @@ def compile_screen(description: str, client=None, model: str = MODEL,
             result.not_expressible = str(doc["not_expressible"])
             return result
         spec = doc.get("spec")
-        errors = validate_screen_spec(spec)
+        errors = validate_screen_spec(spec, vocabulary=vocabulary)
         if not errors:
             result.spec = spec
-            result.readback = describe_screen(spec)
+            result.readback = describe_screen(spec, vocabulary=vocabulary)
             result.clarifications = [str(c) for c in doc.get("clarifications", [])]
             return result
         last_errors = errors

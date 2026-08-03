@@ -49,7 +49,7 @@ def rank_ic(factor: pd.Series, fwd_returns: pd.Series) -> tuple[float | None, in
 
 
 def window_icir(spec: dict, cache, symbol: str, window: Window,
-                tfs: TimeframeSet = DEFAULT_TIMEFRAMES,
+                tfs: TimeframeSet = DEFAULT_TIMEFRAMES, *,
                 vocabulary: Vocabulary | None = None) -> dict:
     """Per-window rank-IC of one spec on one symbol: the six run-row fields.
     The factor (margin) is built from frames cut at window.test_end so it
@@ -64,7 +64,7 @@ def window_icir(spec: dict, cache, symbol: str, window: Window,
     bars = frames.get(tf)
     if bars is None or bars.empty:
         return out
-    fe = FrameEval(frames, tfs, vocabulary)
+    fe = FrameEval(frames, tfs, vocabulary=vocabulary)
     in_win = bars.index[(bars.index >= window.test_start)
                         & (bars.index < window.test_end)]
     if not len(in_win):

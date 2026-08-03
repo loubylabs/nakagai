@@ -1,5 +1,6 @@
-"""System prompt for the NL->spec compiler, rendered from the live grammar
-registries so it can never drift from the validator."""
+"""System prompt for the NL->spec compiler, rendered from the caller's own
+vocabulary so it can never drift from the validator that will judge the
+reply."""
 
 import json
 
@@ -76,7 +77,7 @@ Prefer legs that share one timeframe.
 {plays}"""
 
 
-def render_system_prompt(members: dict | None = None,
+def render_system_prompt(members: dict | None = None, *,
                          vocabulary: Vocabulary | None = None) -> str:
     vocabulary = resolve_vocabulary(vocabulary)
     ind_lines = "\n".join(

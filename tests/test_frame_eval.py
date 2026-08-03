@@ -165,7 +165,7 @@ def test_series_is_memoized_per_node():
 def test_moving_the_span_after_a_node_is_cached_is_refused():
     """The span is a correctness input the memo key does not carry.
 
-    Every END_ANCHORED node's value depends on the span, and the node cache is
+    Every end_anchored node's value depends on the span, and the node cache is
     keyed on (tf, node) alone. Reusing one FrameEval across walk-forward
     windows is the obvious next optimization and it would silently serve window
     one's rows for window two. Latent today only because each FrameEval is

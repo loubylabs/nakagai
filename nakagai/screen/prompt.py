@@ -1,5 +1,6 @@
-"""System prompt for the NL->ScreenSpec compiler, rendered from the live
-grammar registries so it can never drift from the validator."""
+"""System prompt for the NL->ScreenSpec compiler, rendered from the caller's
+own vocabulary so it can never drift from the validator that will judge the
+reply."""
 
 from nakagai.strategies.rules import spec as g
 from nakagai.strategies.rules.vocabulary import Vocabulary, resolve_vocabulary
