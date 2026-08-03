@@ -9,10 +9,7 @@ readback; canon.py owns identity hashing.
 """
 
 from nakagai.data.schema import DEFAULT_TIMEFRAMES
-from nakagai.strategies.rules.primitives import ARG_DEFAULTS as PRIM_DEFAULTS
-from nakagai.strategies.rules.primitives import DRIVING_FRAME_INTRADAY_PRIMS
-from nakagai.strategies.rules.primitives import END_ANCHORED, PRIMITIVES
-from nakagai.strategies.rules.primitives import SESSION_SCOPED_PRIMS
+from nakagai.strategies.rules.vocabulary import Vocabulary, resolve_vocabulary
 
 VERSION = 2
 SESSION_ALIGNED = DEFAULT_TIMEFRAMES.session_aligned
@@ -26,45 +23,6 @@ CROSS_OPS = ("crosses_above", "crosses_below")
 MATH_OPS: dict[str, tuple[int, int]] = {   # op -> (min arity, max arity)
     "+": (2, 8), "-": (2, 2), "*": (2, 8), "/": (2, 2),
     "abs": (1, 1), "min": (2, 8), "max": (2, 8),
-}
-# Series indicators take `of` (any expression, default close-of-timeframe).
-SERIES_INDICATORS: dict[str, dict] = {
-    "sma": {"n": (2, 500)}, "ema": {"n": (2, 500)}, "rsi": {"n": (2, 100)},
-    "roc": {"n": (1, 500)}, "zscore": {"n": (2, 500)},
-    "highest": {"n": (2, 500)}, "lowest": {"n": (2, 500)}, "stdev": {"n": (2, 500)},
-    "macd": {"fast": (2, 100), "slow": (3, 200), "signal": (2, 100),
-             "field": ("macd", "signal", "hist")},
-    "bb": {"n": (2, 200), "k": (0.5, 5.0), "field": ("upper", "mid", "lower")},
-}
-# Bar indicators need full OHLCV; no `of`.
-BAR_INDICATORS: dict[str, dict] = {
-    "atr": {"n": (2, 100)},
-    "donchian": {"n": (2, 300), "field": ("upper", "lower", "mid")},
-    "supertrend": {"n": (2, 100), "mult": (0.5, 10.0), "field": ("line", "direction")},
-    "vwap": {},
-    "stoch": {"n": (2, 100), "d": (1, 50), "field": ("k", "d")},
-    "adx": {"n": (2, 100)},
-    "obv": {},
-    "ichimoku": {"tenkan_n": (2, 100), "kijun_n": (2, 200), "senkou_n": (2, 300),
-                 "disp": (1, 100), "field": ("tenkan", "kijun", "senkou_a", "senkou_b")},
-    "keltner": {"n": (2, 200), "mult": (0.5, 10.0), "field": ("upper", "mid", "lower")},
-    "cci": {"n": (2, 200)},
-    "mfi": {"n": (2, 100)},
-    "wpr": {"n": (2, 100)},
-}
-INDICATORS = {**SERIES_INDICATORS, **BAR_INDICATORS}
-ARG_DEFAULTS: dict[str, dict] = {
-    "sma": {"n": 20}, "ema": {"n": 20}, "rsi": {"n": 14}, "roc": {"n": 20},
-    "zscore": {"n": 20}, "highest": {"n": 20}, "lowest": {"n": 20}, "stdev": {"n": 20},
-    "macd": {"fast": 12, "slow": 26, "signal": 9, "field": "macd"},
-    "bb": {"n": 20, "k": 2.0, "field": "mid"},
-    "atr": {"n": 14}, "donchian": {"n": 20, "field": "upper"},
-    "supertrend": {"n": 10, "mult": 3.0, "field": "line"},
-    "stoch": {"n": 14, "d": 3, "field": "k"}, "adx": {"n": 14},
-    "ichimoku": {"tenkan_n": 9, "kijun_n": 26, "senkou_n": 52, "disp": 26,
-                 "field": "tenkan"},
-    "keltner": {"n": 20, "mult": 2.0, "field": "mid"},
-    "cci": {"n": 20}, "mfi": {"n": 14}, "wpr": {"n": 14},
 }
 STOP_KINDS = ("atr", "percent")
 TARGET_KINDS = ("rr", "percent")
@@ -140,7 +98,7 @@ _ONE_BAR_SESSION = {
 
 
 def _check_session_aligned_refs(node, eval_tf: str, path: str,
-                                errs: list[str]) -> None:
+                                errs: list[str], vocabulary: Vocabulary) -> None:
     """Refuse what a session-aligned frame cannot answer. Two rules live here.
 
     The first: a cross-timeframe reference evaluated on a session-aligned
@@ -193,7 +151,8 @@ def _check_session_aligned_refs(node, eval_tf: str, path: str,
                         f"{src_tf!r} has no well-defined visibility cutoff; "
                         "move it to an intraday timeframe")
         prim = item.get("prim")
-        if prim in DRIVING_FRAME_INTRADAY_PRIMS and src_tf in SESSION_ALIGNED:
+        term = vocabulary.primitives.get(prim)
+        if term is not None and term.driving_frame_intraday and src_tf in SESSION_ALIGNED:
             errs.append(f"{at}: {prim} needs intraday bars and this one is "
                         f"evaluated on {src_tf!r}, where "
                         f"{_ONE_BAR_SESSION[prim]}; move it to an intraday "
@@ -215,7 +174,8 @@ def _check_tf(node: dict, path: str, errs: list[str],
 
 
 def _check_expr(node, path: str, errs: list[str], budget: _Budget,
-                depth: int = 0, series_required: bool = False) -> None:
+                vocabulary: Vocabulary, depth: int = 0,
+                series_required: bool = False) -> None:
     if depth > MAX_DEPTH:
         errs.append(f"{path}: expression depth exceeds {MAX_DEPTH}")
         return
@@ -245,31 +205,37 @@ def _check_expr(node, path: str, errs: list[str], budget: _Budget,
             errs.append(f"{path}: {op!r} takes {lo}-{hi} args")
             return
         for i, a in enumerate(args):
-            _check_expr(a, f"{path}.args[{i}]", errs, budget, depth + 1)
+            _check_expr(a, f"{path}.args[{i}]", errs, budget, vocabulary,
+                        depth + 1)
         if set(node) - {"op", "args"}:
             errs.append(f"{path}: math nodes take only op/args")
         return
     if "ind" in node:
         budget.nodes += 1
         name = node["ind"]
-        if name not in INDICATORS:
-            errs.append(f"{path}: unknown indicator {name!r} (valid: {sorted(INDICATORS)})")
+        if name not in vocabulary.indicators:
+            errs.append(f"{path}: unknown indicator {name!r} "
+                        f"(valid: {sorted(vocabulary.indicators)})")
             return
+        term = vocabulary.indicators[name]
         if "of" in node:
-            if name in BAR_INDICATORS:
+            if term.kind == "bar":
                 errs.append(f"{path}: {name} works on full bars and takes no `of`")
             else:
-                _check_expr(node["of"], f"{path}.of", errs, budget, depth + 1)
-        _check_args(name, node, INDICATORS[name], path, errs, skip=("ind", "of", "tf"))
+                _check_expr(node["of"], f"{path}.of", errs, budget,
+                            vocabulary, depth + 1)
+        _check_args(name, node, term.args, path, errs, skip=("ind", "of", "tf"))
         _check_tf(node, path, errs)
         return
     if "prim" in node:
         budget.nodes += 1
         name = node["prim"]
-        if name not in PRIMITIVES:
-            errs.append(f"{path}: unknown primitive {name!r} (valid: {sorted(PRIMITIVES)})")
+        if name not in vocabulary.primitives:
+            errs.append(f"{path}: unknown primitive {name!r} "
+                        f"(valid: {sorted(vocabulary.primitives)})")
             return
-        if series_required and name in END_ANCHORED:
+        term = vocabulary.primitives[name]
+        if series_required and term.end_anchored:
             # An end-anchored primitive is one level read from the tail of the
             # frame, not a series, which is exactly what this module's own
             # END_ANCHORED set means. crossed_above's scalar branch only ever
@@ -278,7 +244,7 @@ def _check_expr(node, path: str, errs: list[str], budget: _Budget,
             # permanently dead. _cross_prev is symmetric, so it would now fire.
             errs.append(f"{path}: the left side of a cross must be a series; "
                         f"{name} is a level read from the end of the frame")
-        schema = PRIMITIVES[name]["args"]
+        schema = term.args
         if name == "bars_since":
             cond = node.get("cond")
             if not isinstance(cond, dict) or not {"lhs", "op", "rhs"} <= set(cond):
@@ -286,7 +252,8 @@ def _check_expr(node, path: str, errs: list[str], budget: _Budget,
             elif cond.get("op") in CROSS_OPS:
                 errs.append(f"{path}: bars_since conditions use comparison ops only")
             else:
-                _check_condition(cond, f"{path}.cond", errs, budget, depth + 1)
+                _check_condition(cond, f"{path}.cond", errs, budget,
+                                 vocabulary, depth + 1)
             if isinstance(cond, dict):
                 # End-anchored primitives are NaN outside the span they are
                 # evaluated over, so any reader that reaches rows outside it
@@ -296,19 +263,23 @@ def _check_expr(node, path: str, errs: list[str], budget: _Budget,
                 # same trades. bars_since is one such reader, because it ffills
                 # over the WHOLE mask. A cross with a nested end-anchored
                 # operand was the other; _check_condition refuses that one.
-                for bad in sorted(_prims_in(cond, END_ANCHORED)):
+                end_anchored = {n for n, t in vocabulary.primitives.items()
+                                if t.end_anchored}
+                for bad in sorted(_prims_in(cond, end_anchored)):
                     errs.append(f"{path}: {bad} is anchored to the end of the "
                                 f"frame and cannot sit inside a bars_since")
             if "tf" in node:
                 # A tf'd bars_since evaluates its cond on that frame, which
                 # would smuggle session-scoped prims onto a foreign timeframe.
-                for bad in sorted(_prims_in(cond, SESSION_SCOPED_PRIMS)):
+                session_scoped = {n for n, t in vocabulary.primitives.items()
+                                  if t.session_scoped}
+                for bad in sorted(_prims_in(cond, session_scoped)):
                     errs.append(f"{path}: {bad} is session-scoped and cannot "
                                 f"sit inside a bars_since with tf")
             _check_args(name, node, {}, path, errs, skip=("prim", "cond", "tf"))
         else:
             _check_args(name, node, schema, path, errs, skip=("prim", "tf"))
-        if "tf" in node and name in SESSION_SCOPED_PRIMS:
+        if "tf" in node and term.session_scoped:
             errs.append(f"{path}: {name} is session-scoped and takes no tf")
         _check_tf(node, path, errs)
         return
@@ -316,7 +287,7 @@ def _check_expr(node, path: str, errs: list[str], budget: _Budget,
 
 
 def _check_condition(cond, path: str, errs: list[str], budget: _Budget,
-                     depth: int = 0) -> None:
+                     vocabulary: Vocabulary, depth: int = 0) -> None:
     budget.conditions += 1
     if budget.conditions > MAX_CONDITIONS:
         errs.append(f"{path}: more than {MAX_CONDITIONS} conditions")
@@ -327,9 +298,9 @@ def _check_condition(cond, path: str, errs: list[str], budget: _Budget,
     op = cond["op"]
     if op not in OPS:
         errs.append(f"{path}: unknown op {op!r} (valid: {OPS})")
-    _check_expr(cond["lhs"], f"{path}.lhs", errs, budget, depth,
+    _check_expr(cond["lhs"], f"{path}.lhs", errs, budget, vocabulary, depth,
                 series_required=op in CROSS_OPS)
-    _check_expr(cond["rhs"], f"{path}.rhs", errs, budget, depth)
+    _check_expr(cond["rhs"], f"{path}.rhs", errs, budget, vocabulary, depth)
     if op in CROSS_OPS:
         # series_required only ever inspects the operand's TOP node, so it saw
         # {"prim": "fvg_nearest"} and not {"op": "*", "args": [that, 1.0]}. The
@@ -353,7 +324,9 @@ def _check_condition(cond, path: str, errs: list[str], budget: _Budget,
         for side in ("lhs", "rhs"):
             node = cond[side]
             top = node.get("prim") if isinstance(node, dict) else None
-            nested = _prims_in(node, END_ANCHORED) - {top}
+            end_anchored = {n for n, t in vocabulary.primitives.items()
+                            if t.end_anchored}
+            nested = _prims_in(node, end_anchored) - {top}
             for bad in sorted(nested):
                 errs.append(f"{path}.{side}: {bad} is anchored to the end of "
                             f"the frame and cannot be nested inside a cross "
@@ -363,7 +336,7 @@ def _check_condition(cond, path: str, errs: list[str], budget: _Budget,
 
 
 def _check_group(group, path: str, errs: list[str], budget: _Budget,
-                 depth: int = 0) -> None:
+                 vocabulary: Vocabulary, depth: int = 0) -> None:
     if depth > MAX_DEPTH:
         errs.append(f"{path}: group depth exceeds {MAX_DEPTH}")
         return
@@ -377,9 +350,9 @@ def _check_group(group, path: str, errs: list[str], budget: _Budget,
     for i, item in enumerate(items):
         p = f"{path}.{key}[{i}]"
         if isinstance(item, dict) and ("all" in item or "any" in item):
-            _check_group(item, p, errs, budget, depth + 1)
+            _check_group(item, p, errs, budget, vocabulary, depth + 1)
             continue
-        _check_condition(item, p, errs, budget)
+        _check_condition(item, p, errs, budget, vocabulary)
 
 
 def _not_num(v, lo, hi) -> bool:
@@ -389,7 +362,8 @@ def _not_num(v, lo, hi) -> bool:
     return isinstance(v, bool) or not isinstance(v, (int, float)) or not lo <= v <= hi
 
 
-def _check_exits(exits, errs: list[str], budget: _Budget) -> None:
+def _check_exits(exits, errs: list[str], budget: _Budget,
+                 vocabulary: Vocabulary) -> None:
     if not isinstance(exits, dict):
         errs.append("exits must be an object")
         return
@@ -397,7 +371,7 @@ def _check_exits(exits, errs: list[str], budget: _Budget) -> None:
     if unknown:
         errs.append(f"exits: unknown keys {sorted(unknown)}")
     if "exit" in exits:
-        _check_group(exits["exit"], "exits.exit", errs, budget)
+        _check_group(exits["exit"], "exits.exit", errs, budget, vocabulary)
     if "trailing" in exits:
         t = exits["trailing"]
         if not isinstance(t, dict) or t.get("kind") not in ("atr", "percent"):
@@ -471,8 +445,9 @@ def risk_text(risk: dict) -> str:
     return f"Stop: {stop_text}. Target: {target_text}."
 
 
-def validate_spec(spec) -> list[str]:
+def validate_spec(spec, vocabulary: Vocabulary | None = None) -> list[str]:
     """Structural + semantic validation. Empty list = usable spec."""
+    vocabulary = resolve_vocabulary(vocabulary)
     if not isinstance(spec, dict):
         return ["spec must be a JSON object"]
     errs: list[str] = []
@@ -492,36 +467,38 @@ def validate_spec(spec) -> list[str]:
     tf = spec.get("timeframe", "1h")
     tf = tf if tf in TIMEFRAMES else "1h"
     for side in sides:
-        _check_group(spec[side], side, errs, budget)
-        _check_session_aligned_refs(spec[side], tf, side, errs)
+        _check_group(spec[side], side, errs, budget, vocabulary)
+        _check_session_aligned_refs(spec[side], tf, side, errs, vocabulary)
     if "exits" in spec:
-        _check_exits(spec["exits"], errs, budget)
+        _check_exits(spec["exits"], errs, budget, vocabulary)
         if isinstance(spec["exits"], dict) and "exit" in spec["exits"]:
             _check_session_aligned_refs(spec["exits"]["exit"], tf,
-                                        "exits.exit", errs)
+                                        "exits.exit", errs, vocabulary)
     errs.extend(validate_risk(spec.get("risk", {})))
     return errs
 
 
 def validate_condition_group(group, path: str = "conditions",
-                             tf: str = "1h") -> list[str]:
+                             tf: str = "1h",
+                             vocabulary: Vocabulary | None = None) -> list[str]:
     """Standalone validation of one all/any condition group with a fresh
     budget. The screener's whole schema is one such group; validate_spec's
     per-side entry groups go through the same walker. `tf` is the timeframe the
     group is evaluated on, which decides whether a cross-timeframe reference
     inside it has a visibility cutoff at all."""
+    vocabulary = resolve_vocabulary(vocabulary)
     errs: list[str] = []
-    _check_group(group, path, errs, _Budget())
-    _check_session_aligned_refs(group, tf, path, errs)
+    _check_group(group, path, errs, _Budget(), vocabulary)
+    _check_session_aligned_refs(group, tf, path, errs, vocabulary)
     return errs
 
 
-def group_text(group: dict) -> str:
+def group_text(group: dict, vocabulary: Vocabulary | None = None) -> str:
     """Public name for the group renderer; the screener readback reuses it."""
-    return _group_text(group)
+    return _group_text(group, resolve_vocabulary(vocabulary))
 
 
-def _expr_text(node) -> str:
+def _expr_text(node, vocabulary: Vocabulary) -> str:
     if isinstance(node, (int, float)):
         return f"{node:g}"
     if "src" in node:
@@ -529,18 +506,19 @@ def _expr_text(node) -> str:
     if "op" in node:
         op, args = node["op"], node["args"]
         if op == "abs":
-            return f"abs({_expr_text(args[0])})"
-        return "(" + f" {op} ".join(_expr_text(a) for a in args) + ")"
+            return f"abs({_expr_text(args[0], vocabulary)})"
+        return "(" + f" {op} ".join(_expr_text(a, vocabulary) for a in args) + ")"
     if "ind" in node:
         name = node["ind"]
-        args = {**ARG_DEFAULTS.get(name, {}),
+        term = vocabulary.indicators[name]
+        args = {**term.defaults,
                 **{k: v for k, v in node.items() if k not in ("ind", "of", "tf")}}
         field = args.pop("field", None)
         parts = [f"{v}" for v in args.values()]
-        if name in SERIES_INDICATORS:
+        if term.kind != "bar":
             of = node.get("of", {"src": "close"})
             if of != {"src": "close"}:
-                parts.append(f"of={_expr_text(of)}")
+                parts.append(f"of={_expr_text(of, vocabulary)}")
         inner = ", ".join(parts)
         text = f"{name}({inner})" if inner else name
         if "tf" in node:
@@ -548,9 +526,9 @@ def _expr_text(node) -> str:
         return f"{text}.{field}" if field else text
     name = node["prim"]
     if name == "bars_since":
-        text = f"bars_since({_condition_text(node['cond'])})"
+        text = f"bars_since({_condition_text(node['cond'], vocabulary)})"
     else:
-        args = {**PRIM_DEFAULTS.get(name, {}),
+        args = {**vocabulary.primitives[name].defaults,
                 **{k: v for k, v in node.items() if k not in ("prim", "cond", "tf")}}
         if "minutes" in args:
             minutes = args.pop("minutes")
@@ -568,26 +546,28 @@ _OP_TEXT = {">": "is above", "<": "is below", ">=": "is at or above",
             "crosses_below": "crosses below"}
 
 
-def _condition_text(cond: dict) -> str:
-    return f"{_expr_text(cond['lhs'])} {_OP_TEXT[cond['op']]} {_expr_text(cond['rhs'])}"
+def _condition_text(cond: dict, vocabulary: Vocabulary) -> str:
+    return (f"{_expr_text(cond['lhs'], vocabulary)} {_OP_TEXT[cond['op']]} "
+            f"{_expr_text(cond['rhs'], vocabulary)}")
 
 
-def _group_text(group, indent: str = "  ") -> str:
+def _group_text(group, vocabulary: Vocabulary, indent: str = "  ") -> str:
     key, items = next(iter(group.items()))
     joiner = "ALL of:" if key == "all" else "ANY of:"
     lines = [joiner]
     for item in items:
         if "all" in item or "any" in item:
-            lines.append(indent + _group_text(item, indent + "  ").replace("\n", "\n" + indent))
+            lines.append(indent + _group_text(item, vocabulary, indent + "  ")
+                         .replace("\n", "\n" + indent))
         else:
-            lines.append(f"{indent}- {_condition_text(item)}")
+            lines.append(f"{indent}- {_condition_text(item, vocabulary)}")
     return "\n".join(lines)
 
 
-def _exits_text(exits: dict) -> list[str]:
+def _exits_text(exits: dict, vocabulary: Vocabulary) -> list[str]:
     lines = []
     if "exit" in exits:
-        lines.append("Exit early when " + _group_text(exits["exit"]))
+        lines.append("Exit early when " + _group_text(exits["exit"], vocabulary))
     if "trailing" in exits:
         t = exits["trailing"]
         if t["kind"] == "atr":
@@ -601,15 +581,16 @@ def _exits_text(exits: dict) -> list[str]:
     return lines
 
 
-def describe_spec(spec: dict) -> str:
+def describe_spec(spec: dict, vocabulary: Vocabulary | None = None) -> str:
     """Plain-English restatement of a validated spec: the trust step shown to
     the user before they save or backtest an imported/NL-built strategy."""
+    vocabulary = resolve_vocabulary(vocabulary)
     lines = [f"Strategy \"{spec.get('name', 'unnamed')}\" on {spec.get('timeframe', '1h')} bars."]
     for side in ("long", "short"):
         if side in spec:
-            lines.append(f"Enter {side} when " + _group_text(spec[side]))
+            lines.append(f"Enter {side} when " + _group_text(spec[side], vocabulary))
     if "exits" in spec:
-        lines.extend(_exits_text(spec["exits"]))
+        lines.extend(_exits_text(spec["exits"], vocabulary))
     risk = spec.get("risk", DEFAULT_RISK)
     lines.append(risk_text(risk))
     return "\n".join(lines)

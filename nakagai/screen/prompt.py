@@ -1,8 +1,8 @@
 """System prompt for the NL->ScreenSpec compiler, rendered from the live
 grammar registries so it can never drift from the validator."""
 
-from nakagai.strategies.rules import primitives as prims
 from nakagai.strategies.rules import spec as g
+from nakagai.strategies.rules.vocabulary import Vocabulary, resolve_vocabulary
 
 _EXAMPLES = """\
 Description: "oversold names: rsi 14 under 30 on the daily"
@@ -26,12 +26,14 @@ def _bounds(schema: dict) -> str:
     return ", ".join(f"{k}={v}" for k, v in schema.items()) or "no args"
 
 
-def render_screen_prompt() -> str:
+def render_screen_prompt(vocabulary: Vocabulary | None = None) -> str:
+    vocabulary = resolve_vocabulary(vocabulary)
     ind_lines = "\n".join(
-        f"- {name}({_bounds(sch)})" + (" [takes of=<expr>]" if name in g.SERIES_INDICATORS else "")
-        for name, sch in sorted(g.INDICATORS.items()))
-    prim_lines = "\n".join(f"- {name}({_bounds(p['args'])})"
-                           for name, p in sorted(prims.PRIMITIVES.items()))
+        f"- {name}({_bounds(term.args)})"
+        + (" [takes of=<expr>]" if term.kind != "bar" else "")
+        for name, term in sorted(vocabulary.indicators.items()))
+    prim_lines = "\n".join(f"- {name}({_bounds(term.args)})"
+                           for name, term in sorted(vocabulary.primitives.items()))
     return f"""You compile plain-English market screens into nakagai ScreenSpec v1
 JSON. A screen is a filter: it answers "which symbols match this condition
 right now." Reply with EXACTLY ONE JSON object and nothing else (no prose, no

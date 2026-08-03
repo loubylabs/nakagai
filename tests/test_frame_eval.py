@@ -9,7 +9,7 @@ from nakagai.data.schema import DEFAULT_TIMEFRAMES as TFS
 from nakagai.engine.context import build_context, closed_before
 from nakagai.strategies.indicators import crossed_above
 from nakagai.strategies.rules.frame_eval import FrameEval
-from nakagai.strategies.rules.primitives import PRIMITIVES
+from nakagai.strategies.rules.vocabulary import Term, core_vocabulary
 from tests.whole_frame_oracle import prefix_value
 
 NODES = [
@@ -134,10 +134,19 @@ def test_a_point_in_time_context_walks_one_row_not_the_whole_frame(monkeypatch):
     want = prefix_value(node, frames, "15m", now, TFS)
 
     calls = []
-    real = PRIMITIVES["fvg_nearest"]["fn"]
-    monkeypatch.setitem(PRIMITIVES["fvg_nearest"], "fn",
-                        lambda *a, **k: (calls.append(1), real(*a, **k))[1])
-    ctx = build_context(cache, "SPY", now)
+    base = core_vocabulary()
+    real = base.primitives["fvg_nearest"]
+    terms = [term for term in base.all_terms() if term.name != "fvg_nearest"]
+    terms.append(Term(real.name, real.kind, real.args, real.defaults,
+                      lambda *a, **k: (calls.append(1), real.fn(*a, **k))[1],
+                      doc=real.doc, end_anchored=real.end_anchored,
+                      session_scoped=real.session_scoped,
+                      driving_frame_intraday=real.driving_frame_intraday,
+                      pine=real.pine))
+    vocabulary = type(base)(
+        {term.name: term for term in terms if term.kind != "primitive"},
+        {term.name: term for term in terms if term.kind == "primitive"})
+    ctx = build_context(cache, "SPY", now, vocabulary=vocabulary)
     got = float(ctx.fe.series(node, "15m").iloc[-1])
 
     assert len(calls) == 1, (

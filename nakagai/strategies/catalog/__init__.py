@@ -10,15 +10,19 @@ import json
 from functools import cache
 from pathlib import Path
 
-from nakagai.strategies.rules import RuleStrategy, validate_spec
+from nakagai.strategies.rules import (
+    RuleStrategy, VocabularyFactory, core_vocabulary, validate_spec,
+)
 
 
 @cache
-def load_entries(specs_dir: Path) -> dict[str, dict]:
+def load_entries(specs_dir: Path,
+                 vocabulary_factory: VocabularyFactory = core_vocabulary) -> dict[str, dict]:
+    vocabulary = vocabulary_factory()
     out = {}
     for path in sorted(Path(specs_dir).glob("*.json")):
         entry = json.loads(path.read_text())
-        errs = validate_spec(entry["spec"])
+        errs = validate_spec(entry["spec"], vocabulary)
         if errs:
             raise ValueError(f"catalog spec {path.name} invalid: {'; '.join(errs)}")
         out[entry["spec"]["name"]] = entry
@@ -26,11 +30,14 @@ def load_entries(specs_dir: Path) -> dict[str, dict]:
 
 
 @cache
-def load_catalog(specs_dir: Path) -> dict[str, type[RuleStrategy]]:
+def load_catalog(specs_dir: Path,
+                 vocabulary_factory: VocabularyFactory = core_vocabulary
+                 ) -> dict[str, type[RuleStrategy]]:
     out = {}
-    for name, entry in load_entries(specs_dir).items():
+    base = RuleStrategy.bound(vocabulary_factory)
+    for name, entry in load_entries(specs_dir, vocabulary_factory).items():
         out[name] = type(
-            f"Catalog_{name}", (RuleStrategy,),
+            f"Catalog_{name}", (base,),
             {"name": name, "title": entry["title"],
              "description": entry["description"], "category": entry["category"],
              "tags": tuple(entry["tags"]), "timeframe": entry["spec"]["timeframe"],

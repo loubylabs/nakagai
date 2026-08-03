@@ -24,8 +24,8 @@ import pytest
 from nakagai.data.schema import DEFAULT_TIMEFRAMES as TFS
 from nakagai.engine.context import closed_before, visible_counts
 from nakagai.strategies.rules.frame_eval import FrameEval
-from nakagai.strategies.rules.primitives import PRIMITIVES
-from nakagai.strategies.rules.spec import ARG_DEFAULTS, INDICATORS, MATH_OPS
+from nakagai.strategies.rules.spec import MATH_OPS
+from nakagai.strategies.rules.vocabulary import core_vocabulary
 from tests.whole_frame_oracle import prefix_value
 
 EVERY_NODE = [
@@ -151,8 +151,9 @@ def test_every_node_kind_in_the_grammar_is_covered():
     here would leave a hole that reads as coverage, so name the omission out
     loud instead.
     """
-    assert {n["ind"] for n in _nodes_of("ind")} == set(INDICATORS)
-    assert {n["prim"] for n in _nodes_of("prim")} == set(PRIMITIVES)
+    vocabulary = core_vocabulary()
+    assert {n["ind"] for n in _nodes_of("ind")} == set(vocabulary.indicators)
+    assert {n["prim"] for n in _nodes_of("prim")} == set(vocabulary.primitives)
     assert {n["op"] for n in EVERY_NODE if "op" in n} == set(MATH_OPS)
 
 
@@ -163,11 +164,11 @@ def test_every_field_of_a_multi_field_indicator_is_covered():
     one frame, selected after the fact, and a name-only gate passed while
     kijun, senkou_b and two of the three bands were never evaluated at all.
     """
-    for name, schema in sorted(INDICATORS.items()):
-        want = set(schema.get("field", ()))
+    for name, term in sorted(core_vocabulary().indicators.items()):
+        want = set(term.args.get("field", ()))
         if not want:
             continue
-        got = {n.get("field", ARG_DEFAULTS[name]["field"])
+        got = {n.get("field", term.defaults["field"])
                for n in _nodes_of("ind") if n["ind"] == name}
         assert got == want, f"{name}: fields {sorted(want - got)} not covered"
 

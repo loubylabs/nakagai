@@ -6,6 +6,7 @@ import pandas as pd
 from nakagai.data.cache import BarCache
 from nakagai.data.schema import DEFAULT_TIMEFRAMES, EXCHANGE_TZ, TimeframeSet
 from nakagai.strategies.base import MarketContext
+from nakagai.strategies.rules.vocabulary import Vocabulary, resolve_vocabulary
 
 
 class PreloadedBars:
@@ -18,10 +19,11 @@ class PreloadedBars:
     still happens per bar in closed_before; `fe` holds the untruncated frames.
     """
 
-    def __init__(self, cache, symbol: str, tfs: TimeframeSet = DEFAULT_TIMEFRAMES):
+    def __init__(self, cache, symbol: str, tfs: TimeframeSet = DEFAULT_TIMEFRAMES,
+                 vocabulary: Vocabulary | None = None):
         from nakagai.strategies.rules.frame_eval import FrameEval
         self._frames = {tf: cache.load(symbol, tf) for tf in tfs.all}
-        self.fe = FrameEval(self._frames, tfs)
+        self.fe = FrameEval(self._frames, tfs, resolve_vocabulary(vocabulary))
 
     def load(self, symbol: str, timeframe: str):
         return self._frames[timeframe]
@@ -84,7 +86,8 @@ def visible_counts(src_index: pd.DatetimeIndex, dst_close_times: pd.DatetimeInde
 
 
 def build_context(cache: BarCache, symbol: str, now: pd.Timestamp,
-                  tfs: TimeframeSet = DEFAULT_TIMEFRAMES) -> MarketContext:
+                  tfs: TimeframeSet = DEFAULT_TIMEFRAMES,
+                  vocabulary: Vocabulary | None = None) -> MarketContext:
     """Point-in-time context at `now`.
 
     closed_before still runs per timeframe per call. It is a searchsorted plus
@@ -102,7 +105,7 @@ def build_context(cache: BarCache, symbol: str, now: pd.Timestamp,
     # of semantics rather than a point-in-time walker beside a whole-frame one.
     fe = getattr(cache, "fe", None)
     if fe is None:
-        fe = FrameEval(bars, tfs)
+        fe = FrameEval(bars, tfs, resolve_vocabulary(vocabulary))
         # The span is not optional here. A point-in-time caller can only ever
         # read the LAST row of each frame, because the frames were just cut at
         # `now`; without a span the end-anchored primitives default to the whole

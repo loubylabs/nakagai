@@ -3,8 +3,12 @@ from nakagai.strategies.rules.spec import (
     DEFAULT_RISK, describe_spec, risk_text, validate_risk, validate_spec,
 )
 from nakagai.strategies.rules.strategy import RuleStrategy
+from nakagai.strategies.rules.vocabulary import (
+    Term, Vocabulary, VocabularyFactory, core_vocabulary, resolve_vocabulary,
+)
 
 __all__ = [
     "RuleStrategy", "DEFAULT_RISK", "canonical_spec", "describe_spec",
-    "risk_text", "spec_hash", "validate_risk", "validate_spec",
+    "risk_text", "spec_hash", "Term", "validate_risk", "validate_spec",
+    "Vocabulary", "VocabularyFactory", "core_vocabulary", "resolve_vocabulary",
 ]

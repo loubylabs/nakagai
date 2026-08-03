@@ -22,6 +22,7 @@ from nakagai.engine.context import closed_before
 from nakagai.engine.windows import Window
 from nakagai.strategies.rules.frame_eval import FrameEval
 from nakagai.strategies.rules.margins import spec_margin
+from nakagai.strategies.rules.vocabulary import Vocabulary
 
 IC_HORIZONS = (1, 5, 20)
 MIN_IC_OBS = 10
@@ -48,7 +49,8 @@ def rank_ic(factor: pd.Series, fwd_returns: pd.Series) -> tuple[float | None, in
 
 
 def window_icir(spec: dict, cache, symbol: str, window: Window,
-                tfs: TimeframeSet = DEFAULT_TIMEFRAMES) -> dict:
+                tfs: TimeframeSet = DEFAULT_TIMEFRAMES,
+                vocabulary: Vocabulary | None = None) -> dict:
     """Per-window rank-IC of one spec on one symbol: the six run-row fields.
     The factor (margin) is built from frames cut at window.test_end so it
     stays point-in-time. Forward returns, by contrast, are realized returns
@@ -62,7 +64,7 @@ def window_icir(spec: dict, cache, symbol: str, window: Window,
     bars = frames.get(tf)
     if bars is None or bars.empty:
         return out
-    fe = FrameEval(frames, tfs)
+    fe = FrameEval(frames, tfs, vocabulary)
     in_win = bars.index[(bars.index >= window.test_start)
                         & (bars.index < window.test_end)]
     if not len(in_win):

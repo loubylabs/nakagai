@@ -88,7 +88,9 @@ def test_validate_rejects_unknown_tf_on_prims():
 
 
 def test_describe_renders_tf_suffix():
-    assert _expr_text({"prim": "swing_high", "k": 3, "tf": "1h"}) == "swing_high(3)[1h]"
+    from nakagai.strategies.rules.vocabulary import core_vocabulary
+    assert _expr_text({"prim": "swing_high", "k": 3, "tf": "1h"},
+                      core_vocabulary()) == "swing_high(3)[1h]"
 
 
 def test_validate_rejects_tf_on_session_scoped_prims():

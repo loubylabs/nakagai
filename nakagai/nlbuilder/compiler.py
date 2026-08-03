@@ -13,6 +13,7 @@ from nakagai.nlbuilder.prompt import render_system_prompt
 from nakagai.strategies.composite import (
     describe_composite_spec, validate_composite_blocks, validate_composite_spec)
 from nakagai.strategies.rules import describe_spec, validate_spec
+from nakagai.strategies.rules.vocabulary import Vocabulary, resolve_vocabulary
 
 MODEL = "claude-opus-4-8"
 MAX_TOKENS = 8000
@@ -59,7 +60,7 @@ def _add_usage(result: CompileResult, resp) -> None:
     result.usage["cache_write_tokens"] += getattr(u, "cache_creation_input_tokens", 0) or 0
 
 
-def _check(kind: str, spec, members: dict | None):
+def _check(kind: str, spec, members: dict | None, vocabulary: Vocabulary):
     """(errors, describer) for the spec kind the model claims it produced.
     A composite needs the caller's member registry both to validate block
     references and to render the prompt, so without one the only honest answer
@@ -71,14 +72,16 @@ def _check(kind: str, spec, members: dict | None):
         errors = (validate_composite_spec(spec, members, allow_refs=False)
                   or validate_composite_blocks(spec, members))
         return errors, describe_composite_spec
-    return validate_spec(spec), describe_spec
+    return validate_spec(spec, vocabulary), lambda value: describe_spec(value, vocabulary)
 
 
 def compile_strategy(description: str, current_spec: dict | None = None,
                      client=None, model: str = MODEL,
-                     max_retries: int = 2, members: dict | None = None) -> CompileResult:
+                     max_retries: int = 2, members: dict | None = None,
+                     vocabulary: Vocabulary | None = None) -> CompileResult:
+    vocabulary = resolve_vocabulary(vocabulary)
     client = _client_or_default(client)
-    system = [{"type": "text", "text": render_system_prompt(members),
+    system = [{"type": "text", "text": render_system_prompt(members, vocabulary),
                "cache_control": {"type": "ephemeral"}}]
     user = description.strip()
     if current_spec is not None:
@@ -116,7 +119,7 @@ def compile_strategy(description: str, current_spec: dict | None = None,
         kind = doc.get("kind") or "rules"
         if kind not in ("rules", "composite"):
             kind = "rules"
-        errors, describe = _check(kind, spec, members)
+        errors, describe = _check(kind, spec, members, vocabulary)
         if not errors:
             result.spec = spec
             result.kind = kind
