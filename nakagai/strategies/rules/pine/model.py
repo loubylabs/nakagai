@@ -177,11 +177,17 @@ class PineProgram:
     title: str
     spec_hash: str
     generator_version: str
-    # The timeframe the calculations below are written for. The spec's own,
-    # because a node without a `tf` is emitted on the chart's bars rather than
-    # requested, so this is the one chart the program's arithmetic is true on
-    # and the renderer owes a runtime guard against every other one.
+    # The timeframe the calculations below are written for: the engine's
+    # DRIVING cadence, always, whatever the spec's own timeframe is. A play on
+    # a longer timeframe requests it rather than charting it, because that is
+    # what the engine does, so this is the one chart the program's arithmetic
+    # is true on and the renderer owes a runtime guard against every other one.
     chart: str
+    # The identifier a decision has to be true on before it may signal, empty
+    # when the play's timeframe IS the chart's and every bar is fair game.
+    # RuleStrategy._fresh, which is a separate question from which
+    # spec-timeframe bar a chart bar can see.
+    decision_gate: str
     inputs: tuple[PineInput, ...]
     helpers: tuple[PineHelper, ...]
     calculations: tuple[str, ...]

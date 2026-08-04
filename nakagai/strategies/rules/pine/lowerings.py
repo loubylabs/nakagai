@@ -42,6 +42,7 @@ DIV = "nk_div"
 # the shared machinery below them.
 SESSION_KEY = "nk_session_key"
 NEW_SESSION = "nk_new_session"
+SESSION_OPEN_BAR = "nk_session_open_bar"
 WINDOW_ATR = "nk_window_atr"
 OPENING_RANGE_HIGH = "nk_opening_range_high"
 OPENING_RANGE_LOW = "nk_opening_range_low"
@@ -315,6 +316,24 @@ _PRIMITIVE_HELPERS = (
     PineHelper(NEW_SESSION, f"""{NEW_SESSION}() =>
     int key = {SESSION_KEY}()
     na(key[1]) or key != key[1]""", (SESSION_KEY,)),
+    # util.first_bar_of_session: the driving bar a session-aligned play decides
+    # on, which is the bar that OPENS a regular session rather than the one
+    # that starts a calendar day. The two look equivalent and are not, and the
+    # engine says why: the caches are not RTH-only, so on roughly half of a
+    # three-year SPY cache the first bar of the date is a pre-market print at
+    # 08:00, and gating there fires on a bar no live scanner ever visits. 570
+    # is 09:30 New York in minutes. A session whose 09:30 bar is missing fires
+    # on the first bar that IS there, one bar late, which is the engine's
+    # answer rather than skipping the day.
+    PineHelper(SESSION_OPEN_BAR, f"""{SESSION_OPEN_BAR}() =>
+    var bool fired = false
+    if {NEW_SESSION}()
+        fired := false
+    bool open_yet = hour(time, "America/New_York") * 60 + minute(time, "America/New_York") >= 570
+    bool first = open_yet and not fired
+    if first
+        fired := true
+    first""", (NEW_SESSION,)),
     # _opening_range: the level is the extreme over `ts < edge`, returned only
     # `where(ts >= edge)`, and the edge is measured from the session's OWN first
     # bar rather than from a wall clock, so a late open or a half day measures

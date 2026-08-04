@@ -16,8 +16,9 @@ from nakagai.data.schema import DEFAULT_TIMEFRAMES
 from nakagai.strategies.rules import (
     PineExits, PineRisk, lower_pine, spec_hash,
 )
-from nakagai.strategies.rules.pine.lower import PINE_TIMEFRAMES
+from nakagai.strategies.rules.pine.lower import PINE_TIMEFRAMES, SpecLowerer
 from nakagai.strategies.rules.spec import (
+    DRIVING,
     STOP_ATR_MULT_DEFAULT, STOP_ATR_N_DEFAULT, STOP_PCT_DEFAULT,
     TARGET_PCT_DEFAULT, TARGET_RR_DEFAULT, TRAILING_ATR_MULT_DEFAULT,
     TRAILING_ATR_N_DEFAULT, TRAILING_PCT_DEFAULT,
@@ -35,6 +36,18 @@ def _spec(lhs, op=">", rhs=0, timeframe="15m", **extra):
 
 def _program(lhs, op=">", rhs=0, timeframe="15m", **extra):
     return lower_pine(_spec(lhs, op, rhs, timeframe, **extra))
+
+
+def _lines(program):
+    """Every statement the program emits, function bodies opened up.
+
+    A play whose timeframe is not the chart's puts the calculations behind its
+    conditions inside ONE request function, which reaches PineProgram as a
+    single multi-line statement. A test asking what was calculated has to look
+    inside it, or it would only ever see 15m plays.
+    """
+    return [line.strip() for text in program.calculations
+            for line in text.splitlines()]
 
 
 def _midline(n):
@@ -180,10 +193,11 @@ def test_a_field_is_selected_from_one_tuple_calculation(load_spec):
     # macd_trend reads the macd line against its signal line: two operands, one
     # ta.macd. A second calculation would be a second, drifting MACD.
     program = lower_pine(load_spec("macd_trend"))
-    tuples = [c for c in program.calculations if "ta.macd(" in c]
+    tuples = [c for c in _lines(program) if "ta.macd(" in c]
     assert len(tuples) == 1
-    assert ("nk_long_entry = (ta.crossover(nk_macd_1_macd, nk_macd_1_signal))"
-            in program.calculations)
+    assert ("bool nk_long_entry_native = "
+            "(ta.crossover(nk_macd_1_macd, nk_macd_1_signal))"
+            in _lines(program))
 
 
 def test_crosses_lower_to_crossover_and_crossunder():
@@ -261,15 +275,42 @@ def test_timeframe_strings_cover_every_timeframe_the_engine_admits():
     assert set(PINE_TIMEFRAMES) == set(DEFAULT_TIMEFRAMES.all)
 
 
-def test_a_foreign_timeframe_operand_is_requested_on_its_own_bars():
+def test_a_foreign_timeframe_operand_is_requested_gated_and_latched():
+    # The whole visibility rule is in these four statements together. The
+    # request carries no offset, which is only honest because the gate under it
+    # fires where the requested bar CLOSES; the latch is what stops any other
+    # bar reading that unoffset value, which off the gate is future data.
     program = _program({"ind": "sma", "n": 20, "tf": "1h"})
     assert ("nk_htf_1() =>\n"
             f"    nk_sma_1 = ta.sma(close, {LHS}_sma_n)\n"
-            "    nk_sma_1[1]") in program.calculations
-    assert ('nk_sma_2 = request.security(syminfo.tickerid, "60", nk_htf_1(), '
-            "lookahead=barmerge.lookahead_on, gaps=barmerge.gaps_off)"
-            in program.calculations)
+            "    nk_sma_1") in program.calculations
+    assert 'nk_visible_60 = time_close("60") == time_close' in program.calculations
+    assert ('nk_sma_2_raw = request.security(syminfo.tickerid, "60", '
+            "nk_htf_1(), lookahead=barmerge.lookahead_on, "
+            "gaps=barmerge.gaps_off)") in program.calculations
+    assert "var float nk_sma_2 = na" in program.calculations
+    assert "if nk_visible_60\n    nk_sma_2 := nk_sma_2_raw" in program.calculations
+    # Every consumer reads the latch, never the raw read. That is the property
+    # a later edit could quietly break, so it is asserted over the whole
+    # program rather than over the one line that happens to read it today.
+    readers = [c for c in _lines(program) if "nk_sma_2_raw" in c]
+    assert readers == ['nk_sma_2_raw = request.security(syminfo.tickerid, "60", '
+                       "nk_htf_1(), lookahead=barmerge.lookahead_on, "
+                       "gaps=barmerge.gaps_off)", "nk_sma_2 := nk_sma_2_raw"]
     assert "nk_long_entry = (nk_sma_2 > nk_long_all_0_rhs)" in program.calculations
+
+
+def test_a_session_aligned_reference_is_read_one_bar_back_instead():
+    # The offset is not decoration, it is the other half of the gate. A daily
+    # gate fires where the new New York day OPENS, and the daily bar that day
+    # belongs to has not happened yet, so the confirmed value there is the
+    # previous one. closed_before hands the engine exactly that on the same bar.
+    program = _program({"ind": "sma", "n": 20, "tf": "1d"})
+    assert ("nk_htf_1() =>\n"
+            f"    nk_sma_1 = ta.sma(close, {LHS}_sma_n)\n"
+            "    nk_sma_1[1]") in program.calculations
+    assert "nk_visible_d = nk_new_session()" in program.calculations
+    assert "if nk_visible_d\n    nk_sma_2 := nk_sma_2_raw" in program.calculations
 
 
 def test_a_foreign_multi_field_indicator_is_requested_once_as_a_tuple():
@@ -282,14 +323,19 @@ def test_a_foreign_multi_field_indicator_is_requested_once_as_a_tuple():
     requests = [c for c in program.calculations if "request.security(" in c]
     assert len(requests) == 1
     assert requests[0] == (
-        "[nk_macd_2_macd, nk_macd_2_signal, nk_macd_2_hist] = "
+        "[nk_macd_2_raw_macd, nk_macd_2_raw_signal, nk_macd_2_raw_hist] = "
         'request.security(syminfo.tickerid, "240", nk_htf_1(), '
         "lookahead=barmerge.lookahead_on, gaps=barmerge.gaps_off)")
     assert ("nk_htf_1() =>\n"
             f"    [nk_macd_1_macd, nk_macd_1_signal, nk_macd_1_hist] = "
             f"ta.macd(close, {LHS}_macd_fast, {LHS}_macd_slow, {LHS}_macd_signal)\n"
-            "    [nk_macd_1_macd[1], nk_macd_1_signal[1], nk_macd_1_hist[1]]"
+            "    [nk_macd_1_macd, nk_macd_1_signal, nk_macd_1_hist]"
             in program.calculations)
+    # One gate for the whole tuple, and every member latched under it.
+    assert ("if nk_visible_240\n"
+            "    nk_macd_2_macd := nk_macd_2_raw_macd\n"
+            "    nk_macd_2_signal := nk_macd_2_raw_signal\n"
+            "    nk_macd_2_hist := nk_macd_2_raw_hist") in program.calculations
     assert ("nk_long_entry = (ta.crossover(nk_macd_2_macd, nk_macd_2_signal))"
             in program.calculations)
 
@@ -320,12 +366,17 @@ def test_two_lifts_of_the_same_timeframe_keep_their_own_locals():
 def test_identical_nodes_on_both_sides_share_one_calculation(load_spec):
     # sma_cross reads the same sma(20) and sma(50) on the long and the short
     # side. Two calculations would be the same number computed twice.
+    # sma_cross is a 1h play, so both sides live inside ONE request function.
+    # That is what makes the sharing survive the lift: a request per side would
+    # give each of them a moving average of its own, computed twice and read
+    # once, which is the exact regression this asserts against.
     program = lower_pine(load_spec("sma_cross"))
-    assert len([c for c in program.calculations if "ta.sma(" in c]) == 2
-    assert ("nk_long_entry = (ta.crossover(nk_sma_1, nk_sma_2))"
-            in program.calculations)
-    assert ("nk_short_entry = (ta.crossunder(nk_sma_1, nk_sma_2))"
-            in program.calculations)
+    assert len([c for c in _lines(program) if "ta.sma(" in c]) == 2
+    assert len([c for c in program.calculations if "request.security(" in c]) == 1
+    assert ("bool nk_long_entry_native = (ta.crossover(nk_sma_1, nk_sma_2))"
+            in _lines(program))
+    assert ("bool nk_short_entry_native = (ta.crossunder(nk_sma_1, nk_sma_2))"
+            in _lines(program))
 
 
 def test_repeated_compilation_is_byte_identical(load_spec):
@@ -433,11 +484,53 @@ def test_risk_and_exit_defaults_come_from_the_grammar_not_the_compiler():
 def test_assumptions_state_the_chart_and_the_request_semantics():
     program = _program({"ind": "sma", "tf": "1h"})
     assert program.assumptions[0] == (
-        "The chart must be on 15m bars: the spec's own timeframe is charted "
-        "rather than requested.")
-    assert ("1h values are read with request.security on the last confirmed 1h "
-            "bar, so they do not repaint." in program.assumptions)
+        "The chart must be on 15m bars. Nakagai replays every play on its 15m "
+        "driving cadence whatever the play's own timeframe says, so the script "
+        "charts that cadence and requests the play's own timeframe rather than "
+        "charting it.")
+    assert ("1h values are latched on the chart bar that closes with the 1h "
+            "bar, which is where the engine first reads them, so they neither "
+            "repaint nor lead it." in program.assumptions)
     assert len(set(program.assumptions)) == len(program.assumptions)
+
+
+@pytest.mark.parametrize("timeframe", DEFAULT_TIMEFRAMES.all)
+def test_the_chart_is_the_driving_cadence_whatever_the_play_asks_for(timeframe):
+    # The defect this replaces: the lowerer charted spec["timeframe"], so a
+    # non-15m play decided on bars the engine never decides on, at prices it
+    # never pays. There is exactly one chart, and it is the engine's own
+    # driving frame, read off the TimeframeSet rather than spelled here.
+    spec = _spec({"ind": "sma"}, timeframe=timeframe)
+    assert SpecLowerer(spec, core_vocabulary()).chart == DRIVING == "15m"
+    assert lower_pine(spec).chart == DRIVING
+    assert SpecLowerer(spec, core_vocabulary()).frame == timeframe
+
+
+@pytest.mark.parametrize("timeframe, gate", [
+    ("15m", ""), ("1h", "nk_visible_60"), ("4h", "nk_visible_240"),
+    ("1d", "nk_frame_fresh")])
+def test_only_a_play_off_the_driving_frame_carries_a_freshness_gate(timeframe,
+                                                                    gate):
+    # RuleStrategy._fresh, term for term: a 15m play is fresh on every driving
+    # bar, an intraday play on the one its own bar closes on, and a
+    # session-aligned play on the session open rather than on the calendar day.
+    program = lower_pine(_spec({"ind": "sma"}, timeframe=timeframe))
+    assert program.decision_gate == gate
+    if gate:
+        assert any(line.startswith(f"{gate} = ")
+                   for line in _lines(program)), _lines(program)
+
+
+def test_a_session_aligned_play_separates_visibility_from_freshness():
+    # The two coincide on an intraday play and must not be collapsed on a daily
+    # one: closed_before makes yesterday's bar visible when the New York date
+    # arrives, and first_bar_of_session gates the signal on the 09:30 open,
+    # which is a later bar. One identifier for both would signal at midnight.
+    program = lower_pine(_spec({"ind": "sma"}, timeframe="1d"))
+    assert "nk_visible_d = nk_new_session()" in program.calculations
+    assert "nk_frame_fresh = nk_session_open_bar()" in program.calculations
+    assert program.decision_gate == "nk_frame_fresh"
+    assert "if nk_visible_d" in "\n".join(program.calculations)
 
 
 def test_a_zero_safe_division_is_stated_as_an_assumption():

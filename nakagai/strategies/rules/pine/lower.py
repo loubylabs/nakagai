@@ -15,12 +15,34 @@ emission block, because a calculation made inside a request.security function
 is local to that function and handing its identifier to the next request would
 emit Pine that does not compile.
 
-A FOREIGN TIMEFRAME IS ALWAYS A FUNCTION. Every request wraps its expression in
-a generated function whose body ends in `value[1]`, which is the confirmed
-non-repainting form: the offset is applied INSIDE the requested context, never
-to the result. Doing it uniformly, rather than inlining the simple cases, is
-what lets a multi-field indicator come back as one tuple and keeps the offset
-off a parenthesized expression, which Pine does not index.
+THE CHART IS THE DRIVING CADENCE, NEVER THE SPEC'S OWN TIMEFRAME. Engine.run
+replays 15m bars whatever a spec's `timeframe` says, so a play's own timeframe
+is REQUESTED and its conditions are lifted onto the chart, exactly as
+frame_eval.driving_group lifts them. Charting the spec's timeframe instead
+would decide on different bars at different prices, which is the same strategy
+in name only.
+
+A FOREIGN TIMEFRAME IS ALWAYS A REQUEST, A GATE, AND A LATCH. Every request
+wraps its expression in a generated function, reads the result ONLY on the bar
+the requested bar closes on, and latches it into a `var` that every other
+reader reads. Three separate reasons, and dropping any one of them is a real
+bug rather than a style change:
+
+- the REQUEST is a function so that a multi-field indicator comes back as one
+  tuple and so that an offset never lands on a parenthesized expression, which
+  Pine does not index.
+- the GATE is what makes the read land where the engine's does. Pine aligns a
+  request by containment, so the confirmed `value[1]` form first answers on the
+  chart bar that OPENS the next requested bar, one driving bar after the engine
+  sees it (engine/context.visible_counts measures at the driving bar's CLOSE).
+  Reading the unoffset value on the bar where the two clocks coincide is the
+  same number, one bar earlier, and is not a lookahead there: the requested bar
+  closes at that instant.
+- the LATCH is what keeps the unoffset read honest everywhere else. Off the
+  gate that value IS future data, so nothing may read it there. Nothing can:
+  the raw identifier is read once, inside the gate, and every consumer reads
+  the `var` instead, which carries the last closed value forward exactly as
+  _align carries it.
 """
 
 import json
@@ -28,13 +50,16 @@ from contextlib import contextmanager
 from dataclasses import replace
 
 from nakagai.strategies.rules.canon import canonical_expr, spec_hash
-from nakagai.strategies.rules.pine.lowerings import DAY_OF_WEEK, DIV, HELPERS
+from nakagai.strategies.rules.pine.lowerings import (
+    DAY_OF_WEEK, DIV, HELPERS, NEW_SESSION, SESSION_OPEN_BAR,
+)
 from nakagai.strategies.rules.pine.model import (
     GENERATOR_VERSION, PineCompileError, PineExits, PineHelper, PineInput,
     PineProgram, PineRisk, RulePath, TermCall,
 )
 from nakagai.strategies.rules.spec import (
-    BREAKEVEN_RR_BOUNDS, DEFAULT_RISK, SESSION_ALIGNED, STOP_ATR_MULT_BOUNDS,
+    BREAKEVEN_RR_BOUNDS, DEFAULT_RISK, DRIVING, SESSION_ALIGNED,
+    STOP_ATR_MULT_BOUNDS,
     STOP_ATR_MULT_DEFAULT, STOP_ATR_N_BOUNDS, STOP_ATR_N_DEFAULT,
     STOP_PCT_BOUNDS, STOP_PCT_DEFAULT, TARGET_PCT_BOUNDS, TARGET_PCT_DEFAULT,
     TARGET_RR_BOUNDS, TARGET_RR_DEFAULT, TIME_STOP_BOUNDS, TIMEFRAMES,
@@ -49,11 +74,27 @@ from nakagai.strategies.rules.vocabulary import Vocabulary, is_choice_rule
 PINE_TIMEFRAMES = {"15m": "15", "1h": "60", "4h": "240", "1d": "D"}
 REQUEST = ('request.security(syminfo.tickerid, "{tf}", {call}(), '
            "lookahead=barmerge.lookahead_on, gaps=barmerge.gaps_off)")
+# What a latch holds before its first update. Exactly frame_eval._align's own
+# dtype branch: a row no bar is visible on is False for a boolean series and
+# NaN for a float one, so an ungated condition reads false and an ungated
+# distance is no distance. Seeding a boolean `na` instead would be the same
+# behaviour by accident rather than by construction.
+SEED = {"bool": "false", "float": "na"}
+# The helpers the WALK reaches rather than a term: the two rules that say when
+# a session-aligned bar becomes readable and when a play on one may signal.
+# Named here so "no dead Pine in the registry" can still tell a helper the
+# compiler itself calls from one nothing calls at all.
+GATE_HELPERS = (NEW_SESSION, SESSION_OPEN_BAR)
 # Group keys carry no meaning for a reader of the settings dialog, so a label
 # drops them; the index comes back only when two labels would otherwise read
 # alike (see _resolve_labels).
 STRUCTURAL = ("all", "any")
 COMPARISONS = {"crosses_above": "ta.crossover", "crosses_below": "ta.crossunder"}
+
+
+def _tuple(names: list[str]) -> str:
+    """One name, or Pine's bracketed tuple of several."""
+    return names[0] if len(names) == 1 else f"[{', '.join(names)}]"
 
 
 def _sanitize(part: str) -> str:
@@ -159,20 +200,28 @@ class PineContext:
         self._sinks[-1].append(text)
 
     @contextmanager
-    def block(self):
-        """Collect statements, and memoize nodes, somewhere other than the top.
+    def block(self, scoped: bool = True):
+        """Collect statements, and maybe memoize nodes, somewhere other than the top.
 
-        Both stacks move together: a calculation emitted into a function body
-        is only reachable from inside that body, so its memo entry has to
-        disappear with it.
+        Both stacks move together for a request that owns its own function: a
+        calculation emitted into that body is only reachable from inside it, so
+        its memo entry has to disappear with it.
+
+        `scoped=False` moves the sink and leaves the memo where it is, which is
+        what the play's OWN timeframe needs. Everything it computes lands in
+        one function, so a node two blocks reach is one calculation there,
+        exactly as it is on a 15m chart. Scoping that body would give
+        sma_cross's two sides a moving average each.
         """
         self._sinks.append([])
-        self._scopes.append({})
+        if scoped:
+            self._scopes.append({})
         try:
             yield self._sinks[-1]
         finally:
             self._sinks.pop()
-            self._scopes.pop()
+            if scoped:
+                self._scopes.pop()
 
     @property
     def nodes(self) -> dict:
@@ -459,15 +508,24 @@ class SpecLowerer:
     def __init__(self, spec: dict, vocabulary: Vocabulary):
         self.spec = spec
         self.vocabulary = vocabulary
-        self.chart = spec.get("timeframe", "1h")
+        # THE CHART IS THE DRIVING CADENCE, ALWAYS, and it is read off the
+        # engine's own TimeframeSet rather than spelled here, so the two cannot
+        # drift. `frame` is the different question: which bars this play's
+        # CONDITIONS are computed on before they are lifted onto that chart.
+        self.chart = DRIVING
+        self.frame = str(spec.get("timeframe", "1h"))
         self.ctx = PineContext()
         self.lifted: set[str] = set()
+        self.gates: dict[str, str] = {}
+        self.decision_gate = ""
+        self._frame_values: list[tuple[RulePath, str, str]] = []
 
     def run(self) -> PineProgram:
-        long_decision = self._side("long")
-        short_decision = self._side("short")
-        exits = self._exits()
-        risk = self._risk()
+        with self._frame_scope():
+            long_decision = self._side("long")
+            short_decision = self._side("short")
+            exits = self._exits()
+            risk = self._risk()
         # Resolved before the assumptions, and that order is load-bearing:
         # helper_sources settles the transitive closure, and _assumptions asks
         # what the program reaches.
@@ -477,6 +535,7 @@ class SpecLowerer:
             spec_hash=spec_hash(self.spec, self.vocabulary),
             generator_version=GENERATOR_VERSION,
             chart=self.chart,
+            decision_gate=self.decision_gate,
             inputs=self.ctx.inputs(),
             helpers=helpers,
             calculations=self.ctx.calculations(),
@@ -489,25 +548,152 @@ class SpecLowerer:
             assumptions=self._assumptions(),
         )
 
+    # -- the play's own timeframe ---------------------------------------
+    @contextmanager
+    def _frame_scope(self):
+        """Collect everything the play reads off its own timeframe, then lift it.
+
+        ONE request for the whole play, not one per value. Every condition
+        group and every ATR distance the engine computes on the spec's
+        timeframe is a member of a single tuple, so the nodes underneath them
+        are shared the way `ONE NODE, ONE CALCULATION` promises and the gate is
+        checked once. A request per value would give sma_cross's two sides a
+        moving average each.
+
+        A 15m play needs none of it: the chart IS its timeframe, so this is a
+        plain pass-through and the artifact carries no request at all.
+        """
+        if self.frame == self.chart:
+            yield
+            return
+        with self.ctx.block(scoped=False) as body:
+            yield
+        self._emit_frame(body)
+
+    def _frame_value(self, path: RulePath, name: str, kind: str,
+                     produce) -> str:
+        """One value the engine computes on the play's OWN timeframe.
+
+        The identifier handed back names the LATCH, not the raw read, so every
+        caller downstream is reading the last closed spec-timeframe value
+        whatever bar it reads on. That is `_align`, and it is why no consumer
+        of this needs to know whether a request happened at all.
+        """
+        self.ctx.claim(name, path)
+        text = produce(self.frame)
+        if self.frame == self.chart:
+            self.ctx.statement(f"{name} = {text}")
+        else:
+            self.ctx.statement(f"{kind} {name}_native = {text}")
+            self._frame_values.append((path, name, kind))
+        return name
+
+    def _emit_frame(self, body: list[str]) -> None:
+        """The play's own timeframe: requested once, gated once, latched once."""
+        if not self._frame_values:
+            return
+        tf = self.frame
+        if tf not in PINE_TIMEFRAMES:
+            raise PineCompileError(
+                "pine_unsupported",
+                f"timeframe: {tf!r} has no Pine timeframe string",
+                path="timeframe")
+        path = RulePath(("timeframe",))
+        # A session-aligned bar is read one bar back and an intraday one is
+        # not, and the difference is the gate each is paired with. An intraday
+        # gate fires where the requested bar CLOSES, so the unoffset value is
+        # that bar's own and is confirmed. A session-aligned gate fires where
+        # the new day OPENS, where the current daily bar has not happened yet,
+        # so the confirmed value there is the previous one. Both are exactly
+        # what closed_before hands the engine on the same bar.
+        offset = "[1]" if tf in SESSION_ALIGNED else ""
+        # The gate leads, because it is the chart-level fact everything under
+        # it is conditioned on and a reader meets it before the latch it guards.
+        gate = self._gate(tf)
+        self.decision_gate = self._fresh_gate()
+        returned = [f"{name}_native{offset}" for _p, name, _k in self._frame_values]
+        function = self.ctx.slot("nk_frame", path)
+        lines = "\n".join(f"    {line}" for line in [*body, _tuple(returned)])
+        self.ctx.statement(f"{function}() =>\n{lines}")
+        raws = [self.ctx.claim(f"{name}_raw", p)
+                for p, name, _k in self._frame_values]
+        self.ctx.statement(f"{_tuple(raws)} = " + REQUEST.format(
+            tf=PINE_TIMEFRAMES[tf], call=function))
+        for _p, name, kind in self._frame_values:
+            self.ctx.statement(f"var {kind} {name} = {SEED[kind]}")
+        self.ctx.statement(f"if {gate}\n" + "\n".join(
+            f"    {name} := {name}_raw" for _p, name, _k in self._frame_values))
+        self.lifted.add(tf)
+
+    def _gate(self, tf: str) -> str:
+        """The chart bar a newly closed `tf` bar first becomes readable on.
+
+        engine/context.visible_counts, in Pine, with the engine's own two
+        branches, because the two kinds of timeframe answer "closed" from
+        different evidence:
+
+        - an INTRADAY bar is visible from the driving bar whose close is its
+          close, which is `searchsorted(dst_close - delta, side="right")`.
+          `time_close(tf)` is the containing bar's close time and costs no
+          request of its own, so the equality says exactly that.
+        - a SESSION-ALIGNED bar carries a date rather than a close time, and
+          closed_before makes it visible once the New York calendar date
+          arrives. That is the same new-session rule every session primitive
+          here already uses, rather than a second notion of a session.
+        """
+        if tf not in self.gates:
+            path = RulePath(("timeframe",))
+            expr = (f"{self.ctx.helper(NEW_SESSION, path)}()"
+                    if tf in SESSION_ALIGNED
+                    else f'time_close("{PINE_TIMEFRAMES[tf]}") == time_close')
+            name = self.ctx.claim(
+                f"nk_visible_{_sanitize(PINE_TIMEFRAMES[tf])}", path)
+            self.ctx.statement(f"{name} = {expr}")
+            self.gates[tf] = name
+        return self.gates[tf]
+
+    def _fresh_gate(self) -> str:
+        """The chart bar the engine lets this play SIGNAL on: RuleStrategy._fresh.
+
+        Visibility and freshness are different questions and the engine asks
+        both. Visibility says which spec-timeframe bar a driving bar may read,
+        and manage() reads on every bar. Freshness says whether on_bar may act
+        at all, and a 1h play's condition stays true for all four 15m bars of
+        the hour while the engine signals on exactly one of them.
+
+        For an intraday play the two coincide, so the same identifier answers
+        both rather than a second one saying the same thing. For a
+        session-aligned play they do not: visibility starts when the New York
+        date arrives, and first_bar_of_session gates on the 09:30 open.
+        """
+        if self.frame in SESSION_ALIGNED:
+            path = RulePath(("timeframe",))
+            name = self.ctx.claim("nk_frame_fresh", path)
+            self.ctx.statement(
+                f"{name} = {self.ctx.helper(SESSION_OPEN_BAR, path)}()")
+            return name
+        return self._gate(self.frame)
+
     # -- blocks --------------------------------------------------------
     def _side(self, side: str) -> str:
         if side not in self.spec:
             return ""
         path = RulePath((side,))
-        text = self._group(self.spec[side], path, self.chart)
-        name = self.ctx.claim(f"nk_{side}_entry", path)
-        self.ctx.statement(f"{name} = {text}")
-        return name
+        return self._frame_value(
+            path, f"nk_{side}_entry", "bool",
+            lambda frame: self._group(self.spec[side], path, frame))
 
     def _exits(self) -> PineExits:
         exits = self.spec.get("exits", {})
         base, out = RulePath(("exits",)), {}
         if "exit" in exits:
             path = base.child("exit")
-            text = self._group(exits["exit"], path, self.chart)
-            name = self.ctx.claim("nk_exit_signal", path)
-            self.ctx.statement(f"{name} = {text}")
-            out["signal"] = name
+            # Latched but NOT freshness-gated, because manage() is not: it asks
+            # the exit group on every driving bar a position is open on, and
+            # only on_bar is gated.
+            out["signal"] = self._frame_value(
+                path, "nk_exit_signal", "bool",
+                lambda frame: self._group(exits["exit"], path, frame))
         if "trailing" in exits:
             trailing, path = exits["trailing"], base.child("trailing")
             out["trailing_kind"] = trailing["kind"]
@@ -556,11 +742,18 @@ class SpecLowerer:
 
     def _atr_distance(self, path: RulePath, name: str, block: dict,
                       n_rule, mult_rule) -> str:
-        """An ATR-sized distance, as a top-level calculation.
+        """An ATR-sized distance, measured on the play's own timeframe.
 
-        Named rather than inlined into the renderer because `ta.atr` has to run
-        on every bar: called from inside a conditional block instead, it would
-        smooth over the bars the condition happened to be true on.
+        Two separate reasons it is a named value rather than something the
+        renderer inlines, and the second one is what the 15m chart made true:
+
+        - `ta.atr` has to run on every bar. Called from inside a conditional
+          block it would smooth over only the bars that condition was true on.
+        - the ATR is the SPEC's, not the chart's. risk.stop_target reads `ref`
+          off ctx.driving_bars and the ATR off ctx.bars[spec timeframe], so the
+          engine's stop is a hybrid: a 15m reference price, a spec-timeframe
+          distance. Leaving this on the chart would quietly make a daily play's
+          stop a 15m ATR, which is roughly five times tighter.
 
         n_rule and mult_rule are each the (bounds, default) pair spec.py names
         for that argument, so the chart starts where the engine does.
@@ -569,8 +762,8 @@ class SpecLowerer:
         n = self.ctx.number(path.child("n"), block.get("n", n_default), n_bounds)
         mult = self.ctx.number(path.child("mult"),
                                block.get("mult", mult_default), mult_bounds)
-        self.ctx.statement(f"{self.ctx.claim(name, path)} = ta.atr({n}) * {mult}")
-        return name
+        return self._frame_value(path, name, "float",
+                                 lambda _frame: f"ta.atr({n}) * {mult}")
 
     # -- conditions ----------------------------------------------------
     def _group(self, group: dict, path: RulePath, frame: str) -> str:
@@ -735,37 +928,60 @@ class SpecLowerer:
                 "pine_unsupported",
                 f"{path.text}: {src_tf!r} has no Pine timeframe string",
                 path=path.text, term=term)
+        gate = self._gate(src_tf)
         with self.ctx.block() as body:
             inner = produce(src_tf)
         function = self.ctx.slot("nk_htf", path)
-        # The offset sits on the values INSIDE the function, so it is applied
-        # in the requested context: the request returns the last bar that had
-        # already closed, which is what makes the read non-repainting.
-        offsets = [f"{identifier}[1]" for identifier in inner.values()]
-        returned = offsets[0] if len(offsets) == 1 else f"[{', '.join(offsets)}]"
-        lines = "\n".join(f"    {line}" for line in [*body, returned])
+        # Any offset sits on the values INSIDE the function, so it is applied
+        # in the requested context rather than to the result. Which offset, and
+        # why it pairs with the gate below, is _emit_frame's comment: a
+        # session-aligned bar is read one back because its gate fires where the
+        # day opens, an intraday one is not because its gate fires where the
+        # requested bar closes.
+        offset = "[1]" if src_tf in SESSION_ALIGNED else ""
+        offsets = [f"{identifier}{offset}" for identifier in inner.values()]
+        lines = "\n".join(f"    {line}" for line in [*body, _tuple(offsets)])
         self.ctx.statement(f"{function}() =>\n{lines}")
         slot = self.ctx.slot(stem, path)
+        raw = {field: self.ctx.claim(
+            f"{slot}_raw_{field}" if field else f"{slot}_raw", path)
+            for field in inner}
+        self.ctx.statement(f"{_tuple(list(raw.values()))} = " + REQUEST.format(
+            tf=PINE_TIMEFRAMES[src_tf], call=function))
         outer = {field: self.ctx.claim(f"{slot}_{field}" if field else slot, path)
                  for field in inner}
-        names = list(outer.values())
-        target = names[0] if len(names) == 1 else f"[{', '.join(names)}]"
-        self.ctx.statement(f"{target} = " + REQUEST.format(
-            tf=PINE_TIMEFRAMES[src_tf], call=function))
+        for name in outer.values():
+            self.ctx.statement(f"var float {name} = {SEED['float']}")
+        self.ctx.statement(f"if {gate}\n" + "\n".join(
+            f"    {outer[field]} := {raw[field]}" for field in inner))
         self.lifted.add(src_tf)
         return outer
 
     def _assumptions(self) -> tuple[str, ...]:
-        out = [f"The chart must be on {self.chart} bars: the spec's own "
-               "timeframe is charted rather than requested.",
-               "Every condition is read on the close of its bar.",
-               "Pine seeds its recursive averages (ema, rsi, atr and the terms "
-               "built on them) differently from the engine, so the first bars "
-               "of a chart can differ."]
-        out += [f"{tf} values are read with request.security on the last "
-                f"confirmed {tf} bar, so they do not repaint."
+        out = [f"The chart must be on {self.chart} bars. Nakagai replays every "
+               f"play on its {self.chart} driving cadence whatever the play's "
+               "own timeframe says, so the script charts that cadence and "
+               "requests the play's own timeframe rather than charting it."]
+        if self.frame != self.chart:
+            out.append(
+                f"This play is on {self.frame}. Its conditions are computed on "
+                f"{self.frame} bars and read on the {self.chart} bar the engine "
+                f"reads them on, and it signals once per {self.frame} bar "
+                "rather than on every chart bar underneath one.")
+        out += ["Every condition is read on the close of its bar.",
+                "Pine seeds its recursive averages (ema, rsi, atr and the terms "
+                "built on them) differently from the engine, so the first bars "
+                "of a chart can differ."]
+        out += [(f"{tf} values are the last completed {tf} bar's, latched on "
+                 "the first chart bar of a new New York day, so they neither "
+                 "repaint nor lead the engine."
+                 if tf in SESSION_ALIGNED else
+                 f"{tf} values are latched on the chart bar that closes with "
+                 f"the {tf} bar, which is where the engine first reads them, "
+                 "so they neither repaint nor lead it.")
                 for tf in TIMEFRAMES if tf in self.lifted]
-        if self.chart in SESSION_ALIGNED and self.ctx.uses(DAY_OF_WEEK):
+        if (self.ctx.uses(DAY_OF_WEEK)
+                and ({self.frame} | self.lifted) & SESSION_ALIGNED):
             # The one premise the daily weekday rests on, and the only one a
             # chart could break without saying so. The engine reads a session
             # bar's weekday off the UTC date of its label, which is that

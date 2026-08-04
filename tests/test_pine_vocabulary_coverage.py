@@ -19,7 +19,8 @@ import subprocess
 import sys
 
 from nakagai.strategies.rules import lower_pine
-from nakagai.strategies.rules.pine.lowerings import HELPERS
+from nakagai.strategies.rules.pine.lower import GATE_HELPERS
+from nakagai.strategies.rules.pine.lowerings import HELPERS, SESSION_OPEN_BAR
 from nakagai.strategies.rules.vocabulary import core_vocabulary
 
 # One condition per primitive, on an intraday chart so the intraday-only ones
@@ -94,12 +95,16 @@ def test_a_helper_is_named_by_the_function_its_source_defines():
         assert helper.source.startswith(f"{helper.id}("), helper.id
 
 
-def test_every_registered_helper_is_reachable_from_some_term():
-    """No dead Pine in the registry: every helper is called by a lowering, or
-    by a helper that one calls."""
+def test_every_registered_helper_is_reachable_from_a_term_or_a_gate():
+    """No dead Pine in the registry: every helper is called by a lowering, by
+    one of the compiler's own timeframe gates, or by a helper that one calls.
+
+    The gates are the second source and they are enumerated rather than
+    guessed, so a helper added for nothing still fails this.
+    """
     reachable: set[str] = set()
     frontier = [helper_id for term in core_vocabulary().all_terms()
-                for helper_id in term.pine.helpers]
+                for helper_id in term.pine.helpers] + list(GATE_HELPERS)
     while frontier:
         helper_id = frontier.pop()
         if helper_id in reachable:
@@ -137,8 +142,15 @@ def test_a_program_emits_the_helper_graph_it_actually_reaches():
         closure.add(helper_id)
         frontier.extend(HELPERS[helper_id].dependencies)
     assert {helper.id for helper in program.helpers} == closure
-    # The spec divides nothing, so the one helper no primitive reaches stays out.
-    assert closure == set(HELPERS) - {"nk_div"}
+    # Two helpers no primitive reaches stay out, for two different reasons: the
+    # spec divides nothing, and it is on the driving frame, so it needs no
+    # freshness gate. A 1d play emits that gate, which
+    # test_a_session_aligned_play_separates_visibility_from_freshness pins.
+    assert closure == set(HELPERS) - {"nk_div", SESSION_OPEN_BAR}
+    daily = lower_pine({"version": 2, "name": "probe", "timeframe": "1d",
+                        "long": {"all": [{"lhs": {"src": "close"}, "op": ">",
+                                          "rhs": 0}]}})
+    assert SESSION_OPEN_BAR in {helper.id for helper in daily.helpers}
 
 
 def test_resolving_the_graph_records_the_helpers_it_pulled_in_behind_others():

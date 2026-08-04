@@ -34,16 +34,15 @@ from nakagai.strategies.rules.pine.model import (
     PineBundle, PineExits, PineInput, PineProgram, PineRisk,
 )
 
-# What the chart guard checks, per timeframe the grammar admits: the chart
-# length as Pine counts it, and the words the refusal uses. A program is only
-# true on its own chart, because a node without a `tf` is emitted on the
-# chart's bars rather than requested (see PineProgram.chart), so this is a
-# guard rather than a decoration: on any other length the same script is a
-# different strategy.
-CHART = {"15m": ("15 * 60", "15-minute"),
-         "1h": ("60 * 60", "1-hour"),
-         "4h": ("4 * 60 * 60", "4-hour"),
-         "1d": ("24 * 60 * 60", "daily")}
+# What the chart guard checks: the chart length as Pine counts it, and the
+# words the refusal uses. ONE entry, because there is one driving cadence and
+# every export runs on it, whatever the play's own timeframe is. It is a table
+# rather than two literals so that the guard is read off the program the
+# lowerer built: a chart the lowerer should never have produced raises here
+# instead of being guarded with the wrong number. This is a guard rather than a
+# decoration, because on any other length the same script is a different
+# strategy.
+CHART = {"15m": ("15 * 60", "15-minute")}
 
 # The fidelity boundary, in the design's own order. Every bundle carries all
 # five, whatever the spec says, because none of them is a property of the spec:
@@ -63,22 +62,10 @@ FIDELITY = (
     "embedded hash.",
 )
 
-# Two more, each conditional on the spec, and each covering a difference a user
-# would otherwise read as a bug in one of the two engines.
-#
-# The first applies to a play whose own timeframe is not the engine's 15-minute
-# driving cadence. Nakagai charts that play on its own bars (see
-# PineProgram.chart) and the engine signals one driving bar after the same bar
-# closes, so the entry lands at a different bar and a different price.
-DRIVING_CADENCE = ("Nakagai drives every play on 15-minute bars: a play on a "
-                   "longer timeframe signals on the first 15-minute bar after "
-                   "its own bar closes and fills at the next one. This chart "
-                   "decides and fills on its own bars instead, so an entry "
-                   "lands one driving bar earlier and at a different price.")
-
-# The second applies when a spec has an exit rule or a time stop. Both leave
-# the engine at the close of the bar that decided, and TradingView fills the
-# market order they become at the next bar's open.
+# One more, conditional on the spec, covering a difference a user would
+# otherwise read as a bug in one of the two engines: an exit rule and a time
+# stop both leave the engine at the close of the bar that decided, and
+# TradingView fills the market order they become at the next bar's open.
 NEXT_BAR_CLOSE = ("An exit rule or a time stop closes at the next bar's open "
                   "on TradingView, where the engine closes it at the close of "
                   "the bar that decided.")
@@ -248,8 +235,18 @@ def _decisions(program: PineProgram) -> list[str]:
     reference. Without that, the opening bars of a chart (where ta.atr is still
     na) would mark a signal the engine never had, alert with NaN levels, and
     size a position from a NaN risk.
+
+    The geometry is measured from `close`, the CHART's close, which is the 15m
+    driving close risk.stop_target measures from. The distance beside it came
+    off the play's own timeframe. That hybrid is the engine's, not an oversight
+    here, and flattening either half would move every stop.
+
+    A play whose timeframe is not the chart's leads with its freshness gate, so
+    a decision that would otherwise stand for all four 15m bars of a 1h bar
+    fires on the one the engine fires on.
     """
     lines: list[str] = []
+    gate = f"{program.decision_gate} and " if program.decision_gate else ""
     for side, entry in (("long", program.long_decision),
                         ("short", program.short_decision)):
         if not entry:
@@ -262,8 +259,9 @@ def _decisions(program: PineProgram) -> list[str]:
         lines += [
             f"nk_{side}_stop = {stop}",
             f"nk_{side}_target = {target}",
-            f"nk_{side}_decision = {entry} and not na(nk_{side}_stop) and "
-            f"nk_{side}_stop {beyond} close and nk_{side}_target {ahead} close",
+            f"nk_{side}_decision = {gate}{entry} and not na(nk_{side}_stop) "
+            f"and nk_{side}_stop {beyond} close and nk_{side}_target {ahead} "
+            "close",
         ]
     return lines
 
@@ -509,8 +507,6 @@ def _strategy(program: PineProgram, warnings, body: list[str]) -> str:
 
 def _warnings(program: PineProgram) -> tuple[str, ...]:
     conditional = ()
-    if program.chart != "15m":
-        conditional += (DRIVING_CADENCE,)
     if program.exits.signal or program.exits.time_stop_bars:
         conditional += (NEXT_BAR_CLOSE,)
     return FIDELITY + conditional + program.warnings

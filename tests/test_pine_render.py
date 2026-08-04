@@ -19,7 +19,7 @@ import pytest
 
 from nakagai.strategies.rules import PineCompileError, compile_pine, spec_hash
 from nakagai.strategies.rules.pine import render
-from nakagai.strategies.rules.spec import TIMEFRAMES
+from nakagai.strategies.rules.spec import DRIVING, TIMEFRAMES
 
 
 def _spec(**extra) -> dict:
@@ -140,22 +140,27 @@ def test_the_runtime_guard_refuses_every_other_chart_timeframe():
             '15-minute chart.")') in source
 
 
-def test_the_guard_names_the_one_chart_the_program_is_true_on(load_rule_spec):
-    # A node without a `tf` is emitted on the chart's own bars rather than
-    # requested, so a 1h play's arithmetic is 1h arithmetic and a 15m chart
-    # would run it over the wrong bars. The guard is the program's own chart,
-    # which is what makes it a guard rather than a decoration.
-    source = compile_pine(load_rule_spec("sma_cross")).strategy
-    assert ("if barstate.isfirst and timeframe.in_seconds() != 60 * 60\n"
-            '    runtime.error("Nakagai Pine exports require a standard '
-            '1-hour chart.")') in source
-    daily = compile_pine(load_rule_spec("bollinger_breakout")).indicator
-    assert "timeframe.in_seconds() != 24 * 60 * 60" in daily
-    assert "require a standard daily chart." in daily
+@pytest.mark.parametrize("timeframe", TIMEFRAMES)
+def test_the_guard_demands_the_driving_cadence_whatever_the_play_is_on(
+        timeframe):
+    # The defect this replaces: the guard named the SPEC's timeframe, because
+    # the lowerer charted it. Every export runs on 15m now, so a 1d play and a
+    # 15m play carry the same guard, and a guard naming anything else would
+    # mean the chart had drifted back to the spec.
+    bundle = compile_pine(_spec(timeframe=timeframe))
+    for source in (bundle.indicator, bundle.strategy):
+        assert ("if barstate.isfirst and timeframe.in_seconds() != 15 * 60\n"
+                '    runtime.error("Nakagai Pine exports require a standard '
+                '15-minute chart.")') in source
+        assert "60 * 60" not in source and "24 * 60 * 60" not in source
 
 
-def test_every_timeframe_the_grammar_admits_has_a_chart_guard():
-    assert set(render.CHART) == set(TIMEFRAMES)
+def test_the_guard_table_holds_the_driving_cadence_and_nothing_else():
+    # One entry, on purpose. The renderer reads the length off the program the
+    # lowerer built, so a program carrying any other chart raises here rather
+    # than being guarded with a number that does not match its own arithmetic.
+    assert set(render.CHART) == {DRIVING}
+    assert render.CHART[DRIVING] == ("15 * 60", "15-minute")
 
 
 def test_a_synthetic_chart_is_refused_at_runtime_and_warned_about_in_the_header():
@@ -207,16 +212,23 @@ def test_a_conditional_exit_says_it_closes_one_bar_later_than_the_engine(
     assert render.NEXT_BAR_CLOSE not in _header(plain.indicator)
 
 
-def test_a_play_on_a_longer_timeframe_says_where_its_entry_lands(
+def test_a_decision_off_the_driving_frame_leads_with_its_freshness_gate(
         load_rule_spec):
-    # The engine drives on 15m whatever a play's own timeframe is, so a 1h play
-    # signals one driving bar after the 1h bar closes. A 1h chart decides at
-    # the close of that bar instead: the same rule, a different entry price.
-    assert render.DRIVING_CADENCE not in compile_pine(_spec()).warnings
-    for name in ("sma_cross", "bollinger_breakout"):
+    # A 1h condition stays true for all four 15m bars of the hour, and the
+    # engine signals on exactly one of them. Without the gate in front of it
+    # the indicator marks four bars and alerts four times where the engine has
+    # one signal, and the strategy re-enters inside the hour after any exit.
+    for name, gate in (("sma_cross", "nk_visible_60"),
+                       ("bollinger_breakout", "nk_frame_fresh")):
         bundle = compile_pine(load_rule_spec(name))
-        assert render.DRIVING_CADENCE in bundle.warnings
-        assert render.DRIVING_CADENCE in _header(bundle.strategy)
+        for source in (bundle.indicator, bundle.strategy):
+            for side in ("long", "short"):
+                assert f"nk_{side}_decision = {gate} and nk_{side}_entry and" \
+                    in source
+    # A 15m play has no gate to lead with, and must not grow one.
+    plain = compile_pine(_spec()).indicator
+    assert "nk_long_decision = nk_long_entry and" in plain
+    assert "nk_visible_" not in plain and "nk_frame_fresh" not in plain
 
 
 # -- inputs, helpers, calculations ----------------------------------------

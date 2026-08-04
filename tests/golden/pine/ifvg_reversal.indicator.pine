@@ -12,14 +12,17 @@
 // script refuses to run on one, and on a chart of any other length.
 //
 // Assumptions:
-//   - The chart must be on 15m bars: the spec's own timeframe is charted
-//     rather than requested.
+//   - The chart must be on 15m bars. Nakagai replays every play on its 15m
+//     driving cadence whatever the play's own timeframe says, so the script
+//     charts that cadence and requests the play's own timeframe rather than
+//     charting it.
 //   - Every condition is read on the close of its bar.
 //   - Pine seeds its recursive averages (ema, rsi, atr and the terms built on
 //     them) differently from the engine, so the first bars of a chart can
 //     differ.
-//   - 1h values are read with request.security on the last confirmed 1h bar,
-//     so they do not repaint.
+//   - 1h values are latched on the chart bar that closes with the 1h bar,
+//     which is where the engine first reads them, so they neither repaint nor
+//     lead it.
 //
 // Fidelity boundary. A TradingView result is a separate simulation and is
 // never Nakagai evidence:
@@ -143,12 +146,18 @@ nk_swing_low_1 = nk_swing_low(nk_long_all_0_lhs_cond_rhs_swing_low_k)
 nk_bars_since_1 = nk_bars_since(low < nk_swing_low_1)
 [nk_fvg_nearest_1_top, nk_fvg_nearest_1_bottom] = nk_fvg_nearest(nk_long_all_1_rhs_fvg_nearest_min_size_atr, nk_long_all_1_rhs_fvg_nearest_lookback, false, true)
 nk_fvg_nearest_1_mid = (nk_fvg_nearest_1_top + nk_fvg_nearest_1_bottom) / 2
+nk_visible_60 = time_close("60") == time_close
 
 nk_htf_1() =>
     nk_sma_1 = ta.sma(close, nk_long_all_2_rhs_sma_n)
-    nk_sma_1[1]
+    nk_sma_1
 
-nk_sma_2 = request.security(syminfo.tickerid, "60", nk_htf_1(), lookahead=barmerge.lookahead_on, gaps=barmerge.gaps_off)
+nk_sma_2_raw = request.security(syminfo.tickerid, "60", nk_htf_1(), lookahead=barmerge.lookahead_on, gaps=barmerge.gaps_off)
+var float nk_sma_2 = na
+
+if nk_visible_60
+    nk_sma_2 := nk_sma_2_raw
+
 nk_long_entry = (nk_bars_since_1 <= nk_long_all_0_rhs and (close[1] <= nk_fvg_nearest_1_top and close > nk_fvg_nearest_1_top) and close > nk_sma_2)
 nk_swing_high_1 = nk_swing_high(nk_short_all_0_lhs_cond_rhs_swing_high_k)
 nk_bars_since_2 = nk_bars_since(high > nk_swing_high_1)

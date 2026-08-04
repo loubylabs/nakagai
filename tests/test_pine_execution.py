@@ -24,11 +24,15 @@ claim rather than a check.
 import numpy as np
 import pandas as pd
 import pytest
+from types import SimpleNamespace
 
+from nakagai.data.schema import DEFAULT_TIMEFRAMES
 from nakagai.strategies.ict.primitives import atr as window_atr
-from nakagai.strategies.rules import primitives as prim
+from nakagai.strategies.rules import compile_pine, primitives as prim
+from nakagai.strategies.rules.frame_eval import FrameEval
 from nakagai.strategies.rules.pine.lowerings import HELPERS
-from tests.pine_interpreter import as_series, run_helper
+from nakagai.strategies.util import first_bar_of_session, fresh_bar
+from tests.pine_interpreter import as_series, run_helper, run_program
 
 SOURCES = {helper_id: helper.source for helper_id, helper in HELPERS.items()}
 # Short enough that an end-anchored scan is exercised over ordinary history,
@@ -133,6 +137,26 @@ def test_the_previous_session_levels_are_the_engine_s_on_every_bar():
     _assert_same(_pine("nk_prev_session_low"), prim.prev_session_low(None, BARS))
     _assert_same(_pine("nk_prev_session_close"),
                  prim.prev_session_close(None, BARS))
+
+
+def test_the_session_open_bar_is_the_one_the_engine_gates_a_daily_play_on():
+    # util.first_bar_of_session, which is deliberately NOT "the calendar day
+    # changed". This frame opens at 08:00 Eastern, and the engine's gate waits
+    # for 09:30 because the caches are not RTH-only: firing on the first bar of
+    # the DATE would put a daily play's signal on a pre-market print that no
+    # live scanner ever visits.
+    engine = np.array([first_bar_of_session(
+        SimpleNamespace(driving_bars=BARS.iloc[:i + 1]))
+        for i in range(len(BARS))])
+    pine = np.array([bool(value) for value
+                     in run_helper(SOURCES, "nk_session_open_bar", BARS)])
+    assert (pine == engine).all(), \
+        f"rows {np.flatnonzero(pine != engine)[:5].tolist()}"
+    assert int(engine.sum()) == 7, "one gate per session in the frame"
+    fired = BARS.index[engine].tz_convert("America/New_York")
+    assert set(fired.hour) == {10} and not set(fired.minute) - {0}
+    # Named outright: the 08:00 bar opens each date and must never be the gate.
+    assert not engine[BARS.index.tz_convert("America/New_York").hour == 8].any()
 
 
 def test_the_gap_is_the_engine_s_gap():
@@ -252,3 +276,172 @@ def test_the_net_fails_when_the_causal_rule_is_broken(label, helper_id, before,
     wrong, _got, _want = _wrong(pine, engine)
     assert len(wrong), \
         f"{label} changed nothing this file can see, so it guards nothing"
+
+
+# -- the decision bar, against the engine's own two gates -------------------
+#
+# This is the one comparison the whole cross-timeframe lowering rests on. A
+# play off the driving frame is a request, a gate and a latch, and none of them
+# means anything alone: the request carries no offset, which is sound only
+# because the gate reads it where the requested bar closes, and the latch is
+# what keeps every other bar off that value. Whether the three together fire on
+# the bars the ENGINE fires on is not visible in any line of the artifact, so
+# the artifact is executed and the bar sets are compared.
+#
+# The engine's answer has two halves and both are taken from the engine itself:
+# frame_eval.driving_group says which spec-timeframe bar a driving bar reads,
+# and RuleStrategy._fresh (util.fresh_bar, util.first_bar_of_session) says
+# whether that driving bar may signal at all. Comparing against only the first
+# would pass on a script that marked all four 15m bars of a 1h bar.
+
+CHART_STEP = pd.Timedelta(minutes=15)
+# The condition, deliberately built from sources alone: the interpreter models
+# no `ta.*`, and a probe that needed one would be testing arithmetic rather
+# than the alignment this file is about.
+PROBE_GROUPS = {
+    "long": {"all": [{"lhs": {"src": "close"}, "op": ">", "rhs": {"src": "open"}}]},
+    "short": {"all": [{"lhs": {"src": "close"}, "op": "<", "rhs": {"src": "open"}}]},
+}
+
+
+def _probe_spec(timeframe: str) -> dict:
+    return {"version": 2, "name": "probe", "timeframe": timeframe,
+            **PROBE_GROUPS,
+            # Percent geometry, so no ATR reaches the interpreter and the
+            # decision is the gate and the condition with nothing else in it.
+            "risk": {"stop": {"kind": "percent", "pct": 2.0},
+                     "target": {"kind": "rr", "rr": 2.0}}}
+
+
+def _chart_frame() -> pd.DataFrame:
+    """Six New York sessions of 15m bars, 09:00 through 15:45 Eastern.
+
+    Whole hours on purpose: the 1h bars derived from these start on the hour,
+    so the last 15m bar of each hour is the one whose close IS the 1h close,
+    which is the bar the whole defect turned on.
+    """
+    stamps = []
+    for day in ("2026-01-05", "2026-01-06", "2026-01-07", "2026-01-08",
+                "2026-01-09", "2026-01-12"):
+        start = pd.Timestamp(f"{day} 09:00", tz="America/New_York")
+        stamps.extend(start + CHART_STEP * k for k in range(28))
+    index = pd.DatetimeIndex(stamps).tz_convert("UTC")
+    rng = np.random.default_rng(11)
+    steps = rng.normal(0, 0.5, len(index))
+    # A drift that alternates by SESSION, big enough to decide a day's
+    # direction and small enough to leave the hours inside it mixed. Without it
+    # a daily probe can run six sessions the same way and compare a short side
+    # that never fired, which would agree with anything.
+    steps += np.where((np.arange(len(index)) // 28) % 2 == 0, 0.25, -0.25)
+    close = 100 + np.cumsum(steps)
+    return pd.DataFrame(
+        {"open": close - steps, "high": np.maximum(close, close - steps) + 0.2,
+         "low": np.minimum(close, close - steps) - 0.2, "close": close,
+         "volume": np.full(len(index), 1000.0)}, index=index)
+
+
+def _resample(bars: pd.DataFrame, rule: str) -> pd.DataFrame:
+    out = bars.resample(rule).agg({"open": "first", "high": "max", "low": "min",
+                                   "close": "last", "volume": "sum"})
+    return out.dropna()
+
+
+CHART = _chart_frame()
+FRAMES = {"15m": CHART, "1h": _resample(CHART, "1h"),
+          "4h": _resample(CHART, "4h"), "1d": _resample(CHART, "1D")}
+# What a request of each timeframe reads, keyed the way Pine spells it.
+REQUESTED = {"60": (FRAMES["1h"], pd.Timedelta(hours=1)),
+             "D": (FRAMES["1d"], pd.Timedelta(days=1))}
+
+
+def _body(source: str) -> list[str]:
+    """The artifact's inputs, helpers, calculations and decisions.
+
+    Everything above is the header and the chart guard, and everything below
+    places markers or orders. What is left is the whole of what decides.
+    """
+    start = source.index("// --- Inputs ---")
+    return source[start:source.index("// --- Markers ---")].splitlines()
+
+
+def _engine_decisions(spec: dict, side: str) -> np.ndarray:
+    """The driving bars RuleStrategy would signal `side` on, from the engine."""
+    timeframe = spec["timeframe"]
+    lifted = FrameEval(FRAMES, DEFAULT_TIMEFRAMES).driving_group(
+        spec[side], timeframe).to_numpy()
+    out = np.zeros(len(CHART), dtype=bool)
+    for i in range(len(CHART)):
+        now = CHART.index[i] + CHART_STEP
+        visible = FRAMES[timeframe][FRAMES[timeframe].index
+                                    + DEFAULT_TIMEFRAMES.deltas.get(
+                                        timeframe, pd.Timedelta(0)) <= now]
+        ctx = SimpleNamespace(bars={timeframe: visible}, now=now,
+                              tfs=DEFAULT_TIMEFRAMES,
+                              driving_bars=CHART.iloc[:i + 1])
+        fresh = (first_bar_of_session(ctx)
+                 if timeframe in DEFAULT_TIMEFRAMES.session_aligned
+                 else fresh_bar(ctx, timeframe))
+        out[i] = bool(lifted[i]) and fresh
+    return out
+
+
+@pytest.mark.parametrize("timeframe", ["1h", "1d"])
+@pytest.mark.parametrize("side", ["long", "short"])
+def test_the_decision_lands_on_the_bars_the_engine_decides_on(timeframe, side):
+    spec = _probe_spec(timeframe)
+    source = compile_pine(spec).indicator
+    rows = run_program({h.id: h.source for h in HELPERS.values()},
+                       _body(source), CHART, CHART_STEP, REQUESTED)
+    pine = np.array([bool(row[f"nk_{side}_decision"]) for row in rows])
+    engine = _engine_decisions(spec, side)
+    wrong = np.flatnonzero(pine != engine)
+    assert not len(wrong), (
+        f"{timeframe} {side}: rows {wrong[:8].tolist()} at "
+        f"{[str(t) for t in CHART.index[wrong[:8]]]}, Pine "
+        f"{pine[wrong[:8]].tolist()} against engine {engine[wrong[:8]].tolist()}")
+    # A run that decided nothing would agree with anything, and one that
+    # decided more often than its own timeframe has bars would mean the gate
+    # had gone.
+    assert 2 <= int(engine.sum()) <= len(FRAMES[timeframe])
+
+
+@pytest.mark.parametrize("timeframe", ["1h", "1d"])
+def test_the_decision_fires_once_per_bar_of_the_play_s_own_timeframe(timeframe):
+    # The freshness gate, on its own terms. Without it the lifted condition
+    # stands for every chart bar underneath one spec-timeframe bar: four for a
+    # 1h play, twenty-eight for a daily one.
+    spec = _probe_spec(timeframe)
+    rows = run_program({h.id: h.source for h in HELPERS.values()},
+                       _body(compile_pine(spec).indicator), CHART, CHART_STEP,
+                       REQUESTED)
+    decided = [i for i, row in enumerate(rows)
+               if row["nk_long_decision"] or row["nk_short_decision"]]
+    assert decided
+    per_bar = FRAMES[timeframe].index.searchsorted(CHART.index[decided],
+                                                   side="right")
+    assert len(set(per_bar)) == len(per_bar), (
+        f"{timeframe}: two chart bars decided inside one {timeframe} bar")
+
+
+def test_the_comparison_notices_the_defect_it_was_written_for():
+    # The net, checked against itself. Dropping the gate is the shape of the
+    # original bug, and reading the confirmed form instead of the gated one is
+    # the shape of the fix I nearly shipped. Both must be caught here, or this
+    # file is a claim rather than a check.
+    spec = _probe_spec("1h")
+    lines = _body(compile_pine(spec).indicator)
+    engine = _engine_decisions(spec, "long")
+    sources = {h.id: h.source for h in HELPERS.values()}
+    for label, before, after in (
+            ("the freshness gate is dropped",
+             "nk_long_decision = nk_visible_60 and nk_long_entry and",
+             "nk_long_decision = nk_long_entry and"),
+            ("the request is read one bar back instead of on its close",
+             "[nk_long_entry_native, nk_short_entry_native]",
+             "[nk_long_entry_native[1], nk_short_entry_native[1]]")):
+        mutated = [line.replace(before, after) for line in lines]
+        assert mutated != lines, f"{label} no longer describes the artifact"
+        rows = run_program(sources, mutated, CHART, CHART_STEP, REQUESTED)
+        pine = np.array([bool(row["nk_long_decision"]) for row in rows])
+        assert (pine != engine).any(), \
+            f"{label} changed nothing this file can see, so it guards nothing"

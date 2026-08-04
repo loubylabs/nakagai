@@ -12,17 +12,32 @@ It runs the emitted text, never a Python restatement of it. A hand-written copy
 of what a helper is believed to do would agree with itself forever: it would not
 move when the emitted source moved, which is the only thing worth catching here.
 
+It also runs the TOP-LEVEL program, which is how the cross-timeframe lowering
+is established. A play off the driving frame is a request, a gate and a latch
+working together, and no one of them means anything alone: the request carries
+no offset, which is only sound because the gate reads it where the requested
+bar closes, and the latch is what stops any other bar reading it. Whether that
+lands on the bars the engine decides on is not a property of any line, so
+run_program executes the emitted statements over a chart frame with companion
+higher-timeframe frames and models request.security the way TradingView aligns
+it: by CONTAINMENT, so a chart bar sees the higher-timeframe bar it falls
+inside. That containment is the whole reason the naive confirmed form lands a
+bar late, so modelling it rather than assuming it is the point.
+
 Scope, deliberately narrow. This is the subset those helpers use and nothing
-more: `var` persistence, `:=`, `+=`, typed declarations, if/else if/else, `for`
-with `break`, ternaries, history indexing on the built-in series and on a
-function's own locals, and the handful of `math.*` and `array.*` calls in the
-registry. Two known simplifications, both unreachable from the helpers as
-written: a comparison against `na` reads false rather than `na` (Pine reads that
-false in a condition, which is where every one of them sits), and a function's
-locals are one flat scope per call rather than one per block (every helper
-declares in the outer block and assigns inward, which is the only legal shape
-for the carry-forward they need). Do not grow this into a general Pine engine:
-when a helper needs something new, add exactly that.
+more: `var` persistence, `:=`, `+=`, `=`, tuple unpacking, typed declarations,
+if/else if/else, `for` with `break`, ternaries, history indexing on the built-in
+series and on a function's own locals, and the handful of `math.*`, `array.*`,
+`input.*`, `time_close` and `request.security` calls the emitted programs use.
+Two known simplifications, both unreachable from the helpers as written: a
+comparison against `na` reads false rather than `na` (Pine reads that false in a
+condition, which is where every one of them sits), and a function's locals are
+one flat scope per call rather than one per block (every helper declares in the
+outer block and assigns inward, which is the only legal shape for the
+carry-forward they need). Do not grow this into a general Pine engine: when a
+helper needs something new, add exactly that. In particular there is no `ta.*`
+here, so a program to be run must be built from sources, numbers and the
+registry's own helpers.
 
 Pine semantics that ARE modelled, because a helper leans on each:
 - `var` initialises once per call site and survives the bar; a plain local does
@@ -178,16 +193,36 @@ class _Parser:
         if token == "na" and self.peek() != "(":
             return ("na",)
         if self.accept("("):
-            args = []
+            args, named = [], {}
             if not self.accept(")"):
-                args.append(self.expr())
+                self._argument(args, named)
                 while self.accept(","):
-                    args.append(self.expr())
+                    self._argument(args, named)
                 self.expect(")")
             # One id per call SITE, so each keeps its own instance state.
             self.sites.append(token)
-            return ("call", token, args, len(self.sites) - 1)
+            return ("call", token, args, len(self.sites) - 1, named)
         return ("name", token)
+
+    def _argument(self, args: list, named: dict) -> None:
+        """One argument, positional or `name=value`.
+
+        A named argument's VALUE is kept as the tokens that spelled it rather
+        than evaluated. Every one the emitted programs pass is a barmerge enum,
+        which is a setting rather than a number, and the only reader that cares
+        (request.security) wants to check the spelling.
+        """
+        if (self.peek(1) == "=" and self.peek() is not None
+                and self.peek().isidentifier()):
+            key = self.take()
+            self.expect("=")
+            start, depth = self.i, 0
+            while not self.done() and not (depth == 0
+                                           and self.peek() in (",", ")")):
+                depth += {"(": 1, ")": -1}.get(self.take(), 0)
+            named[key] = "".join(self.t[start:self.i])
+            return
+        args.append(self.expr())
 
 
 def _parse_expr(tokens: list[str], sites: list):
@@ -254,8 +289,12 @@ def _block(lines: list[str], start: int, indent: int, sites: list):
             out.append(("for", name, lo, hi, body))
             continue
         i += 1
+        closer = tokens.index("]") if head == "[" and "]" in tokens else -1
         if head == "break":
             out.append(("break",))
+        elif closer > 0 and tokens[closer + 1:closer + 2] == ["="]:
+            out.append(("unpack", [t for t in tokens[1:closer] if t != ","],
+                        _parse_expr(tokens[closer + 2:], sites)))
         elif head == "var":
             name = tokens[2] if tokens[1] in TYPES else tokens[1]
             out.append(("var", name,
@@ -266,6 +305,10 @@ def _block(lines: list[str], start: int, indent: int, sites: list):
             out.append(("set", head, _parse_expr(tokens[2:], sites)))
         elif tokens[1:2] == ["+="]:
             out.append(("add", head, _parse_expr(tokens[2:], sites)))
+        elif tokens[1:2] == ["="]:
+            # A bare assignment. No helper writes one (they all declare a type),
+            # but every top-level calculation an artifact emits is one.
+            out.append(("let", head, _parse_expr(tokens[2:], sites)))
         else:
             out.append(("value", _parse_expr(tokens, sites)))
     return out, i
@@ -325,7 +368,7 @@ class _Frame:
 class Market:
     """The bars a run is executed over, in the shapes Pine reads them."""
 
-    def __init__(self, bars: pd.DataFrame):
+    def __init__(self, bars: pd.DataFrame, step: pd.Timedelta | None = None):
         self.series = {name: bars[name].to_numpy(dtype="float64")
                        for name in ("open", "high", "low", "close", "volume")}
         # `time` is the bar's opening timestamp in epoch MILLISECONDS, which is
@@ -337,6 +380,13 @@ class Market:
         self.series["time"] = np.asarray(
             (bars.index - pd.Timestamp(0, tz="UTC"))
             // pd.Timedelta(milliseconds=1), dtype="float64")
+        # `time_close` is the bar's own close, which is `time` plus one step. It
+        # exists only when a step is given, so a program reading it over a frame
+        # whose cadence was never declared fails by name instead of silently
+        # comparing a bar's open against another bar's close.
+        if step is not None:
+            self.series["time_close"] = (self.series["time"]
+                                         + step / pd.Timedelta(milliseconds=1))
         self.length = len(bars)
         self._stamps = {}
 
@@ -366,6 +416,12 @@ class Runtime:
         self.helpers = helpers
         self.frames: dict[tuple, _Frame] = {}
         self.bar = 0
+        # One Market per requested timeframe, and per timeframe the index of
+        # the bar CONTAINING each chart bar, which is how TradingView aligns a
+        # request. -1 before the first one exists.
+        self.markets: dict[str, Market] = {}
+        self.maps: dict[str, np.ndarray] = {}
+        self._requested: dict[int, list] = {}
 
     def call(self, name: str, args: list, key: tuple):
         function = self.helpers.get(name)
@@ -399,9 +455,14 @@ class Runtime:
             value = self._eval(node, scope, frame, key)
             if kind == "add":
                 value = scope[name] + value
-            scope[name] = value
-            if name in frame.persistent:
-                frame.persistent[name] = value
+            self._assign(name, value, scope, frame)
+        elif kind == "unpack":
+            _, names, node = statement
+            values = self._eval(node, scope, frame, key)
+            if not isinstance(values, tuple) or len(values) != len(names):
+                raise PineError(f"cannot unpack {values!r} into {names}")
+            for name, value in zip(names, values):
+                self._assign(name, value, scope, frame)
         elif kind == "if":
             for cond, body in statement[1]:
                 if cond is None or _truthy(self._eval(cond, scope, frame, key)):
@@ -424,6 +485,11 @@ class Runtime:
         elif kind == "value":
             return self._eval(statement[1], scope, frame, key)
         return None
+
+    def _assign(self, name: str, value, scope: dict, frame: "_Frame") -> None:
+        scope[name] = value
+        if name in frame.persistent:
+            frame.persistent[name] = value
 
     def _eval(self, node, scope, frame, key):
         kind = node[0]
@@ -457,12 +523,53 @@ class Runtime:
         if kind == "bin":
             return self._binary(node, scope, frame, key)
         if kind == "call":
-            _, name, arg_nodes, site = node
+            _, name, arg_nodes, site, named = node
+            if name == "request.security":
+                # The expression is NOT evaluated here: it belongs to the
+                # requested context, which is the whole content of a request.
+                return self._request(arg_nodes, named, site)
             args = [self._eval(a, scope, frame, key) for a in arg_nodes]
             if name in self.helpers:
                 return self.call(name, args, (key, site))
             return self._builtin(name, args)
         raise PineError(f"unsupported node {node!r}")
+
+    def _request(self, arg_nodes, named, site):
+        """request.security, aligned by containment the way TradingView aligns it.
+
+        The requested function runs over the requested frame, once, so a `var`
+        inside it and an offset applied to its own locals both behave as they
+        would on that timeframe's chart. What each chart bar then reads is the
+        value at the higher-timeframe bar it falls INSIDE, which is
+        barmerge.lookahead_on: on any bar but the last of that period it is the
+        bar's finished value before the bar finished, and that is exactly why
+        the emitted program reads it only on the bar where the period ends.
+        """
+        if named.get("lookahead") != "barmerge.lookahead_on":
+            raise PineError("only barmerge.lookahead_on is modelled, got "
+                            f"{named.get('lookahead')!r}")
+        if len(arg_nodes) != 3 or arg_nodes[1][0] != "str":
+            raise PineError("request.security wants (symbol, literal tf, expr)")
+        tf, call = arg_nodes[1][1], arg_nodes[2]
+        if call[0] != "call" or call[2]:
+            raise PineError("the requested expression must be a bare call")
+        if tf not in self.markets:
+            raise PineError(f"no frame was supplied for the {tf!r} request")
+        if site not in self._requested:
+            market = self.markets[tf]
+            sub = Runtime(market, self.helpers)
+            sub.markets, sub.maps = self.markets, self.maps
+            values = []
+            for bar in range(market.length):
+                sub.bar = bar
+                values.append(sub.call(call[1], [], ("requested", site)))
+            self._requested[site] = values
+        values = self._requested[site]
+        position = int(self.maps[tf][self.bar])
+        if position < 0:
+            head = values[0] if values else NA
+            return tuple(NA for _ in head) if isinstance(head, tuple) else NA
+        return values[position]
 
     def _binary(self, node, scope, frame, key):
         _, op, left_node, right_node = node
@@ -498,6 +605,17 @@ class Runtime:
         market = self.market
         if name == "na":
             return _is_na(args[0])
+        if name in ("input.int", "input.float"):
+            # A run reads every knob at its shipped default, which is the
+            # program a user pastes before touching anything.
+            return args[0]
+        if name == "time_close":
+            # The close of the bar of `args[0]` that this chart bar sits in.
+            # No request: Pine derives it from the calendar, which is why the
+            # gate it spells costs nothing.
+            position = int(self.maps[args[0]][self.bar])
+            return (NA if position < 0
+                    else self.markets[args[0]].at("time_close", position))
         if name == "int":
             return int(args[0])
         if name == "math.max":
@@ -554,6 +672,69 @@ def run_helper(sources: dict[str, str], entry: str, bars: pd.DataFrame,
         row = [a[bar] if isinstance(a, (np.ndarray, pd.Series)) and len(a) == len(bars)
                else a for a in args]
         out.append(runtime.call(entry, row, ("root", entry)))
+    return out
+
+
+def _split_program(lines: list[str]):
+    """One artifact's body, split into its statements and its own functions.
+
+    A generated function sits among the top-level statements rather than above
+    them, so the split is by shape: a line at column zero ending in `=>` opens
+    one, and everything indented under it is its body.
+    """
+    statements: list[str] = []
+    functions: dict[str, str] = {}
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if not line.strip() or line.lstrip().startswith("//"):
+            i += 1
+            continue
+        if _indent(line) == 0 and line.rstrip().endswith("=>"):
+            body, i = [line], i + 1
+            while i < len(lines) and (not lines[i].strip() or _indent(lines[i])):
+                if lines[i].strip():
+                    body.append(lines[i])
+                i += 1
+            functions[body[0].split("(")[0].strip()] = "\n".join(body)
+            continue
+        statements.append(line)
+        i += 1
+    return statements, functions
+
+
+def run_program(sources: dict[str, str], lines: list[str], bars: pd.DataFrame,
+                step: pd.Timedelta, frames=None) -> list[dict]:
+    """Every top-level statement of an emitted artifact, over `bars`, bar by bar.
+
+    `frames` maps a Pine timeframe string to the (frame, step) a request of it
+    reads. A chart bar is mapped to the requested bar it falls inside by plain
+    searchsorted, which is TradingView's containment for an intraday request
+    and, for a daily one over regular-hours bars, the same grouping the engine
+    uses: a daily label is UTC midnight of its New York date, and every session
+    bar of that date is later in the same UTC date.
+
+    Returns one dict per bar: every identifier that bar assigned, so a test can
+    read the decision the artifact reached rather than the text that reached it.
+    """
+    statements, inline = _split_program(lines)
+    helpers = {name: PineFunction(source)
+               for name, source in {**sources, **inline}.items()}
+    runtime = Runtime(Market(bars, step), helpers)
+    for timeframe, (frame, delta) in (frames or {}).items():
+        runtime.markets[timeframe] = Market(frame, delta)
+        runtime.maps[timeframe] = np.asarray(
+            frame.index.searchsorted(bars.index, side="right")) - 1
+    sites: list[str] = []
+    body, _rest = _block(statements, 0, 0, sites)
+    state = _Frame()
+    out = []
+    for bar in range(len(bars)):
+        runtime.bar = bar
+        scope: dict[str, object] = {}
+        runtime._body(body, scope, state, ("program",))
+        state.commit(scope)
+        out.append(dict(scope))
     return out
 
 

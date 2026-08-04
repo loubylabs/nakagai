@@ -12,8 +12,10 @@
 // script refuses to run on one, and on a chart of any other length.
 //
 // Assumptions:
-//   - The chart must be on 15m bars: the spec's own timeframe is charted
-//     rather than requested.
+//   - The chart must be on 15m bars. Nakagai replays every play on its 15m
+//     driving cadence whatever the play's own timeframe says, so the script
+//     charts that cadence and requests the play's own timeframe rather than
+//     charting it.
 //   - Every condition is read on the close of its bar.
 //   - Pine seeds its recursive averages (ema, rsi, atr and the terms built on
 //     them) differently from the engine, so the first bars of a chart can

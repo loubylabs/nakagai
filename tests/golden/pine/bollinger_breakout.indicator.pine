@@ -6,18 +6,25 @@
 // Generator version: 1
 // Spec hash: f41b415366d225bdb2c7a4319b1137df8c08ad83704ecd4647546420619b4a20
 //
-// Chart: a standard daily candle chart. Heikin Ashi, Renko, Line Break, Kagi,
-// Point and Figure, Range and every other synthetic-price chart show prices no
-// market printed, so a decision read off one would be fiction. This script
-// refuses to run on one, and on a chart of any other length.
+// Chart: a standard 15-minute candle chart. Heikin Ashi, Renko, Line Break,
+// Kagi, Point and Figure, Range and every other synthetic-price chart show
+// prices no market printed, so a decision read off one would be fiction. This
+// script refuses to run on one, and on a chart of any other length.
 //
 // Assumptions:
-//   - The chart must be on 1d bars: the spec's own timeframe is charted rather
-//     than requested.
+//   - The chart must be on 15m bars. Nakagai replays every play on its 15m
+//     driving cadence whatever the play's own timeframe says, so the script
+//     charts that cadence and requests the play's own timeframe rather than
+//     charting it.
+//   - This play is on 1d. Its conditions are computed on 1d bars and read on
+//     the 15m bar the engine reads them on, and it signals once per 1d bar
+//     rather than on every chart bar underneath one.
 //   - Every condition is read on the close of its bar.
 //   - Pine seeds its recursive averages (ema, rsi, atr and the terms built on
 //     them) differently from the engine, so the first bars of a chart can
 //     differ.
+//   - 1d values are the last completed 1d bar's, latched on the first chart
+//     bar of a new New York day, so they neither repaint nor lead the engine.
 //
 // Fidelity boundary. A TradingView result is a separate simulation and is
 // never Nakagai evidence:
@@ -33,11 +40,6 @@
 //     margin without an equivalent settlement ledger.
 //   - TradingView input changes alter the exported play without changing its
 //     embedded hash.
-//   - Nakagai drives every play on 15-minute bars: a play on a longer
-//     timeframe signals on the first 15-minute bar after its own bar closes
-//     and fills at the next one. This chart decides and fills on its own bars
-//     instead, so an entry lands one driving bar earlier and at a different
-//     price.
 //
 // Editing any input below creates a TradingView-local variation: its results
 // no longer represent the spec hash above, and Nakagai cannot read that
@@ -45,8 +47,8 @@
 indicator("Nakagai · bollinger_breakout", overlay=true)
 
 // --- Chart contract ---
-if barstate.isfirst and timeframe.in_seconds() != 24 * 60 * 60
-    runtime.error("Nakagai Pine exports require a standard daily chart.")
+if barstate.isfirst and timeframe.in_seconds() != 15 * 60
+    runtime.error("Nakagai Pine exports require a standard 15-minute chart.")
 if barstate.isfirst and not chart.is_standard
     runtime.error("Nakagai Pine exports require a standard candle chart.")
 
@@ -60,21 +62,57 @@ nk_risk_stop_n = input.int(14, "Risk · stop · n", minval=2, maxval=100)
 nk_risk_stop_mult = input.float(2.0, "Risk · stop · mult", minval=0.1, maxval=10.0)
 nk_risk_target_rr = input.float(6.0, "Risk · target · rr", minval=0.1, maxval=20.0)
 
+// --- Helpers ---
+nk_session_key() =>
+    string tz = "America/New_York"
+    year(time, tz) * 10000 + month(time, tz) * 100 + dayofmonth(time, tz)
+
+nk_new_session() =>
+    int key = nk_session_key()
+    na(key[1]) or key != key[1]
+
+nk_session_open_bar() =>
+    var bool fired = false
+    if nk_new_session()
+        fired := false
+    bool open_yet = hour(time, "America/New_York") * 60 + minute(time, "America/New_York") >= 570
+    bool first = open_yet and not fired
+    if first
+        fired := true
+    first
+
 // --- Calculations ---
-[nk_bb_1_mid, nk_bb_1_upper, nk_bb_1_lower] = ta.bb(close, nk_long_all_0_rhs_bb_n, nk_long_all_0_rhs_bb_k)
-nk_sma_1 = ta.sma(close, nk_long_all_1_rhs_sma_n)
-nk_long_entry = (ta.crossover(close, nk_bb_1_upper) and close > nk_sma_1)
-nk_short_entry = (ta.crossunder(close, nk_bb_1_lower) and close < nk_sma_1)
-nk_exits_trailing_distance = ta.atr(nk_exits_trailing_n) * nk_exits_trailing_mult
-nk_risk_stop_distance = ta.atr(nk_risk_stop_n) * nk_risk_stop_mult
+nk_visible_d = nk_new_session()
+nk_frame_fresh = nk_session_open_bar()
+
+nk_frame_1() =>
+    [nk_bb_1_mid, nk_bb_1_upper, nk_bb_1_lower] = ta.bb(close, nk_long_all_0_rhs_bb_n, nk_long_all_0_rhs_bb_k)
+    nk_sma_1 = ta.sma(close, nk_long_all_1_rhs_sma_n)
+    bool nk_long_entry_native = (ta.crossover(close, nk_bb_1_upper) and close > nk_sma_1)
+    bool nk_short_entry_native = (ta.crossunder(close, nk_bb_1_lower) and close < nk_sma_1)
+    float nk_exits_trailing_distance_native = ta.atr(nk_exits_trailing_n) * nk_exits_trailing_mult
+    float nk_risk_stop_distance_native = ta.atr(nk_risk_stop_n) * nk_risk_stop_mult
+    [nk_long_entry_native[1], nk_short_entry_native[1], nk_exits_trailing_distance_native[1], nk_risk_stop_distance_native[1]]
+
+[nk_long_entry_raw, nk_short_entry_raw, nk_exits_trailing_distance_raw, nk_risk_stop_distance_raw] = request.security(syminfo.tickerid, "D", nk_frame_1(), lookahead=barmerge.lookahead_on, gaps=barmerge.gaps_off)
+var bool nk_long_entry = false
+var bool nk_short_entry = false
+var float nk_exits_trailing_distance = na
+var float nk_risk_stop_distance = na
+
+if nk_visible_d
+    nk_long_entry := nk_long_entry_raw
+    nk_short_entry := nk_short_entry_raw
+    nk_exits_trailing_distance := nk_exits_trailing_distance_raw
+    nk_risk_stop_distance := nk_risk_stop_distance_raw
 
 // --- Decisions ---
 nk_long_stop = close - nk_risk_stop_distance
 nk_long_target = close + nk_risk_target_rr * (close - nk_long_stop)
-nk_long_decision = nk_long_entry and not na(nk_long_stop) and nk_long_stop < close and nk_long_target > close
+nk_long_decision = nk_frame_fresh and nk_long_entry and not na(nk_long_stop) and nk_long_stop < close and nk_long_target > close
 nk_short_stop = close + nk_risk_stop_distance
 nk_short_target = close - nk_risk_target_rr * (nk_short_stop - close)
-nk_short_decision = nk_short_entry and not na(nk_short_stop) and nk_short_stop > close and nk_short_target < close
+nk_short_decision = nk_frame_fresh and nk_short_entry and not na(nk_short_stop) and nk_short_stop > close and nk_short_target < close
 
 // --- Markers ---
 plotshape(nk_long_decision, "Nakagai long", shape.triangleup, location.belowbar, color.teal, size=size.tiny)

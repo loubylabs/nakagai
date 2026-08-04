@@ -15,6 +15,10 @@ from nakagai.strategies.rules.vocabulary import (
 
 VERSION = 2
 SESSION_ALIGNED = DEFAULT_TIMEFRAMES.session_aligned
+# The cadence the engine replays on. A spec's `timeframe` says which bars its
+# CONDITIONS are computed on; it never says which bars the play decides on,
+# because Engine.run walks this one whatever the spec asks for.
+DRIVING = DEFAULT_TIMEFRAMES.driving
 SOURCES = ("open", "high", "low", "close", "volume")
 # The grammar's timeframes ARE the engine's axis. This used to be a second
 # hardcoded tuple sitting two lines under the import it duplicates, so adding a

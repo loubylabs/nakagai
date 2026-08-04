@@ -6,18 +6,26 @@
 // Generator version: 1
 // Spec hash: 54fae37f27bd44e495cef6b9822cc804b8a3f8a50685c1073294885432bbfc2d
 //
-// Chart: a standard 1-hour candle chart. Heikin Ashi, Renko, Line Break, Kagi,
-// Point and Figure, Range and every other synthetic-price chart show prices no
-// market printed, so a decision read off one would be fiction. This script
-// refuses to run on one, and on a chart of any other length.
+// Chart: a standard 15-minute candle chart. Heikin Ashi, Renko, Line Break,
+// Kagi, Point and Figure, Range and every other synthetic-price chart show
+// prices no market printed, so a decision read off one would be fiction. This
+// script refuses to run on one, and on a chart of any other length.
 //
 // Assumptions:
-//   - The chart must be on 1h bars: the spec's own timeframe is charted rather
-//     than requested.
+//   - The chart must be on 15m bars. Nakagai replays every play on its 15m
+//     driving cadence whatever the play's own timeframe says, so the script
+//     charts that cadence and requests the play's own timeframe rather than
+//     charting it.
+//   - This play is on 1h. Its conditions are computed on 1h bars and read on
+//     the 15m bar the engine reads them on, and it signals once per 1h bar
+//     rather than on every chart bar underneath one.
 //   - Every condition is read on the close of its bar.
 //   - Pine seeds its recursive averages (ema, rsi, atr and the terms built on
 //     them) differently from the engine, so the first bars of a chart can
 //     differ.
+//   - 1h values are latched on the chart bar that closes with the 1h bar,
+//     which is where the engine first reads them, so they neither repaint nor
+//     lead it.
 //
 // Fidelity boundary. A TradingView result is a separate simulation and is
 // never Nakagai evidence:
@@ -33,11 +41,6 @@
 //     margin without an equivalent settlement ledger.
 //   - TradingView input changes alter the exported play without changing its
 //     embedded hash.
-//   - Nakagai drives every play on 15-minute bars: a play on a longer
-//     timeframe signals on the first 15-minute bar after its own bar closes
-//     and fills at the next one. This chart decides and fills on its own bars
-//     instead, so an entry lands one driving bar earlier and at a different
-//     price.
 //
 // Editing any input below creates a TradingView-local variation: its results
 // no longer represent the spec hash above, and Nakagai cannot read that
@@ -45,8 +48,8 @@
 strategy("Nakagai · sma_cross · strategy", overlay=true, initial_capital=10000, pyramiding=0, calc_on_order_fills=false, calc_on_every_tick=false, process_orders_on_close=false, slippage=1, margin_long=100, margin_short=100)
 
 // --- Chart contract ---
-if barstate.isfirst and timeframe.in_seconds() != 60 * 60
-    runtime.error("Nakagai Pine exports require a standard 1-hour chart.")
+if barstate.isfirst and timeframe.in_seconds() != 15 * 60
+    runtime.error("Nakagai Pine exports require a standard 15-minute chart.")
 if barstate.isfirst and not chart.is_standard
     runtime.error("Nakagai Pine exports require a standard candle chart.")
 
@@ -58,19 +61,33 @@ nk_risk_stop_mult = input.float(2.0, "Risk · stop · mult", minval=0.1, maxval=
 nk_risk_target_rr = input.float(2.0, "Risk · target · rr", minval=0.1, maxval=20.0)
 
 // --- Calculations ---
-nk_sma_1 = ta.sma(close, nk_long_all_0_lhs_sma_n)
-nk_sma_2 = ta.sma(close, nk_long_all_0_rhs_sma_n)
-nk_long_entry = (ta.crossover(nk_sma_1, nk_sma_2))
-nk_short_entry = (ta.crossunder(nk_sma_1, nk_sma_2))
-nk_risk_stop_distance = ta.atr(nk_risk_stop_n) * nk_risk_stop_mult
+nk_visible_60 = time_close("60") == time_close
+
+nk_frame_1() =>
+    nk_sma_1 = ta.sma(close, nk_long_all_0_lhs_sma_n)
+    nk_sma_2 = ta.sma(close, nk_long_all_0_rhs_sma_n)
+    bool nk_long_entry_native = (ta.crossover(nk_sma_1, nk_sma_2))
+    bool nk_short_entry_native = (ta.crossunder(nk_sma_1, nk_sma_2))
+    float nk_risk_stop_distance_native = ta.atr(nk_risk_stop_n) * nk_risk_stop_mult
+    [nk_long_entry_native, nk_short_entry_native, nk_risk_stop_distance_native]
+
+[nk_long_entry_raw, nk_short_entry_raw, nk_risk_stop_distance_raw] = request.security(syminfo.tickerid, "60", nk_frame_1(), lookahead=barmerge.lookahead_on, gaps=barmerge.gaps_off)
+var bool nk_long_entry = false
+var bool nk_short_entry = false
+var float nk_risk_stop_distance = na
+
+if nk_visible_60
+    nk_long_entry := nk_long_entry_raw
+    nk_short_entry := nk_short_entry_raw
+    nk_risk_stop_distance := nk_risk_stop_distance_raw
 
 // --- Decisions ---
 nk_long_stop = close - nk_risk_stop_distance
 nk_long_target = close + nk_risk_target_rr * (close - nk_long_stop)
-nk_long_decision = nk_long_entry and not na(nk_long_stop) and nk_long_stop < close and nk_long_target > close
+nk_long_decision = nk_visible_60 and nk_long_entry and not na(nk_long_stop) and nk_long_stop < close and nk_long_target > close
 nk_short_stop = close + nk_risk_stop_distance
 nk_short_target = close - nk_risk_target_rr * (nk_short_stop - close)
-nk_short_decision = nk_short_entry and not na(nk_short_stop) and nk_short_stop > close and nk_short_target < close
+nk_short_decision = nk_visible_60 and nk_short_entry and not na(nk_short_stop) and nk_short_stop > close and nk_short_target < close
 
 // --- Sizing ---
 nk_risk_fraction = input.float(1.0, "Sizing · risk per trade (% of equity)", minval=0.01, maxval=100.0)
