@@ -494,6 +494,33 @@ def test_assumptions_state_the_chart_and_the_request_semantics():
     assert len(set(program.assumptions)) == len(program.assumptions)
 
 
+def test_a_requested_intraday_frame_states_the_premise_it_rests_on():
+    """The one thing about this export nobody has measured, said out loud.
+
+    A requested value is TradingView's aggregate, and TradingView anchors an
+    intraday aggregate to the chart's SESSION. Whether those bars are the
+    engine's therefore depends entirely on the chart opening at 04:00 rather
+    than 09:30 New York, which is what the extended-hours guard enforces. The
+    artifact has to say so, because a reader who does not know it cannot check
+    it, and every non-15m play is wrong if it is false.
+    """
+    def premise(spec):
+        return [text for text in lower_pine(spec).assumptions
+                if "premise of this export" in text]
+
+    for timeframe, spelled in (("1h", "60"), ("4h", "240")):
+        text, = premise(_spec({"ind": "sma"}, timeframe=timeframe))
+        assert "anchors an intraday aggregate to the chart's session" in text
+        assert "opens at 04:00 New York" in text
+        assert f'plot time("{spelled}")' in text
+    # A FOREIGN intraday reference rests on it just as much as a play's own.
+    assert premise(_spec({"ind": "sma", "tf": "1h"}))
+    # Nothing requested, nothing to premise: a 15m play reads the chart, and a
+    # daily bar is a daily bar however the session is drawn.
+    assert not premise(_spec({"ind": "sma"}))
+    assert not premise(_spec({"ind": "sma"}, timeframe="1d"))
+
+
 @pytest.mark.parametrize("timeframe", DEFAULT_TIMEFRAMES.all)
 def test_the_chart_is_the_driving_cadence_whatever_the_play_asks_for(timeframe):
     # The defect this replaces: the lowerer charted spec["timeframe"], so a

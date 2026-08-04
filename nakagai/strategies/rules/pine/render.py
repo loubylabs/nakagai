@@ -82,11 +82,15 @@ _SYNTHETIC = ("a standard {label} candle chart. Heikin Ashi, Renko, Line "
 # every 15m frame), so a regular-hours chart is missing bars the engine had.
 # Every aggregate built on it is then built from fewer bars, silently, and the
 # script computes a different strategy rather than a slightly different one.
-_EXTENDED = ("Extended trading hours must be ENABLED on the chart. Nakagai's "
+_EXTENDED = ("Extended trading hours must be ENABLED on the chart, and this is "
+             "a correctness requirement rather than a coverage one. Nakagai's "
              "bars include pre-market and post-market prints, so a "
-             "regular-hours chart holds different bars, aggregates them into "
-             "different higher-timeframe bars, and decides differently. This "
-             "script refuses to run without them.")
+             "regular-hours chart is missing bars outright. It also opens its "
+             "session at 09:30 New York, and TradingView anchors every "
+             "intraday aggregate to the session, so a play that requests its "
+             "own timeframe would receive 09:30 to 10:30 bars where Nakagai "
+             "aggregates on the wall clock. This script refuses to run "
+             "without extended hours.")
 
 _ARTIFACT = {
     "indicator": ("indicator. It marks the bars Nakagai would signal on, draws "
@@ -195,11 +199,16 @@ def _guards(program: PineProgram) -> list[str]:
             "Nakagai Pine exports require a standard candle chart.") + ")",
         # The third contract, and the one a user is most likely to have wrong
         # without noticing, because an RTH-only chart looks entirely normal.
-        # See _EXTENDED: it changes which bars exist, not merely how they look.
+        # The message names the BOUNDARY reason rather than only the missing
+        # bars, because that is the half a reader would not guess: the session
+        # a chart opens on is what TradingView anchors every intraday
+        # aggregate to, so it decides which bars a requested timeframe holds.
         "if barstate.isfirst and syminfo.session != session.extended",
         "    runtime.error(" + _string(
             "Nakagai Pine exports require extended trading hours to be "
-            "enabled on the chart.") + ")",
+            "enabled: a regular-hours chart is missing bars, and TradingView "
+            "aggregates its higher timeframes from the 09:30 session open "
+            "rather than on the wall clock Nakagai uses.") + ")",
     ])
 
 

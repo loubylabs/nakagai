@@ -173,8 +173,16 @@ def test_a_regular_hours_chart_is_refused_at_runtime_and_stated_in_the_header():
                    compile_pine(_spec(timeframe="1h")).strategy):
         assert ("if barstate.isfirst and syminfo.session != session.extended\n"
                 '    runtime.error("Nakagai Pine exports require extended '
-                'trading hours to be enabled on the chart.")') in source
-        assert "Extended trading hours must be ENABLED" in _header(source)
+                "trading hours to be enabled: a regular-hours chart is "
+                "missing bars, and TradingView aggregates its higher "
+                "timeframes from the 09:30 session open rather than on the "
+                'wall clock Nakagai uses.")') in source
+        header = _header(source)
+        assert "Extended trading hours must be ENABLED" in header
+        # Both halves of the reason, because the boundary one is the half a
+        # reader would not guess and the one every non-15m play rests on.
+        assert "missing bars outright" in header
+        assert "anchors every intraday aggregate to the session" in header
 
 
 def test_a_synthetic_chart_is_refused_at_runtime_and_warned_about_in_the_header():

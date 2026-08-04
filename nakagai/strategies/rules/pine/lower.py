@@ -1147,6 +1147,34 @@ class SpecLowerer:
                  f"the {tf} bar, which is where the engine first reads them, "
                  "so they neither repaint nor lead it.")
                 for tf in TIMEFRAMES if tf in self.lifted]
+        intraday = sorted(self.lifted - SESSION_ALIGNED,
+                          key=lambda tf: TIMEFRAMES.index(tf))
+        if intraday:
+            # THE ONE PREMISE OF THIS EXPORT THAT HAS NOT BEEN MEASURED ON A
+            # CHART, and every non-15m play rests on it, so the artifact says
+            # so in its own voice rather than leaving it in a design document.
+            #
+            # A requested value is TradingView's aggregate, never Nakagai's own
+            # bars, and TradingView anchors an intraday aggregate to the
+            # chart's SESSION. On a regular-hours chart that session opens at
+            # 09:30 New York and the hourly bars run 09:30 to 10:30, which are
+            # not the bars the engine has: Alpaca buckets on the wall clock and
+            # data/resample.py anchors 4h at 04:00 / 08:00 / 12:00 / 16:00 /
+            # 20:00 Eastern. With extended hours the session opens at 04:00, so
+            # both fall back onto whole wall-clock boundaries and the two
+            # agree. That is why the extended-hours guard is a correctness
+            # requirement and not merely a coverage one.
+            names = " and ".join(PINE_TIMEFRAMES[tf] for tf in intraday)
+            out.append(
+                f"This play requests {' and '.join(intraday)} bars from "
+                "TradingView rather than building them, and TradingView "
+                "anchors an intraday aggregate to the chart's session. With "
+                "extended trading hours enabled that session opens at 04:00 "
+                f"New York, so its {names} minute bars fall on the same "
+                "wall-clock boundaries Nakagai aggregates on and the two hold "
+                "the same bars. That is the one premise of this export nobody "
+                f"has measured on a chart: plot time(\"{PINE_TIMEFRAMES[intraday[0]]}\") "
+                "and read where the boundaries land before trusting a result.")
         if (self.ctx.uses(DAY_OF_WEEK)
                 and ({self.frame} | self.lifted) & SESSION_ALIGNED):
             # The one premise the daily weekday rests on, and the only one a
