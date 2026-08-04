@@ -169,10 +169,11 @@ def test_a_cross_may_still_have_an_end_anchored_level_on_the_right():
 @pytest.mark.parametrize("node", [FVG, OB], ids=lambda n: n["prim"])
 def test_an_end_anchored_level_on_the_left_of_a_cross_is_rejected(node):
     """fvg_nearest and order_block are one level read from the tail of the
-    frame, which is what END_ANCHORED means. crossed_above's scalar branch only
-    ever covered the RHS and the old eval_condition returned False outright for
-    a non-Series LHS, so this spec was permanently dead; _cross_prev is
-    symmetric, so it would now fire. series_required has to say so."""
+    frame, which is what Term.end_anchored means. crossed_above's scalar branch
+    only ever covered the RHS and the old eval_condition returned False
+    outright for a non-Series LHS, so this spec was permanently dead;
+    _cross_prev is symmetric, so it would now fire. series_required has to say
+    so."""
     spec = {**ORB, "long": {"all": [
         {"lhs": node, "op": "crosses_above", "rhs": {"src": "close"}}]}}
     errs = validate_spec(spec)

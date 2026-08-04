@@ -1,6 +1,8 @@
 """ScreenSpec v1: the conditions-only IR reusing RuleSpec v2's grammar."""
 
+from nakagai.screen.prompt import render_screen_prompt
 from nakagai.strategies.rules.spec import group_text, validate_condition_group
+from nakagai.strategies.rules.vocabulary import Term, core_vocabulary
 
 RSI_LT_30 = {"lhs": {"ind": "rsi", "n": 14}, "op": "<", "rhs": 30}
 
@@ -95,6 +97,26 @@ def test_describe_screen_renders_the_readback():
     text = describe_screen(GOOD)
     assert text.startswith("Screen on 1d bars")
     assert "rsi(14) is below 30" in text
+
+
+def test_the_screen_surface_reads_one_vocabulary_end_to_end():
+    """Prompt, validator, and readback must agree on the term list.
+
+    Threading only the prompt would advertise a term to the model that the
+    validator then refuses, spending every retry on an error the caller caused.
+    """
+    vocab = core_vocabulary().with_terms(
+        Term("double_close", "series", {}, {}, lambda s, _a: s * 2,
+             doc="twice the input series"))
+    spec = {"version": 1, "tf": "1d", "conditions": {"all": [
+        {"lhs": {"ind": "double_close"}, "op": ">", "rhs": 0}]}}
+    assert "- double_close(no args)" in render_screen_prompt(vocab)
+    assert validate_screen_spec(spec, vocabulary=vocab) == []
+    assert "double_close is above 0" in describe_screen(spec, vocabulary=vocab)
+    # The default surface refuses it by name rather than accepting it, so a
+    # missed injection is findable instead of silent.
+    errs = validate_screen_spec(spec)
+    assert errs and "unknown indicator 'double_close'" in errs[0]
 
 
 def test_referenced_timeframes_collects_base_and_node_tfs():

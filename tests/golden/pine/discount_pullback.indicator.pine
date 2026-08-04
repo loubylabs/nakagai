@@ -1,0 +1,218 @@
+//@version=6
+// Nakagai Pine export: discount_pullback
+// Artifact: indicator. It marks the bars Nakagai would signal on, draws the
+// levels that signal froze, and raises one alert for each one. It places no
+// orders.
+// Generator version: 1
+// Spec hash: c366b6a61c6f839abf3d3baad8c4a776f94fe30bd3548f9606182e929959dd22
+//
+// Chart: a standard 15-minute candle chart. Heikin Ashi, Renko, Line Break,
+// Kagi, Point and Figure, Range and every other synthetic-price chart show
+// prices no market printed, so a decision read off one would be fiction. This
+// script refuses to run on one, and on a chart of any other length.
+// Extended trading hours must be ENABLED on the chart, and this is a
+// correctness requirement rather than a coverage one. Nakagai's bars include
+// pre-market and post-market prints, so a regular-hours chart is missing bars
+// outright. It also opens its session at 09:30 New York, and TradingView
+// anchors every intraday aggregate to the session, so a play that requests its
+// own timeframe would receive 09:30 to 10:30 bars where Nakagai aggregates on
+// the wall clock. This script refuses to run without extended hours.
+//
+// Assumptions:
+//   - The chart must be on 15m bars. Nakagai replays every play on its 15m
+//     driving cadence whatever the play's own timeframe says, so the script
+//     charts that cadence and requests the play's own timeframe rather than
+//     charting it.
+//   - This play is on 1h. Its conditions are computed on 1h bars and read on
+//     the 15m bar the engine reads them on, and it signals once per 1h bar
+//     rather than on every chart bar underneath one.
+//   - Every condition is read on the close of its bar.
+//   - Pine seeds its recursive averages (ema, rsi, atr and the terms built on
+//     them) differently from the engine, so the first bars of a chart can
+//     differ.
+//   - The chart bar that closes with the 1h bar is where the engine first
+//     reads 1h, whether latching a requested value there or only checking
+//     time_close("60") for a gate, so it neither repaints nor leads the
+//     engine.
+//   - 1d values are the last completed 1d bar's, latched on the first chart
+//     bar of a new New York day, so they neither repaint nor lead the engine.
+//   - This play reads 1h off TradingView's idea of where each bar closes,
+//     whether by requesting the bar itself or only gating on its close, and
+//     either way TradingView anchors that close to the chart's session. With
+//     extended trading hours enabled that session opens at 04:00 New York, so
+//     its 60 minute boundaries fall on the same wall-clock lines Nakagai
+//     aggregates on and the two agree. That is the one premise of this export
+//     nobody has measured on a chart: plot time("60") and read where the
+//     boundaries land before trusting a result.
+//
+// Fidelity boundary. A TradingView result is a separate simulation and is
+// never Nakagai evidence:
+//   - TradingView and Alpaca can differ in session coverage, adjustments,
+//     volume, missing bars, and aggregate boundaries.
+//   - Nakagai resolves an ambiguous bar pessimistically with stop first.
+//     TradingView infers an intrabar path or uses Bar Magnifier data.
+//   - Nakagai uses one basis point of slippage with a one-cent floor. Pine's
+//     built-in slippage is a fixed number of ticks, set to one here, which is
+//     the same cent on a stock at or under $100 and less than Nakagai charges
+//     above it.
+//   - Nakagai enforces a T+1 settled-funds ledger. Pine models capital and
+//     margin without an equivalent settlement ledger.
+//   - TradingView input changes alter the exported play without changing its
+//     embedded hash.
+//   - Nakagai's daily bars differ from any chart's by construction, measured
+//     over ten symbols and three years. They carry a dividend adjustment the
+//     intraday bars do not, which moved a high-yield name 8.4% at the far end
+//     of that window and a non-payer not at all, and their close is the
+//     consolidated official close including the auction rather than the last
+//     intraday print. A play on 1d therefore reads different numbers from the
+//     engine's, whatever the chart shows.
+//
+// Editing any input below creates a TradingView-local variation: its results
+// no longer represent the spec hash above, and Nakagai cannot read that
+// variation back.
+indicator("Nakagai · discount_pullback", overlay=true, max_bars_back=21)
+
+// --- Chart contract ---
+if barstate.isfirst and timeframe.in_seconds() != 15 * 60
+    runtime.error("Nakagai Pine exports require a standard 15-minute chart.")
+if barstate.isfirst and not chart.is_standard
+    runtime.error("Nakagai Pine exports require a standard candle chart.")
+if barstate.isfirst and syminfo.session != session.extended
+    runtime.error("Nakagai Pine exports require extended trading hours to be enabled: a regular-hours chart is missing bars, and TradingView aggregates its higher timeframes from the 09:30 session open rather than on the wall clock Nakagai uses.")
+
+// --- Inputs ---
+nk_long_all_0_rhs_sma_n = input.int(50, "rhs · sma · n", minval=2, maxval=500)
+nk_long_all_1_lhs_leg_retrace_k = input.int(3, "Long · lhs · leg_retrace · k", minval=1, maxval=10)
+nk_long_all_1_rhs = input.float(0.5, "Long · rhs")
+nk_long_all_2_rhs_ema_n = input.int(9, "rhs · ema · n", minval=2, maxval=500)
+nk_short_all_1_lhs_leg_retrace_k = input.int(3, "Short · lhs · leg_retrace · k", minval=1, maxval=10)
+nk_short_all_1_rhs = input.float(0.5, "Short · rhs")
+nk_risk_stop_n = input.int(14, "Risk · stop · n", minval=2, maxval=100)
+nk_risk_stop_mult = input.float(2.0, "Risk · stop · mult", minval=0.1, maxval=10.0)
+nk_risk_target_rr = input.float(2.0, "Risk · target · rr", minval=0.1, maxval=20.0)
+
+// --- Helpers ---
+nk_session_key() =>
+    string tz = "America/New_York"
+    year(time, tz) * 10000 + month(time, tz) * 100 + dayofmonth(time, tz)
+
+nk_swing_high(k) =>
+    var float level = na
+    float pivot = high[k]
+    bool ok = bar_index >= 2 * k
+    if ok
+        for i = 1 to k
+            if not (pivot > high[k + i]) or not (pivot > high[k - i])
+                ok := false
+                break
+    if ok
+        level := pivot
+    level
+
+nk_swing_low(k) =>
+    var float level = na
+    float pivot = low[k]
+    bool ok = bar_index >= 2 * k
+    if ok
+        for i = 1 to k
+            if not (pivot < low[k + i]) or not (pivot < low[k - i])
+                ok := false
+                break
+    if ok
+        level := pivot
+    level
+
+nk_leg_retrace(k, want_long) =>
+    float hi = nk_swing_high(k)
+    float lo = nk_swing_low(k)
+    float span = hi - lo
+    span > 0 ? (want_long ? (hi - close) / span : (close - lo) / span) : na
+
+nk_new_session() =>
+    int key = nk_session_key()
+    na(key[1]) or key != key[1]
+
+// --- Calculations ---
+nk_visible_60 = time_close("60") == time_close
+
+nk_frame_1() =>
+    nk_leg_retrace_1 = nk_leg_retrace(nk_long_all_1_lhs_leg_retrace_k, true)
+    bool nk_long_all_1_native = nk_leg_retrace_1 >= nk_long_all_1_rhs
+    nk_ema_1 = ta.ema(close, nk_long_all_2_rhs_ema_n)
+    bool nk_long_all_2_native = ta.crossover(close, nk_ema_1)
+    nk_leg_retrace_2 = nk_leg_retrace(nk_short_all_1_lhs_leg_retrace_k, false)
+    bool nk_short_all_1_native = nk_leg_retrace_2 >= nk_short_all_1_rhs
+    bool nk_short_all_2_native = ta.crossunder(close, nk_ema_1)
+    float nk_risk_stop_distance_native = ta.atr(nk_risk_stop_n) * nk_risk_stop_mult
+    [close, nk_long_all_1_native, nk_long_all_2_native, nk_short_all_1_native, nk_short_all_2_native, nk_risk_stop_distance_native]
+
+[nk_close_1_raw, nk_long_all_1_raw, nk_long_all_2_raw, nk_short_all_1_raw, nk_short_all_2_raw, nk_risk_stop_distance_raw] = request.security(syminfo.tickerid, "60", nk_frame_1(), lookahead=barmerge.lookahead_on, gaps=barmerge.gaps_off)
+var float nk_close_1 = na
+var bool nk_long_all_1 = false
+var bool nk_long_all_2 = false
+var bool nk_short_all_1 = false
+var bool nk_short_all_2 = false
+var float nk_risk_stop_distance = na
+
+if nk_visible_60
+    nk_close_1 := nk_close_1_raw
+    nk_long_all_1 := nk_long_all_1_raw
+    nk_long_all_2 := nk_long_all_2_raw
+    nk_short_all_1 := nk_short_all_1_raw
+    nk_short_all_2 := nk_short_all_2_raw
+    nk_risk_stop_distance := nk_risk_stop_distance_raw
+
+nk_visible_d = nk_new_session()
+
+nk_htf_1() =>
+    nk_sma_1 = ta.sma(close, nk_long_all_0_rhs_sma_n)
+    nk_sma_1[1]
+
+nk_sma_2_raw = request.security(syminfo.tickerid, "D", nk_htf_1(), lookahead=barmerge.lookahead_on, gaps=barmerge.gaps_off)
+var float nk_sma_2 = na
+
+if nk_visible_d
+    nk_sma_2 := nk_sma_2_raw
+
+nk_long_entry = (nk_close_1 > nk_sma_2 and nk_long_all_1 and nk_long_all_2)
+nk_short_entry = (nk_close_1 < nk_sma_2 and nk_short_all_1 and nk_short_all_2)
+
+// --- Decisions ---
+nk_long_stop = close - nk_risk_stop_distance
+nk_long_target = close + nk_risk_target_rr * (close - nk_long_stop)
+nk_long_decision = nk_visible_60 and nk_long_entry and not na(nk_long_stop) and nk_long_stop < close and nk_long_target > close
+nk_short_stop = close + nk_risk_stop_distance
+nk_short_target = close - nk_risk_target_rr * (nk_short_stop - close)
+nk_short_decision = nk_visible_60 and nk_short_entry and not na(nk_short_stop) and nk_short_stop > close and nk_short_target < close
+
+// --- Markers ---
+plotshape(nk_long_decision, "Nakagai long", shape.triangleup, location.belowbar, color.teal, size=size.tiny)
+plotshape(nk_short_decision, "Nakagai short", shape.triangledown, location.abovebar, color.maroon, size=size.tiny)
+
+// --- Alert body ---
+nk_signal_json(direction, reference, stop, target) =>
+    string head = "{\"schema\":\"nakagai.pine.signal.v1\",\"spec_hash\":\"c366b6a61c6f839abf3d3baad8c4a776f94fe30bd3548f9606182e929959dd22\",\"symbol\":\"" + syminfo.ticker + "\""
+    string where = ",\"timeframe\":\"" + timeframe.period + "\",\"direction\":\"" + direction + "\""
+    string when = ",\"bar_time\":" + str.tostring(time)
+    string levels = ",\"reference\":" + str.tostring(reference) + ",\"stop\":" + str.tostring(stop) + ",\"target\":" + str.tostring(target)
+    head + where + when + levels + "}"
+
+// --- Signal levels ---
+var float nk_reference = na
+var float nk_stop = na
+var float nk_target = na
+if nk_long_decision
+    nk_reference := close
+    nk_stop := nk_long_stop
+    nk_target := nk_long_target
+    alert(nk_signal_json("long", nk_reference, nk_stop, nk_target), alert.freq_once_per_bar_close)
+else if nk_short_decision
+    nk_reference := close
+    nk_stop := nk_short_stop
+    nk_target := nk_short_target
+    alert(nk_signal_json("short", nk_reference, nk_stop, nk_target), alert.freq_once_per_bar_close)
+
+// --- Level plots ---
+plot(nk_reference, "Nakagai reference", color=color.gray, style=plot.style_linebr)
+plot(nk_stop, "Nakagai stop", color=color.maroon, style=plot.style_linebr)
+plot(nk_target, "Nakagai target", color=color.teal, style=plot.style_linebr)

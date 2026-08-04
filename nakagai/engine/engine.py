@@ -24,6 +24,7 @@ from nakagai.engine.context import PreloadedBars, build_context, visible_counts
 from nakagai.engine.costs import FeeModel, SlippageModel
 from nakagai.engine.portfolio import SettledLedger
 from nakagai.strategies.base import Direction, PositionAction, Signal, Strategy
+from nakagai.strategies.rules.vocabulary import core_vocabulary
 
 
 @dataclass
@@ -122,7 +123,9 @@ class Engine:
         return self.slippage.per_share(price)
 
     def run(self) -> BacktestResult:
-        view = PreloadedBars(self.cache, self.symbol, self.tfs)
+        vocabulary = getattr(self.strategy, "vocabulary", core_vocabulary())
+        view = PreloadedBars(self.cache, self.symbol, self.tfs,
+                             vocabulary=vocabulary)
         bars = view.load(self.symbol, self.tfs.driving)
         bars = bars[(bars.index >= self.start) & (bars.index < self.end)]
         # End-anchored primitives (fvg_nearest, order_block) are evaluated row
@@ -179,7 +182,8 @@ class Engine:
                 pending = None
 
             # 3) manage + 4) new signals (point-in-time context as of bar close)
-            ctx = build_context(view, self.symbol, now, tfs=self.tfs)
+            ctx = build_context(view, self.symbol, now, tfs=self.tfs,
+                                vocabulary=vocabulary)
             if position is not None:
                 if self.strategy.manage(position, ctx) == PositionAction.EXIT:
                     position.observe(float(bar.close), float(bar.close))

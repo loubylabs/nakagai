@@ -1,0 +1,46 @@
+{
+  "version": 2,
+  "name": "sma_cross",
+  "timeframe": "1h",
+  "long": {
+    "all": [
+      {
+        "lhs": {
+          "ind": "sma",
+          "n": 20
+        },
+        "op": "crosses_above",
+        "rhs": {
+          "ind": "sma",
+          "n": 50
+        }
+      }
+    ]
+  },
+  "short": {
+    "all": [
+      {
+        "lhs": {
+          "ind": "sma",
+          "n": 20
+        },
+        "op": "crosses_below",
+        "rhs": {
+          "ind": "sma",
+          "n": 50
+        }
+      }
+    ]
+  },
+  "risk": {
+    "stop": {
+      "kind": "atr",
+      "n": 14,
+      "mult": 2.0
+    },
+    "target": {
+      "kind": "rr",
+      "rr": 2.0
+    }
+  }
+}

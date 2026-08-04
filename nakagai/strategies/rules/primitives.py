@@ -1,8 +1,8 @@
 """Stateful/session-aware primitives for RuleSpec v2 expressions.
 
 Each primitive is fn(ctx, bars, **args) -> Series aligned to bars.index (or a
-float). `bars` is the spec's driving-timeframe frame. The registry maps the
-grammar name to an arg schema (validated in spec.py) and the function.
+float). `bars` is the spec's driving-timeframe frame. Vocabulary declarations
+live in vocabulary.py.
 """
 
 import numpy as np
@@ -138,15 +138,46 @@ def order_block(ctx: MarketContext, bars: pd.DataFrame,
     return {"top": top, "bottom": bottom, "mid": (top + bottom) / 2}[field]
 
 
+def _is_session_frame(idx: pd.DatetimeIndex) -> bool:
+    """True when the frame's rows are SESSION bars: at most one per UTC date.
+
+    The property, not a label pattern. Both daily conventions the engine meets
+    satisfy it and neither is recognisable from a single timestamp: the cache's
+    own resample buckets on "1D" in UTC (midnight exactly) and Alpaca's 1Day
+    bars are stamped at midnight Eastern (04:00 or 05:00 UTC). What they share
+    is one row per session, which is also exactly what makes the UTC calendar
+    date of the label the session date, the fact engine/context.closed_before
+    already rests on.
+
+    A frame of fewer than two rows carries no evidence of its own cadence, so
+    it reads as intraday: that is the answer for the driving frames the grammar
+    admits everywhere except a 1d spec, and a 1d spec reaching one row has one
+    session of history.
+    """
+    return len(idx) >= 2 and idx.normalize().is_unique
+
+
 def day_of_week(ctx: MarketContext, bars: pd.DataFrame) -> pd.Series:
-    """Weekday of each bar's session, 0 = Monday. Intraday labels convert to
-    NY time; session-aligned daily bars are labeled midnight UTC of their
-    session date, where the NY conversion would land on the prior evening,
-    so exact-midnight labels read the UTC calendar day instead."""
+    """Weekday of each bar's session, 0 = Monday.
+
+    Which clock the weekday is read on is the FRAME's to decide, never the
+    individual label's. An intraday bar belongs to the New York calendar day it
+    falls in, which is how _ny_dates groups every other session-scoped
+    primitive. A session bar is one whole session in one row, and its label's
+    UTC calendar date IS that session's date, where converting to New York
+    would land on the prior evening and shift every weekday back by one.
+
+    Branching on the label's own clock instead is the bug this must not go back
+    to. The caches are not RTH-only (see data/schema.SESSION_OPEN), so a 19:00
+    EST post-market bar carries exactly the 00:00 UTC label a resampled daily
+    bar carries, and reading its UTC date answered Tuesday for a Monday
+    evening: a divergence that appeared on one bar of a session and nowhere
+    else, which is the shape of thing a spec author never catches.
+    """
     idx = bars.index
-    midnight_utc = (idx.hour == 0) & (idx.minute == 0)
-    dow = np.where(midnight_utc, idx.dayofweek, idx.tz_convert(EXCHANGE_TZ).dayofweek)
-    return pd.Series(dow.astype(float), index=idx)
+    dow = (idx.dayofweek if _is_session_frame(idx)
+           else idx.tz_convert(EXCHANGE_TZ).dayofweek)
+    return pd.Series(np.asarray(dow, dtype="float64"), index=idx)
 
 
 def minutes_into_session(ctx: MarketContext, bars: pd.DataFrame) -> pd.Series:
@@ -246,108 +277,15 @@ def fvg_nearest(ctx: MarketContext, bars: pd.DataFrame,
                   "mid": (best.top + best.bottom) / 2}[field])
 
 
-PRIMITIVES: dict[str, dict] = {
-    "opening_range_high": {"args": {"minutes": (5, 120)}, "fn": opening_range_high},
-    "opening_range_low": {"args": {"minutes": (5, 120)}, "fn": opening_range_low},
-    "prev_session_high": {"args": {}, "fn": prev_session_high},
-    "prev_session_low": {"args": {}, "fn": prev_session_low},
-    "prev_session_close": {"args": {}, "fn": prev_session_close},
-    "gap_pct": {"args": {}, "fn": gap_pct},
-    "swing_high": {"args": {"k": (1, 10)}, "fn": swing_high},
-    "swing_low": {"args": {"k": (1, 10)}, "fn": swing_low},
-    "day_of_week": {"args": {}, "fn": day_of_week},
-    "minutes_into_session": {"args": {}, "fn": minutes_into_session},
-    "rvol": {"args": {"sessions": (5, 60)}, "fn": rvol},
-    "bars_since": {"args": {"cond": "condition"}, "fn": bars_since},
-    "fvg_nearest": {"args": {"direction": ("long", "short"),
-                             "field": ("top", "bottom", "mid"),
-                             "state": ("open", "inverted"),
-                             "min_size_atr": (0.05, 2.0),
-                             "lookback": (10, 200)}, "fn": fvg_nearest},
-    "leg_retrace": {"args": {"direction": ("long", "short"), "k": (1, 10)},
-                    "fn": leg_retrace},
-    "order_block": {"args": {"direction": ("long", "short"),
-                             "field": ("top", "bottom", "mid"),
-                             "body_atr": (0.5, 5.0), "lookback": (10, 200)},
-                    "fn": order_block},
-}
-# Session/calendar-scoped primitives read the driving frame's own session or
-# calendar structure (session-open windows, elapsed session minutes, a bar's
-# place in the session's volume shape, the bar's calendar weekday) rather than
-# plain OHLCV structure. Feeding them a `tf` swaps in a different frame's bars,
-# which silently degenerates: opening_range_* on "1d" bars (one bar per session)
-# never sees its window elapse and is NaN forever, on "1h" bars a minutes=30
-# window is measured in whole-hour steps; minutes_into_session on "1d" bars is 0
-# everywhere (one bar per session group); rvol on "1d" bars has one bar per
-# session, so its same-clock-time bucket is the whole series and the primitive
-# quietly becomes a plain trailing-median volume ratio, a different measurement
-# wearing the same name, while on "1h" bars the buckets are whole hours, so a
-# 15m spec's 09:30 bar is answered from a 09:30-to-10:30 aggregate; day_of_week
-# reads calendar identity that belongs to the spec's own session, so answering
-# it from a foreign frame is a category error even though the primitive itself
-# now handles midnight-UTC daily labels. These primitives must always run on the
-# spec's own driving bars, so `tf` is rejected outright.
-SESSION_SCOPED_PRIMS = frozenset({
-    "opening_range_high", "opening_range_low", "minutes_into_session",
-    "day_of_week", "rvol",
-})
-# The primitives a SESSION-ALIGNED driving frame cannot answer at all, because
-# there one bar IS the whole session: the opening-range window never elapses
-# (NaN forever), minutes_into_session is 0 on every bar, and rvol's
-# same-clock-time bucket becomes the entire series.
-#
-# Two different rules, two different sets. SESSION_SCOPED_PRIMS is the right
-# set for the foreign-`tf` rule above and the WRONG set for this one, so this
-# is a second frozenset rather than a reuse of that one. Reading a weekday off
-# a 1h frame inside a 15m spec is a category error, which is why day_of_week
-# takes no tf; reading a weekday off your own daily bars is not, so day_of_week
-# is deliberately absent here. A daily bar is one session, so its weekday is
-# exactly the calendar identity the primitive promises, and day_of_week already
-# special-cases session-aligned daily labels for precisely that reading (see its
-# docstring). turnaround_tuesday is a shipped 1d catalog play whose entire
-# premise is day_of_week; refusing it would break a shipped play over a reading
-# that is right.
-#
-# rvol IS here, and that is a decision rather than an accident of grouping. On
-# daily bars it does not go NaN, it collapses to today's volume over the
-# trailing median daily volume: not meaningless, but a different measurement
-# wearing the same name, and a spec author reading "relative volume" gets the
-# session-shape answer the primitive's docstring promises on no bar of it.
-# Nothing shipped depends on it (capitulation_snap, the only catalog user of
-# rvol, drives off 1h), so refusing costs nothing today. If a daily
-# relative-volume reading is wanted later it is a separate primitive with its
-# own name, never an overload of this one, and the refusal message says so.
-DRIVING_FRAME_INTRADAY_PRIMS = frozenset({
-    "opening_range_high", "opening_range_low", "minutes_into_session", "rvol",
-})
-ARG_DEFAULTS: dict[str, dict] = {
-    "opening_range_high": {"minutes": 30}, "opening_range_low": {"minutes": 30},
-    "swing_high": {"k": 3}, "swing_low": {"k": 3}, "rvol": {"sessions": 20},
-    "fvg_nearest": {"direction": "long", "field": "top", "state": "open",
-                    "min_size_atr": 0.25, "lookback": 40},
-    "leg_retrace": {"direction": "long", "k": 3},
-    "order_block": {"direction": "long", "field": "top",
-                    "body_atr": 1.5, "lookback": 40},
-}
-
-# Primitives whose value is anchored to the END of the frame they are handed:
-# one float from the tail, not a causal series. A whole-frame pass may not
-# broadcast that across history (it would be lookahead), so they are evaluated
-# row by row over a bounded span instead. Bounded by `lookback`, so this costs
-# what the per-bar path always cost.
-END_ANCHORED = frozenset({"fvg_nearest", "order_block"})
-
-
-def end_anchored_series(name: str, ctx, bars: pd.DataFrame, lo: int, hi: int,
+def end_anchored_series(term, ctx, bars: pd.DataFrame, lo: int, hi: int,
                         **args) -> pd.Series:
-    """Row `i` holds exactly what PRIMITIVES[name] returns for bars[:i+1].
+    """Row `i` holds exactly what term.fn returns for bars[:i+1].
 
     Calling the scalar function per row rather than reimplementing it makes the
     equivalence a tautology: there is no second implementation to drift.
     """
-    fn = PRIMITIVES[name]["fn"]
     idx = bars.index[lo:hi]
     if not len(idx):
         return pd.Series(dtype="float64", index=idx)
-    return pd.Series([float(fn(ctx, bars.iloc[: i + 1], **args))
+    return pd.Series([float(term.fn(ctx, bars.iloc[: i + 1], **args))
                       for i in range(lo, hi)], index=idx, dtype="float64")

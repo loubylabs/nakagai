@@ -4,8 +4,9 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from nakagai.strategies.rules.primitives import (END_ANCHORED, end_anchored_series,
-                                                 fvg_nearest, order_block)
+from nakagai.strategies.rules.primitives import (end_anchored_series, fvg_nearest,
+                                                 order_block)
+from nakagai.strategies.rules.vocabulary import core_vocabulary
 
 
 def _bars(n=120, seed=3):
@@ -28,7 +29,8 @@ def _bars(n=120, seed=3):
 def test_series_equals_scalar_on_every_prefix(name, fn, args):
     bars = _bars()
     lo, hi = 60, len(bars)
-    got = end_anchored_series(name, None, bars, lo, hi, **args)
+    got = end_anchored_series(core_vocabulary().primitives[name], None,
+                              bars, lo, hi, **args)
     assert list(got.index) == list(bars.index[lo:hi])
     for i in range(lo, hi):
         want = fn(None, bars.iloc[: i + 1], **args)
@@ -37,4 +39,6 @@ def test_series_equals_scalar_on_every_prefix(name, fn, args):
 
 
 def test_registry_names_match_the_functions_that_are_end_anchored():
-    assert END_ANCHORED == {"fvg_nearest", "order_block"}
+    got = {name for name, term in core_vocabulary().primitives.items()
+           if term.end_anchored}
+    assert got == {"fvg_nearest", "order_block"}

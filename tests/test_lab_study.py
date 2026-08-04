@@ -13,6 +13,7 @@ from nakagai.lab.mutate import composite_trials, literal_trials
 from nakagai.lab.study import StudySpec, run_study, trial_pf
 from nakagai.stats import pf_from_trades
 from nakagai.strategies.catalog import load_catalog
+from nakagai.strategies.rules import core_vocabulary
 from tests.lab_helpers import (BASE_SPEC, SPECS_DIR, lab_registry, memory_cache,
                                random_walk_frames, short_windows)
 
@@ -167,7 +168,7 @@ def test_run_study_scores_composite_trials_end_to_end():
     # assert the results are pairwise distinct, only that the run produced a
     # non-degenerate result (every trial scored, and at least one traded).
     frames = random_walk_frames("TEST", seed=2)
-    members = load_catalog(SPECS_DIR)
+    members = load_catalog(SPECS_DIR, core_vocabulary)
     trials = composite_trials(sorted(members), n=3, seed=5, members=members)
     study = StudySpec(trials=tuple(trials), symbols=("TEST",),
                       windows=tuple(short_windows(frames, "TEST", count=2)),

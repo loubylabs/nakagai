@@ -193,13 +193,14 @@ def test_literal_trials_moves_a_zero_threshold_not_just_its_json_type():
 from nakagai.lab.mutate import composite_trials
 from nakagai.strategies.composite.spec import validate_composite_spec
 from nakagai.strategies.catalog import load_catalog
+from nakagai.strategies.rules import core_vocabulary
 from pathlib import Path
 
 SPECS = Path(__file__).resolve().parents[1] / "nakagai/strategies/catalog/specs"
 
 
 def _members():
-    return load_catalog(SPECS)
+    return load_catalog(SPECS, core_vocabulary)
 
 
 def test_composite_trials_are_all_valid():

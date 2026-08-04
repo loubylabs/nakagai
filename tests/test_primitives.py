@@ -21,9 +21,9 @@ def _ctx(bars):
 
 
 def test_opening_range_high_is_per_session_and_constant_after_window():
-    from nakagai.strategies.rules.primitives import PRIMITIVES
+    from nakagai.strategies.rules.primitives import opening_range_high
     bars = _session_bars()
-    orh = PRIMITIVES["opening_range_high"]["fn"](_ctx(bars), bars, minutes=30)
+    orh = opening_range_high(_ctx(bars), bars, minutes=30)
     day2 = orh[bars.index.tz_convert("America/New_York").date == pd.Timestamp("2026-01-06").date()]
     first_two = bars.loc[day2.index[:2], "high"].max()
     assert (day2.dropna() == first_two).all()          # constant within the session
@@ -113,32 +113,32 @@ def test_opening_range_cost_does_not_grow_with_history():
 
 
 def test_prev_session_close_and_gap_pct():
-    from nakagai.strategies.rules.primitives import PRIMITIVES
+    from nakagai.strategies.rules.primitives import gap_pct, prev_session_close
     bars = _session_bars()
     ctx = _ctx(bars)
     day1_close = bars[bars.index.date == pd.Timestamp("2026-01-05").date()]["close"].iloc[-1]
-    psc = PRIMITIVES["prev_session_close"]["fn"](ctx, bars)
+    psc = prev_session_close(ctx, bars)
     assert psc.iloc[-1] == day1_close
     day2_open = bars[bars.index.date == pd.Timestamp("2026-01-06").date()]["open"].iloc[0]
-    gap = PRIMITIVES["gap_pct"]["fn"](ctx, bars)
+    gap = gap_pct(ctx, bars)
     assert abs(gap.iloc[-1] - 100 * (day2_open - day1_close) / day1_close) < 1e-9
 
 
 def test_swing_high_returns_last_confirmed_swing_level():
-    from nakagai.strategies.rules.primitives import PRIMITIVES
+    from nakagai.strategies.rules.primitives import swing_high
     bars = _session_bars()
     bars.loc[bars.index[20], "high"] = 200.0           # inject an obvious swing
-    sh = PRIMITIVES["swing_high"]["fn"](_ctx(bars), bars, k=3)
+    sh = swing_high(_ctx(bars), bars, k=3)
     assert sh.iloc[-1] == 200.0
 
 
 def test_time_primitives():
-    from nakagai.strategies.rules.primitives import PRIMITIVES
+    from nakagai.strategies.rules.primitives import day_of_week, minutes_into_session
     bars = _session_bars()
     ctx = _ctx(bars)
-    dow = PRIMITIVES["day_of_week"]["fn"](ctx, bars)
+    dow = day_of_week(ctx, bars)
     assert dow.iloc[0] == 0 and dow.iloc[-1] == 1      # Mon, Tue
-    mins = PRIMITIVES["minutes_into_session"]["fn"](ctx, bars)
+    mins = minutes_into_session(ctx, bars)
     assert mins.iloc[0] == 0.0 and mins.iloc[2] == 30.0
 
 
@@ -154,22 +154,67 @@ def test_bars_since_counts_bars_since_condition_true():
 
 
 def test_fvg_nearest_returns_float_or_nan():
-    from nakagai.strategies.rules.primitives import PRIMITIVES
+    from nakagai.strategies.rules.primitives import fvg_nearest
     bars = _session_bars()
-    v = PRIMITIVES["fvg_nearest"]["fn"](_ctx(bars), bars, direction="long", field="top")
+    v = fvg_nearest(_ctx(bars), bars, direction="long", field="top")
     assert isinstance(v, float)                        # NaN when no unfilled FVG exists
+
+
+def _flat(idx):
+    return pd.DataFrame({"open": 100.0, "high": 101.0, "low": 99.0,
+                         "close": 100.0, "volume": 1000.0}, index=idx)
 
 
 def test_day_of_week_reads_the_utc_calendar_day_on_daily_frames():
     # Session-aligned daily bars are labeled midnight UTC of their session date;
-    # converting midnight UTC to NY lands on the prior evening, which used to
+    # converting midnight UTC to NY lands on the prior evening, which would
     # shift every weekday back by one (a Monday bar read as Sunday).
-    from nakagai.strategies.rules.primitives import PRIMITIVES
+    from nakagai.strategies.rules.primitives import day_of_week
     idx = pd.date_range("2026-01-05", periods=5, freq="B", tz="UTC")  # Mon..Fri
-    bars = pd.DataFrame({"open": 100.0, "high": 101.0, "low": 99.0,
-                         "close": 100.0, "volume": 1000.0}, index=idx)
-    dow = PRIMITIVES["day_of_week"]["fn"](None, bars)
+    dow = day_of_week(None, _flat(idx))
     assert list(dow) == [0.0, 1.0, 2.0, 3.0, 4.0]
+
+
+def test_day_of_week_reads_a_daily_frame_stamped_at_the_eastern_midnight():
+    # The other daily convention: Alpaca stamps a 1Day bar at midnight Eastern,
+    # which is 04:00 UTC under EDT and 05:00 under EST. Same session date, a
+    # different clock on the label, so a rule reading the label's clock would
+    # have to know both. Reading the FRAME knows neither.
+    from nakagai.strategies.rules.primitives import day_of_week
+    idx = pd.DatetimeIndex([f"2026-01-{d:02d} 05:00" for d in (5, 6, 7, 8, 9)],
+                           tz="UTC")
+    assert list(day_of_week(None, _flat(idx))) == [0.0, 1.0, 2.0, 3.0, 4.0]
+
+
+def test_an_after_hours_bar_keeps_its_own_session_s_weekday():
+    # The trap the midnight-UTC rule fell into. The caches are not RTH-only, so
+    # a 19:00 EST post-market bar carries exactly the 00:00 UTC label a
+    # resampled daily bar carries. Reading the label's clock answered Tuesday
+    # for a Monday evening, on one bar of the session and no other. An intraday
+    # frame is intraday on every bar of it.
+    from nakagai.strategies.rules.primitives import day_of_week
+    idx = pd.DatetimeIndex(["2026-01-05 23:00",   # NY Mon 18:00
+                            "2026-01-06 00:00",   # NY Mon 19:00
+                            "2026-01-06 01:00",   # NY Mon 20:00
+                            "2026-01-06 14:30"],  # NY Tue 09:30
+                           tz="UTC")
+    assert list(day_of_week(None, _flat(idx))) == [0.0, 0.0, 0.0, 1.0]
+
+
+def test_a_frame_is_read_as_daily_only_when_it_holds_one_bar_per_session():
+    from nakagai.strategies.rules.primitives import _is_session_frame
+    daily = pd.date_range("2026-01-05", periods=5, freq="B", tz="UTC")
+    assert _is_session_frame(daily)
+    intraday = pd.date_range("2026-01-05 14:30", periods=5, freq="15min",
+                             tz="UTC")
+    assert not _is_session_frame(intraday)
+    # An intraday frame whose rows happen to sit on different dates is still
+    # one bar per date, and that is the honest reading: nothing in the frame
+    # says otherwise.
+    assert _is_session_frame(pd.DatetimeIndex(
+        ["2026-01-05 14:30", "2026-01-06 15:30"], tz="UTC"))
+    # Too short to carry evidence of its own cadence.
+    assert not _is_session_frame(daily[:1])
 
 
 def _ny(day: str, clock: str) -> pd.Timestamp:
@@ -199,8 +244,8 @@ def _clock_bars(volumes, start="2026-01-05"):
 
 
 def _rvol(bars, sessions):
-    from nakagai.strategies.rules.primitives import PRIMITIVES
-    return PRIMITIVES["rvol"]["fn"](_ctx(bars), bars, sessions=sessions)
+    from nakagai.strategies.rules.primitives import rvol
+    return rvol(_ctx(bars), bars, sessions=sessions)
 
 
 def test_rvol_is_this_bars_volume_over_the_same_clock_times_trailing_median():
@@ -281,11 +326,11 @@ def test_rvol_of_an_untraded_clock_time_is_nan_and_not_infinite():
 
 
 def test_rvol_is_registered_with_its_bounds_and_its_default():
-    from nakagai.strategies.rules.primitives import (ARG_DEFAULTS, PRIMITIVES,
-                                                     SESSION_SCOPED_PRIMS)
-    assert PRIMITIVES["rvol"]["args"] == {"sessions": (5, 60)}
-    assert ARG_DEFAULTS["rvol"] == {"sessions": 20}
-    assert "rvol" in SESSION_SCOPED_PRIMS
+    from nakagai.strategies.rules.vocabulary import core_vocabulary
+    term = core_vocabulary().primitives["rvol"]
+    assert term.args == {"sessions": (5, 60)}
+    assert term.defaults == {"sessions": 20}
+    assert term.session_scoped
 
 
 def test_the_two_timeframe_sets_are_not_the_same_set():
@@ -295,12 +340,16 @@ def test_the_two_timeframe_sets_are_not_the_same_set():
     the second, because a daily bar is one session and its weekday is exactly
     what the primitive promises; turnaround_tuesday, a shipped 1d play, is
     built on that reading."""
-    from nakagai.strategies.rules.primitives import (
-        DRIVING_FRAME_INTRADAY_PRIMS, SESSION_SCOPED_PRIMS)
-    assert DRIVING_FRAME_INTRADAY_PRIMS < SESSION_SCOPED_PRIMS
-    assert DRIVING_FRAME_INTRADAY_PRIMS == {
+    from nakagai.strategies.rules.vocabulary import core_vocabulary
+    vocabulary = core_vocabulary()
+    intraday = {name for name, term in vocabulary.primitives.items()
+                if term.driving_frame_intraday}
+    session = {name for name, term in vocabulary.primitives.items()
+               if term.session_scoped}
+    assert intraday < session
+    assert intraday == {
         "opening_range_high", "opening_range_low", "minutes_into_session", "rvol"}
-    assert "day_of_week" not in DRIVING_FRAME_INTRADAY_PRIMS
+    assert "day_of_week" not in intraday
 
 
 def test_every_refused_primitive_carries_its_own_reason():
@@ -309,6 +358,8 @@ def test_every_refused_primitive_carries_its_own_reason():
     ordinary user input, which is a worse failure than the one this rule
     exists to catch. The two are declared apart because the reason is prose
     and the set is a rule, so pin them together here."""
-    from nakagai.strategies.rules.primitives import DRIVING_FRAME_INTRADAY_PRIMS
     from nakagai.strategies.rules.spec import _ONE_BAR_SESSION
-    assert set(_ONE_BAR_SESSION) == DRIVING_FRAME_INTRADAY_PRIMS
+    from nakagai.strategies.rules.vocabulary import core_vocabulary
+    intraday = {name for name, term in core_vocabulary().primitives.items()
+                if term.driving_frame_intraday}
+    assert set(_ONE_BAR_SESSION) == intraday

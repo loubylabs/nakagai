@@ -10,6 +10,7 @@ import pandas as pd
 from nakagai.data.sync import fetch_incremental
 from nakagai.engine.context import build_context
 from nakagai.screen.spec import max_lookback, referenced_timeframes
+from nakagai.strategies.rules.vocabulary import Vocabulary, resolve_vocabulary
 
 
 def _row(symbol: str, matched=None, last_close=None,
@@ -19,8 +20,14 @@ def _row(symbol: str, matched=None, last_close=None,
 
 
 def run_screen(spec: dict, symbols: list[str], cache, now=None,
-               providers: dict | None = None, sync_days: int = 60) -> dict:
+               providers: dict | None = None, sync_days: int = 60, *,
+               vocabulary: Vocabulary | None = None) -> dict:
     now = now if now is not None else pd.Timestamp.now(tz="UTC")
+    # The same vocabulary the spec was validated against. A screen that
+    # validated clean under an injected term must be evaluable under it too;
+    # resolving per symbol inside build_context would put the core vocabulary
+    # here and turn every row into an "unknown indicator" note.
+    vocabulary = resolve_vocabulary(vocabulary)
     tf = spec.get("tf", "1d")
     needed = referenced_timeframes(spec)
     lookback = max_lookback(spec)
@@ -48,7 +55,7 @@ def run_screen(spec: dict, symbols: list[str], cache, now=None,
                     errors.append(f"{sym}: {note}")
                     sync_note = note
         try:
-            ctx = build_context(cache, sym, now)
+            ctx = build_context(cache, sym, now, vocabulary=vocabulary)
             bars = ctx.bars[tf]
             if bars.empty:
                 note = f"no {tf} bars cached"

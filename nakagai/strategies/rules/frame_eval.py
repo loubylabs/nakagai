@@ -23,15 +23,45 @@ import pandas as pd
 
 from nakagai.data.schema import DEFAULT_TIMEFRAMES, TimeframeSet
 from nakagai.engine.context import visible_counts
-from nakagai.strategies.rules.exprs import (_BAR_FNS, _FRAME_FNS, _SERIES_FNS,
-                                            _math)
-from nakagai.strategies.rules.primitives import ARG_DEFAULTS as PRIM_DEFAULTS
-from nakagai.strategies.rules.primitives import (END_ANCHORED, PRIMITIVES,
-                                                 end_anchored_series)
-from nakagai.strategies.rules.spec import ARG_DEFAULTS, BAR_INDICATORS
+from nakagai.strategies.rules.primitives import end_anchored_series
+from nakagai.strategies.rules.vocabulary import Vocabulary, resolve_vocabulary
 
 
-def _cross_prev(node, v: pd.Series) -> pd.Series:
+def _as_series(v, like):
+    if isinstance(v, pd.Series):
+        return v
+    idx = like.index if isinstance(like, pd.Series) else None
+    return pd.Series(v, index=idx)
+
+
+def _math(op: str, args: list):
+    """The RuleSpec math ops over scalars and series, mixed freely.
+
+    Division maps a zero denominator to NaN rather than raising or producing an
+    infinity: a condition over NaN reads False, which is the honest answer for
+    a ratio that does not exist on that bar.
+    """
+    if op == "abs":
+        return args[0].abs() if isinstance(args[0], pd.Series) else abs(args[0])
+    out = args[0]
+    for a in args[1:]:
+        if op == "+":
+            out = out + a
+        elif op == "-":
+            out = out - a
+        elif op == "*":
+            out = out * a
+        elif op == "/":
+            denom = a.replace(0.0, float("nan")) if isinstance(a, pd.Series) else \
+                (float("nan") if a == 0 else a)
+            out = out / denom
+        elif op in ("min", "max"):
+            both = pd.concat([_as_series(out, a), _as_series(a, out)], axis=1)
+            out = both.min(axis=1) if op == "min" else both.max(axis=1)
+    return out
+
+
+def _cross_prev(node, v: pd.Series, vocabulary: Vocabulary) -> pd.Series:
     """The operand's PREVIOUS-bar value inside a cross comparison.
 
     indicators.crossed_above reads `b.iloc[-2], b.iloc[-1]` when `b` is a
@@ -83,17 +113,26 @@ def _cross_prev(node, v: pd.Series) -> pd.Series:
 
     Do not collapse this back into a plain shift on both sides.
     """
-    if isinstance(node, dict) and node.get("prim") in END_ANCHORED:
-        return v
+    if isinstance(node, dict):
+        term = vocabulary.primitives.get(node.get("prim"))
+        if term is not None and term.end_anchored:
+            return v
     return v.shift(1)
 
 
 class FrameEval:
     """Replay-scoped node cache over one symbol's untruncated frames."""
 
-    def __init__(self, frames: dict, tfs: TimeframeSet = DEFAULT_TIMEFRAMES):
+    # `vocabulary` is keyword-only: it sits behind an optional `tfs`, so
+    # FrameEval(frames, vocab) would bind the Vocabulary to `tfs` and evaluate
+    # every node against the core vocabulary instead. Nothing raises on that
+    # path unless a cross-timeframe node reaches self.tfs, so the wrong answer
+    # would look like a right one.
+    def __init__(self, frames: dict, tfs: TimeframeSet = DEFAULT_TIMEFRAMES, *,
+                 vocabulary: Vocabulary | None = None):
         self._frames = {tf: f for tf, f in frames.items()}
         self.tfs = tfs
+        self.vocabulary = resolve_vocabulary(vocabulary)
         self._cache: dict = {}
         self._maps: dict = {}
         self._spans: dict = {}
@@ -102,7 +141,7 @@ class FrameEval:
         return self._frames[tf]
 
     def set_span(self, tf: str, lo: int, hi: int) -> None:
-        """Declare the rows of `tf` the END_ANCHORED primitives are computed on.
+        """Declare the rows of `tf` the end_anchored terms are computed on.
 
         The span is a correctness input for every end-anchored node, and it is
         deliberately NOT part of the memo key: keying on it would let one
@@ -205,37 +244,38 @@ class FrameEval:
             return _math(node["op"], [self.series(a, tf) for a in node["args"]])
         if "ind" in node:
             name = node["ind"]
-            a = {**ARG_DEFAULTS.get(name, {}),
+            term = self.vocabulary.indicators[name]
+            a = {**term.defaults,
                  **{k: v for k, v in node.items() if k not in ("ind", "of", "tf")}}
-            if name in BAR_INDICATORS:
-                out = _BAR_FNS[name](frame, a)
+            if term.kind == "bar":
+                out = term.fn(frame, a)
             else:
                 of = node.get("of", {"src": "close"})
                 s = self.series(of, src_tf)
                 if isinstance(s, float):
                     s = pd.Series(s, index=frame.index)
-                fn = _SERIES_FNS.get(name)
-                out = fn(s, a["n"]) if fn else _FRAME_FNS[name](s, a)
+                out = term.fn(s, a)
             if isinstance(out, pd.DataFrame):
                 out = out[a["field"]]
             return self._align(out, src_tf, tf)
         name = node["prim"]
-        a = {**PRIM_DEFAULTS.get(name, {}),
+        term = self.vocabulary.primitives[name]
+        a = {**term.defaults,
              **{k: v for k, v in node.items() if k not in ("prim", "tf")}}
-        if name in END_ANCHORED:
+        if term.end_anchored:
             # Exactly the span, with no warm-up margin in front of it. Row i is
             # the scalar function called on bars[:i+1], which does its own
             # `lookback` tail-trim, so a row needs nothing computed before it:
             # widening the range only calls the function for rows no reader can
             # reach, at `lookback` extra calls per node per replay.
             lo, hi = self._span(src_tf)
-            part = end_anchored_series(name, None, frame, lo, hi, **a)
+            part = end_anchored_series(term, None, frame, lo, hi, **a)
             out = pd.Series(np.nan, index=frame.index)
             out.iloc[lo:hi] = part.to_numpy()
             return self._align(out, src_tf, tf)
         if name == "bars_since":
             a["eval_fn"] = lambda cond, b: self.condition_series(cond, src_tf)
-        return self._align(PRIMITIVES[name]["fn"](None, frame, **a), src_tf, tf)
+        return self._align(term.fn(None, frame, **a), src_tf, tf)
 
     def condition_series(self, cond: dict, tf: str) -> pd.Series:
         """Elementwise boolean series for a comparison condition."""
@@ -247,8 +287,8 @@ class FrameEval:
             rhs = pd.Series(rhs, index=index)
         op = cond["op"]
         if op in ("crosses_above", "crosses_below"):
-            lhs_prev = _cross_prev(cond["lhs"], lhs)
-            rhs_prev = _cross_prev(cond["rhs"], rhs)
+            lhs_prev = _cross_prev(cond["lhs"], lhs, self.vocabulary)
+            rhs_prev = _cross_prev(cond["rhs"], rhs, self.vocabulary)
             out = ((lhs_prev <= rhs_prev) & (lhs > rhs) if op == "crosses_above"
                    else (lhs_prev >= rhs_prev) & (lhs < rhs))
             na = lhs.isna() | rhs.isna() | lhs_prev.isna() | rhs_prev.isna()

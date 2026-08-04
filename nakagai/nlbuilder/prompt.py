@@ -1,12 +1,13 @@
-"""System prompt for the NL->spec compiler, rendered from the live grammar
-registries so it can never drift from the validator."""
+"""System prompt for the NL->spec compiler, rendered from the caller's own
+vocabulary so it can never drift from the validator that will judge the
+reply."""
 
 import json
 
 from nakagai.strategies.composite.spec import (
     DEFAULT_WINDOW_BARS, MAX_BLOCKS, WINDOW_BARS_BOUNDS)
-from nakagai.strategies.rules import primitives as prims
 from nakagai.strategies.rules import spec as g
+from nakagai.strategies.rules.vocabulary import Vocabulary, resolve_vocabulary
 
 _EXAMPLES = """\
 Description: "buy the dip when rsi 14 recovers above 30"
@@ -76,19 +77,22 @@ Prefer legs that share one timeframe.
 {plays}"""
 
 
-def render_system_prompt(members: dict | None = None) -> str:
+def render_system_prompt(members: dict | None = None, *,
+                         vocabulary: Vocabulary | None = None) -> str:
+    vocabulary = resolve_vocabulary(vocabulary)
     ind_lines = "\n".join(
-        f"- {name}({_bounds(sch)})" + (" [takes of=<expr>]" if name in g.SERIES_INDICATORS else "")
-        for name, sch in sorted(g.INDICATORS.items()))
+        f"- {name}({_bounds(term.args)})"
+        + (" [takes of=<expr>]" if term.kind != "bar" else "")
+        for name, term in sorted(vocabulary.indicators.items()))
     prim_lines = "\n".join(
-        f"- {name}({_bounds(p['args'])})"
-        + (" [session-scoped, no tf]" if name in prims.SESSION_SCOPED_PRIMS else "")
+        f"- {name}({_bounds(term.args)})"
+        + (" [session-scoped, no tf]" if term.session_scoped else "")
         # Refused outright on a 1d spec, so say it here rather than spending a
         # retry on the refusal. day_of_week carries only the first marker: it
         # takes no tf, but on daily bars it reads exactly right.
         + (" [needs an intraday spec timeframe]"
-           if name in prims.DRIVING_FRAME_INTRADAY_PRIMS else "")
-        for name, p in sorted(prims.PRIMITIVES.items()))
+           if term.driving_frame_intraday else "")
+        for name, term in sorted(vocabulary.primitives.items()))
     composite = _composite_section(members) if members else ""
     example = _COMPOSITE_EXAMPLE if members else ""
     return f"""You compile plain-English trading strategy descriptions into

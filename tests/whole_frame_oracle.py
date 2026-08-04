@@ -14,10 +14,7 @@ import pandas as pd
 
 from nakagai.data.schema import DEFAULT_TIMEFRAMES, TimeframeSet
 from nakagai.engine.context import closed_before
-from nakagai.strategies.rules.exprs import _BAR_FNS, _FRAME_FNS, _SERIES_FNS
-from nakagai.strategies.rules.primitives import ARG_DEFAULTS as PRIM_DEFAULTS
-from nakagai.strategies.rules.primitives import PRIMITIVES
-from nakagai.strategies.rules.spec import ARG_DEFAULTS, BAR_INDICATORS
+from nakagai.strategies.rules.vocabulary import Vocabulary, resolve_vocabulary
 
 _OPS = {"+": lambda a, b: a + b, "-": lambda a, b: a - b,
         "*": lambda a, b: a * b, "/": lambda a, b: a / b}
@@ -26,7 +23,7 @@ _CMP = {">": operator.gt, "<": operator.lt,
 
 
 def _condition_mask(cond: dict, bars: pd.DataFrame, frames: dict, tf: str,
-                    tfs: TimeframeSet) -> pd.Series:
+                    tfs: TimeframeSet, vocabulary: Vocabulary) -> pd.Series:
     """The condition row by row, every row under the same prefix rule.
 
     bars_since is the one primitive that wants a whole boolean series rather
@@ -43,15 +40,17 @@ def _condition_mask(cond: dict, bars: pd.DataFrame, frames: dict, tf: str,
         raise ValueError("the oracle evaluates bars_since on intraday frames only")
     delta = tfs.deltas[tf]
     cmp = _CMP[cond["op"]]
-    vals = [(prefix_value(cond["lhs"], frames, tf, ts + delta, tfs),
-             prefix_value(cond["rhs"], frames, tf, ts + delta, tfs))
+    vals = [(prefix_value(cond["lhs"], frames, tf, ts + delta, tfs, vocabulary),
+             prefix_value(cond["rhs"], frames, tf, ts + delta, tfs, vocabulary))
             for ts in bars.index]
     return pd.Series([bool(cmp(a, b)) for a, b in vals], index=bars.index)
 
 
 def prefix_value(node, frames: dict, eval_tf: str, now: pd.Timestamp,
-                 tfs: TimeframeSet = DEFAULT_TIMEFRAMES) -> float:
+                 tfs: TimeframeSet = DEFAULT_TIMEFRAMES,
+                 vocabulary: Vocabulary | None = None) -> float:
     """The node's value at `now` under the old prefix-and-iloc[-1] semantics."""
+    vocabulary = resolve_vocabulary(vocabulary)
     if isinstance(node, (int, float)):
         return float(node)
     cut = {tf: closed_before(f, tf, now, tfs) for tf, f in frames.items()}
@@ -62,7 +61,8 @@ def prefix_value(node, frames: dict, eval_tf: str, now: pd.Timestamp,
     if "src" in node:
         return float(bars[node["src"]].iloc[-1])
     if "op" in node:
-        vals = [prefix_value(a, frames, eval_tf, now, tfs) for a in node["args"]]
+        vals = [prefix_value(a, frames, eval_tf, now, tfs, vocabulary)
+                for a in node["args"]]
         if node["op"] == "abs":
             return abs(vals[0])
         if node["op"] in ("min", "max"):
@@ -73,24 +73,26 @@ def prefix_value(node, frames: dict, eval_tf: str, now: pd.Timestamp,
         return float(out)
     if "ind" in node:
         name = node["ind"]
-        a = {**ARG_DEFAULTS.get(name, {}),
+        term = vocabulary.indicators[name]
+        a = {**term.defaults,
              **{k: v for k, v in node.items() if k not in ("ind", "of", "tf")}}
-        if name in BAR_INDICATORS:
-            out = _BAR_FNS[name](bars, a)
+        if term.kind == "bar":
+            out = term.fn(bars, a)
         else:
             of = node.get("of", {"src": "close"})
             series = bars[of["src"]] if "src" in of else None
             if series is None:
                 raise ValueError("oracle supports only {'src': ...} in `of`")
-            fn = _SERIES_FNS.get(name)
-            out = fn(series, a["n"]) if fn else _FRAME_FNS[name](series, a)
+            out = term.fn(series, a)
         if isinstance(out, pd.DataFrame):
             out = out[a["field"]]
         return float(out.iloc[-1])
     name = node["prim"]
-    a = {**PRIM_DEFAULTS.get(name, {}),
+    term = vocabulary.primitives[name]
+    a = {**term.defaults,
          **{k: v for k, v in node.items() if k not in ("prim", "tf")}}
     if name == "bars_since":
-        a["eval_fn"] = lambda cond, b: _condition_mask(cond, b, frames, src_tf, tfs)
-    out = PRIMITIVES[name]["fn"](None, bars, **a)
+        a["eval_fn"] = lambda cond, b: _condition_mask(
+            cond, b, frames, src_tf, tfs, vocabulary)
+    out = term.fn(None, bars, **a)
     return float(out.iloc[-1]) if isinstance(out, pd.Series) else float(out)

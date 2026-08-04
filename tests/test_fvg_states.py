@@ -5,7 +5,8 @@ import pytest
 
 from nakagai.strategies.base import Direction
 from nakagai.strategies.ict.fvg import find_fvgs
-from nakagai.strategies.rules.primitives import PRIMITIVES, fvg_nearest
+from nakagai.strategies.rules.primitives import fvg_nearest
+from nakagai.strategies.rules.vocabulary import core_vocabulary
 
 
 def _bars(rows):
@@ -66,7 +67,7 @@ def test_min_size_atr_arg_filters():
 
 
 def test_registry_schema():
-    assert PRIMITIVES["fvg_nearest"]["args"] == {
+    assert core_vocabulary().primitives["fvg_nearest"].args == {
         "direction": ("long", "short"), "field": ("top", "bottom", "mid"),
         "state": ("open", "inverted"),
         "min_size_atr": (0.05, 2.0), "lookback": (10, 200)}

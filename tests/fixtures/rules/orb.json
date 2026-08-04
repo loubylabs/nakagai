@@ -1,0 +1,74 @@
+{
+  "version": 2,
+  "name": "orb",
+  "timeframe": "15m",
+  "long": {
+    "all": [
+      {
+        "lhs": {
+          "src": "close"
+        },
+        "op": "crosses_above",
+        "rhs": {
+          "prim": "opening_range_high",
+          "minutes": 30
+        }
+      },
+      {
+        "lhs": {
+          "prim": "minutes_into_session"
+        },
+        "op": "<",
+        "rhs": 270
+      }
+    ]
+  },
+  "short": {
+    "all": [
+      {
+        "lhs": {
+          "src": "close"
+        },
+        "op": "crosses_below",
+        "rhs": {
+          "prim": "opening_range_low",
+          "minutes": 30
+        }
+      },
+      {
+        "lhs": {
+          "prim": "minutes_into_session"
+        },
+        "op": "<",
+        "rhs": 270
+      }
+    ]
+  },
+  "risk": {
+    "stop": {
+      "kind": "atr",
+      "n": 14,
+      "mult": 2.0
+    },
+    "target": {
+      "kind": "rr",
+      "rr": 2.0
+    }
+  },
+  "exits": {
+    "exit": {
+      "any": [
+        {
+          "lhs": {
+            "prim": "minutes_into_session"
+          },
+          "op": ">=",
+          "rhs": 375
+        }
+      ]
+    },
+    "time_stop": {
+      "bars": 26
+    }
+  }
+}

@@ -1,0 +1,75 @@
+{
+  "version": 2,
+  "name": "bollinger_breakout",
+  "timeframe": "1d",
+  "long": {
+    "all": [
+      {
+        "lhs": {
+          "src": "close"
+        },
+        "op": "crosses_above",
+        "rhs": {
+          "ind": "bb",
+          "n": 20,
+          "k": 2.0,
+          "field": "upper"
+        }
+      },
+      {
+        "lhs": {
+          "src": "close"
+        },
+        "op": ">",
+        "rhs": {
+          "ind": "sma",
+          "n": 200
+        }
+      }
+    ]
+  },
+  "short": {
+    "all": [
+      {
+        "lhs": {
+          "src": "close"
+        },
+        "op": "crosses_below",
+        "rhs": {
+          "ind": "bb",
+          "n": 20,
+          "k": 2.0,
+          "field": "lower"
+        }
+      },
+      {
+        "lhs": {
+          "src": "close"
+        },
+        "op": "<",
+        "rhs": {
+          "ind": "sma",
+          "n": 200
+        }
+      }
+    ]
+  },
+  "exits": {
+    "trailing": {
+      "kind": "atr",
+      "n": 14,
+      "mult": 3.0
+    }
+  },
+  "risk": {
+    "stop": {
+      "kind": "atr",
+      "n": 14,
+      "mult": 2.0
+    },
+    "target": {
+      "kind": "rr",
+      "rr": 6.0
+    }
+  }
+}

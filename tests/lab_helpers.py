@@ -22,6 +22,7 @@ from nakagai.data.schema import validate_bars
 from nakagai.engine.windows import walk_forward
 from nakagai.strategies.catalog import load_catalog
 from nakagai.strategies.composite import CompositeStrategy
+from nakagai.strategies.rules import core_vocabulary
 from nakagai.strategies.rules.strategy import RuleStrategy
 
 SPECS_DIR = Path(__file__).resolve().parents[1] / "nakagai/strategies/catalog/specs"
@@ -109,7 +110,7 @@ def lab_registry():
     """A zero-arg registry callable of the shape run_one requires: the catalog
     plays, the raw `rules` escape hatch, and `composite` bound to those members
     so a composite block can resolve its legs."""
-    catalog = load_catalog(SPECS_DIR)
+    catalog = load_catalog(SPECS_DIR, core_vocabulary)
     members = {**catalog, "rules": RuleStrategy}
 
     def registry():

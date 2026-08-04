@@ -4,9 +4,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from nakagai.strategies.rules.primitives import (
-    ARG_DEFAULTS, PRIMITIVES, leg_retrace, order_block,
-)
+from nakagai.strategies.rules.primitives import leg_retrace, order_block
+from nakagai.strategies.rules.vocabulary import core_vocabulary
 
 
 def _bars(highs, lows, closes=None, opens=None):
@@ -60,9 +59,10 @@ def test_leg_retrace_never_repaints():
 
 
 def test_leg_retrace_registered():
-    assert PRIMITIVES["leg_retrace"]["args"] == {
+    term = core_vocabulary().primitives["leg_retrace"]
+    assert term.args == {
         "direction": ("long", "short"), "k": (1, 10)}
-    assert ARG_DEFAULTS["leg_retrace"] == {"direction": "long", "k": 3}
+    assert term.defaults == {"direction": "long", "k": 3}
 
 
 # 20 quiet bars keep ATR ~1; then one red candle (the order block), then a
@@ -129,8 +129,9 @@ def test_order_block_uses_nearer_opposing_candle():
 
 
 def test_order_block_registered():
-    assert PRIMITIVES["order_block"]["args"] == {
+    term = core_vocabulary().primitives["order_block"]
+    assert term.args == {
         "direction": ("long", "short"), "field": ("top", "bottom", "mid"),
         "body_atr": (0.5, 5.0), "lookback": (10, 200)}
-    assert ARG_DEFAULTS["order_block"] == {
+    assert term.defaults == {
         "direction": "long", "field": "top", "body_atr": 1.5, "lookback": 40}

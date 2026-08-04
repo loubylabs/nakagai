@@ -1,0 +1,66 @@
+{
+  "version": 2,
+  "name": "ob_bounce",
+  "timeframe": "15m",
+  "long": {
+    "all": [
+      {
+        "lhs": {
+          "src": "close"
+        },
+        "op": "crosses_above",
+        "rhs": {
+          "prim": "order_block",
+          "direction": "long",
+          "field": "top"
+        }
+      },
+      {
+        "lhs": {
+          "src": "close"
+        },
+        "op": ">",
+        "rhs": {
+          "ind": "sma",
+          "n": 100
+        }
+      }
+    ]
+  },
+  "short": {
+    "all": [
+      {
+        "lhs": {
+          "src": "close"
+        },
+        "op": "crosses_below",
+        "rhs": {
+          "prim": "order_block",
+          "direction": "short",
+          "field": "bottom"
+        }
+      },
+      {
+        "lhs": {
+          "src": "close"
+        },
+        "op": "<",
+        "rhs": {
+          "ind": "sma",
+          "n": 100
+        }
+      }
+    ]
+  },
+  "risk": {
+    "stop": {
+      "kind": "atr",
+      "n": 14,
+      "mult": 1.5
+    },
+    "target": {
+      "kind": "rr",
+      "rr": 1.5
+    }
+  }
+}

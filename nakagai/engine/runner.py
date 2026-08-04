@@ -17,6 +17,7 @@ from nakagai.engine.windows import Window
 from nakagai.icir import empty_ic_fields, window_icir
 from nakagai.strategies.base import Strategy
 from nakagai.strategies.rules.strategy import RuleStrategy
+from nakagai.strategies.rules.vocabulary import VocabularyFactory
 
 # A zero-arg callable returning {name: Strategy class}. Passed as a callable,
 # not a dict: catalog classes are created at runtime and cannot pickle by
@@ -60,7 +61,9 @@ def run_one(cache_root, strategy_name: str, params: dict, symbol: str,
             window: Window, equity0: float = 10_000.0, risk_pct: float = 0.01,
             config: str = "", batch_id: str = "",
             tfs: TimeframeSet = DEFAULT_TIMEFRAMES,
-            registry: Registry | None = None, icir: bool = True) -> dict:
+            registry: Registry | None = None,
+            vocabulary_factory: VocabularyFactory | None = None,
+            icir: bool = True) -> dict:
     # cache_root is a path string, or an already-loaded BarCache-shaped object.
     # Both pickle, so either crosses into a pool worker. run_grid and the
     # permutation harness hand over MemoryBars to skip repeated parquet reads;
@@ -70,7 +73,31 @@ def run_one(cache_root, strategy_name: str, params: dict, symbol: str,
         raise ValueError(
             "run_one requires a strategies registry: pass a zero-arg callable "
             "returning {name: Strategy class}")
-    strategy = registry()[strategy_name](params)
+    strategy_cls = registry()[strategy_name]
+    if issubclass(strategy_cls, RuleStrategy):
+        # A vocabulary, not a bound subclass. RuleStrategy.__init__ already
+        # takes one, and bound() mints a throwaway class per call, which across
+        # a grid is thousands of classes that differ in nothing but a factory
+        # reference. bound() belongs to load_catalog, where the class IS the
+        # product and is built once. Read the factory off the CLASS: a plain
+        # function stored as a class attribute is a descriptor, so instance
+        # access would bind the strategy as its first argument.
+        factory = vocabulary_factory or strategy_cls.VOCABULARY_FACTORY
+        strategy = strategy_cls(params, vocabulary=factory())
+    elif vocabulary_factory is not None:
+        # Refuse rather than drop it. A non-rule strategy has no vocabulary to
+        # inject into: Engine falls back to core_vocabulary() for it, by
+        # design, because its context may still host composite RuleSpec
+        # members. Accepting the factory and ignoring it would let a caller
+        # believe a whole grid ran on an injected vocabulary when part of it
+        # ran on core, which is exactly the silent no-op this seam exists to
+        # prevent. Split the grid instead.
+        raise ValueError(
+            f"vocabulary_factory was passed for strategy {strategy_name!r}, "
+            "which is not a RuleStrategy and cannot carry an injected "
+            "vocabulary; run non-rule strategies in a separate call")
+    else:
+        strategy = strategy_cls(params)
     # `params` are the caller's overrides on top of the spec's defaults, and
     # they are the SAME on every window: nothing is fit on window.train_start
     # .. window.train_end. This is fixed-parameter rolling out-of-sample
@@ -86,7 +113,8 @@ def run_one(cache_root, strategy_name: str, params: dict, symbol: str,
     ic_fields = empty_ic_fields()
     if icir and isinstance(strategy, RuleStrategy) and strategy.spec:
         try:
-            ic_fields = window_icir(strategy.spec, cache, symbol, window, tfs=tfs)
+            ic_fields = window_icir(strategy.spec, cache, symbol, window, tfs=tfs,
+                                    vocabulary=strategy.vocabulary)
         except Exception:
             # The lens is informational; it must never kill a production row.
             ic_fields = empty_ic_fields()
@@ -120,7 +148,8 @@ def run_grid(cache_root: str, strategy_names: list[str], symbols: list[str], win
              on_progress: Callable[[int, int], None] | None = None,
              config: str = "", batch_id: str = "",
              tfs: TimeframeSet = DEFAULT_TIMEFRAMES,
-             registry: Registry | None = None) -> pd.DataFrame:
+             registry: Registry | None = None,
+             vocabulary_factory: VocabularyFactory | None = None) -> pd.DataFrame:
     if registry is None:
         raise ValueError(
             "run_grid requires a strategies registry: pass a zero-arg callable "
@@ -134,7 +163,8 @@ def run_grid(cache_root: str, strategy_names: list[str], symbols: list[str], win
     disk = BarCache(Path(cache_root))
     caches = {sym: MemoryBars({(sym, tf): disk.load(sym, tf) for tf in tfs.all})
               for sym in symbols}
-    jobs = [(caches[sym], s, overrides.get(s, {}), sym, w, equity0, risk_pct, config, batch_id, tfs, registry)
+    jobs = [(caches[sym], s, overrides.get(s, {}), sym, w, equity0, risk_pct,
+             config, batch_id, tfs, registry, vocabulary_factory)
             for s in strategy_names for sym in symbols for w in windows]
 
     def _tick(done: int) -> None:
