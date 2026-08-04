@@ -42,9 +42,18 @@
 //     margin without an equivalent settlement ledger.
 //   - TradingView input changes alter the exported play without changing its
 //     embedded hash.
+//   - Nakagai's daily bars differ from any chart's by construction, measured
+//     over ten symbols and three years. They carry a dividend adjustment the
+//     intraday bars do not, which moved a high-yield name 8.4% at the far end
+//     of that window and a non-payer not at all, and their close is the
+//     consolidated official close including the auction rather than the last
+//     intraday print. A play on 1d therefore reads different numbers from the
+//     engine's, whatever the chart shows.
 //   - An exit rule or a time stop closes at the next bar's open on
 //     TradingView, where the engine closes it at the close of the bar that
-//     decided.
+//     decided. So a re-entry after one lands a bar later here: the engine can
+//     signal again on the very bar it closed, while this strategy is still
+//     holding the position when that bar's decision is read and skips it.
 //   - A session is the bar's New York calendar day in both engines, so a chart
 //     showing extended-hours bars opens its session on a different bar than
 //     the engine's own frame does.

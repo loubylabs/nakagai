@@ -60,6 +60,15 @@ FIDELITY = (
     "margin without an equivalent settlement ledger.",
     "TradingView input changes alter the exported play without changing its "
     "embedded hash.",
+    # Measured across the ten proving symbols rather than suspected. Two
+    # separate causes, both of which a chart reproduces neither of.
+    "Nakagai's daily bars differ from any chart's by construction, measured "
+    "over ten symbols and three years. They carry a dividend adjustment the "
+    "intraday bars do not, which moved a high-yield name 8.4% at the far end "
+    "of that window and a non-payer not at all, and their close is the "
+    "consolidated official close including the auction rather than the last "
+    "intraday print. A play on 1d therefore reads different numbers from the "
+    "engine's, whatever the chart shows.",
 )
 
 # One more, conditional on the spec, covering a difference a user would
@@ -68,7 +77,10 @@ FIDELITY = (
 # TradingView fills the market order they become at the next bar's open.
 NEXT_BAR_CLOSE = ("An exit rule or a time stop closes at the next bar's open "
                   "on TradingView, where the engine closes it at the close of "
-                  "the bar that decided.")
+                  "the bar that decided. So a re-entry after one lands a bar "
+                  "later here: the engine can signal again on the very bar it "
+                  "closed, while this strategy is still holding the position "
+                  "when that bar's decision is read and skips it.")
 
 _SYNTHETIC = ("a standard {label} candle chart. Heikin Ashi, Renko, Line "
               "Break, Kagi, Point and Figure, Range and every other "

@@ -560,3 +560,36 @@ def test_a_chart_composed_cross_reads_the_previous_hour_not_the_previous_bar():
         pine = np.array([bool(row["nk_long_decision"]) for row in rows])
         assert (pine != engine).any(), \
             f"{label} changed nothing this file can see, so it guards nothing"
+
+
+# The shape that lost its freshness gate: every condition on a foreign
+# timeframe, so the play requests nothing of its own, and a percent stop so no
+# ATR distance requests one either. Nothing shipped is shaped this way, but
+# lower_pine is a general compiler and "on 1h, when the daily close is above
+# the daily open, with a 2 percent stop" reaches it directly.
+ALL_FOREIGN = {
+    "long": {"all": [{"lhs": {"src": "close", "tf": "1d"}, "op": ">",
+                      "rhs": {"src": "open", "tf": "1d"}}]},
+    "short": {"all": [{"lhs": {"src": "close", "tf": "1d"}, "op": "<",
+                       "rhs": {"src": "open", "tf": "1d"}}]},
+}
+
+
+@pytest.mark.parametrize("side", ["long", "short"])
+def test_a_play_that_requests_nothing_of_its_own_frame_is_still_gated(side):
+    spec = _spec_with(ALL_FOREIGN)
+    rows = run_program({h.id: h.source for h in HELPERS.values()},
+                       _body(compile_pine(spec).indicator), CHART, CHART_STEP,
+                       REQUESTED)
+    pine = np.array([bool(row[f"nk_{side}_decision"]) for row in rows])
+    engine = _engine_decisions(spec, side)
+    wrong = np.flatnonzero(pine != engine)
+    assert not len(wrong), (
+        f"all-foreign {side}: rows {wrong[:8].tolist()} at "
+        f"{[str(t) for t in CHART.index[wrong[:8]]]}, Pine "
+        f"{pine[wrong[:8]].tolist()} against engine {engine[wrong[:8]].tolist()}")
+    # Ungated, this fired on all four 15m bars of every hour the daily
+    # condition held. The engine fires once per hour, so the count is the
+    # defect's own signature and not only the bar set.
+    assert 2 <= int(engine.sum()) <= len(FRAMES["1h"])
+    assert int(pine.sum()) == int(engine.sum())

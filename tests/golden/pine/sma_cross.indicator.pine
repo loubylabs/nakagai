@@ -55,6 +55,13 @@
 //     margin without an equivalent settlement ledger.
 //   - TradingView input changes alter the exported play without changing its
 //     embedded hash.
+//   - Nakagai's daily bars differ from any chart's by construction, measured
+//     over ten symbols and three years. They carry a dividend adjustment the
+//     intraday bars do not, which moved a high-yield name 8.4% at the far end
+//     of that window and a non-payer not at all, and their close is the
+//     consolidated official close including the auction rather than the last
+//     intraday print. A play on 1d therefore reads different numbers from the
+//     engine's, whatever the chart shows.
 //
 // Editing any input below creates a TradingView-local variation: its results
 // no longer represent the spec hash above, and Nakagai cannot read that

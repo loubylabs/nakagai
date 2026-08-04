@@ -20,6 +20,9 @@ import pytest
 from nakagai.strategies.rules import PineCompileError, compile_pine, spec_hash
 from nakagai.strategies.rules.pine import render
 from nakagai.strategies.rules.spec import DRIVING, TIMEFRAMES
+# The golden set is the house-style guard's subject too, read from one place so
+# a play added there cannot quietly escape it. discount_pullback did.
+from tests.test_pine_golden import PLAYS as GOLDEN_PLAYS
 
 
 def _spec(**extra) -> dict:
@@ -49,8 +52,14 @@ def _header(source: str) -> str:
 
 
 def _shared(source: str) -> str:
-    """The part of an artifact that both of them are supposed to be one copy of."""
-    start = source.index("// --- Inputs ---")
+    """The part of an artifact that both of them are supposed to be one copy of.
+
+    From the chart contract rather than from the inputs. The guards cannot
+    drift today, since both artifacts embed one _guards(program) call, but a
+    slice that started below them let the test's name claim more than it
+    checked.
+    """
+    start = source.index("// --- Chart contract ---")
     end = source.index("// --- ", source.index("nk_short_decision ="))
     return source[start:end]
 
@@ -210,10 +219,15 @@ def test_the_header_carries_the_assumptions_and_warnings_the_program_holds():
             assert text in header
 
 
-def test_the_bundle_always_carries_the_five_fidelity_warnings():
+def test_the_bundle_always_carries_every_fidelity_warning():
     bundle = compile_pine(_spec())
     assert bundle.warnings == render.FIDELITY
-    assert len(render.FIDELITY) == 5
+    assert len(render.FIDELITY) == 6
+    # The sixth is a measured divergence rather than a caution, so it names
+    # both of its causes. A daily play reads different numbers from the engine
+    # whatever the chart shows, and a user has to be told which numbers.
+    assert "dividend adjustment the intraday bars do not" in render.FIDELITY[5]
+    assert "consolidated official close including the auction" in render.FIDELITY[5]
     for source in (bundle.indicator, bundle.strategy):
         header = _header(source)
         assert "is never Nakagai evidence" in header
@@ -511,8 +525,7 @@ def test_an_exit_rule_and_a_time_stop_pre_empt_the_ratchets():
 # -- house style ----------------------------------------------------------
 
 
-@pytest.mark.parametrize("name", ["sma_cross", "orb", "ifvg_reversal",
-                                  "ob_bounce", "bollinger_breakout"])
+@pytest.mark.parametrize("name", GOLDEN_PLAYS)
 def test_no_dash_lookalike_reaches_an_artifact(name, load_rule_spec):
     # The middle dot in a label is a separator and stays; an em dash or an en
     # dash is house style, and a golden is the one place it would ship.

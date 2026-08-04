@@ -52,6 +52,13 @@
 //     margin without an equivalent settlement ledger.
 //   - TradingView input changes alter the exported play without changing its
 //     embedded hash.
+//   - Nakagai's daily bars differ from any chart's by construction, measured
+//     over ten symbols and three years. They carry a dividend adjustment the
+//     intraday bars do not, which moved a high-yield name 8.4% at the far end
+//     of that window and a non-payer not at all, and their close is the
+//     consolidated official close including the auction rather than the last
+//     intraday print. A play on 1d therefore reads different numbers from the
+//     engine's, whatever the chart shows.
 //
 // Editing any input below creates a TradingView-local variation: its results
 // no longer represent the spec hash above, and Nakagai cannot read that
@@ -158,10 +165,6 @@ nk_fvg_nearest(min_size_atr, lookback, want_long, want_inverted) =>
     [best_top, best_bottom]
 
 // --- Calculations ---
-nk_swing_low_1 = nk_swing_low(nk_long_all_0_lhs_cond_rhs_swing_low_k)
-nk_bars_since_1 = nk_bars_since(low < nk_swing_low_1)
-[nk_fvg_nearest_1_top, nk_fvg_nearest_1_bottom] = nk_fvg_nearest(nk_long_all_1_rhs_fvg_nearest_min_size_atr, nk_long_all_1_rhs_fvg_nearest_lookback, false, true)
-nk_fvg_nearest_1_mid = (nk_fvg_nearest_1_top + nk_fvg_nearest_1_bottom) / 2
 nk_visible_60 = time_close("60") == time_close
 
 nk_htf_1() =>
@@ -174,6 +177,10 @@ var float nk_sma_2 = na
 if nk_visible_60
     nk_sma_2 := nk_sma_2_raw
 
+nk_swing_low_1 = nk_swing_low(nk_long_all_0_lhs_cond_rhs_swing_low_k)
+nk_bars_since_1 = nk_bars_since(low < nk_swing_low_1)
+[nk_fvg_nearest_1_top, nk_fvg_nearest_1_bottom] = nk_fvg_nearest(nk_long_all_1_rhs_fvg_nearest_min_size_atr, nk_long_all_1_rhs_fvg_nearest_lookback, false, true)
+nk_fvg_nearest_1_mid = (nk_fvg_nearest_1_top + nk_fvg_nearest_1_bottom) / 2
 nk_long_entry = (nk_bars_since_1 <= nk_long_all_0_rhs and (close[1] <= nk_fvg_nearest_1_top and close > nk_fvg_nearest_1_top) and close > nk_sma_2)
 nk_swing_high_1 = nk_swing_high(nk_short_all_0_lhs_cond_rhs_swing_high_k)
 nk_bars_since_2 = nk_bars_since(high > nk_swing_high_1)

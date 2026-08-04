@@ -323,7 +323,7 @@ def test_a_foreign_multi_field_indicator_is_requested_once_as_a_tuple():
     requests = [c for c in program.calculations if "request.security(" in c]
     assert len(requests) == 1
     assert requests[0] == (
-        "[nk_macd_2_raw_macd, nk_macd_2_raw_signal, nk_macd_2_raw_hist] = "
+        "[nk_macd_2_macd_raw, nk_macd_2_signal_raw, nk_macd_2_hist_raw] = "
         'request.security(syminfo.tickerid, "240", nk_htf_1(), '
         "lookahead=barmerge.lookahead_on, gaps=barmerge.gaps_off)")
     assert ("nk_htf_1() =>\n"
@@ -333,17 +333,19 @@ def test_a_foreign_multi_field_indicator_is_requested_once_as_a_tuple():
             in program.calculations)
     # One gate for the whole tuple, and every member latched under it.
     assert ("if nk_visible_240\n"
-            "    nk_macd_2_macd := nk_macd_2_raw_macd\n"
-            "    nk_macd_2_signal := nk_macd_2_raw_signal\n"
-            "    nk_macd_2_hist := nk_macd_2_raw_hist") in program.calculations
+            "    nk_macd_2_macd := nk_macd_2_macd_raw\n"
+            "    nk_macd_2_signal := nk_macd_2_signal_raw\n"
+            "    nk_macd_2_hist := nk_macd_2_hist_raw") in program.calculations
     assert ("nk_long_entry = (ta.crossover(nk_macd_2_macd, nk_macd_2_signal))"
             in program.calculations)
 
 
-def test_two_lifts_of_the_same_timeframe_keep_their_own_locals():
-    # Each request wraps its own function, so a calculation memoized inside one
-    # of them must never be handed to the next: the identifier is local to the
-    # function that declared it.
+def test_two_nodes_of_one_timeframe_share_its_single_request():
+    # One request per TIMEFRAME, not one per node. Both operands read the same
+    # ema on 1h, and they now sit in one function, so it is computed once and
+    # the script spends one of TradingView's request budget instead of two.
+    # A function per node made that sharing illegal, because the identifier was
+    # local to whichever function declared it.
     spec = {"version": 2, "name": "probe", "timeframe": "15m",
             "long": {"all": [
                 {"lhs": {"ind": "sma", "n": 10, "tf": "1h",
@@ -354,13 +356,16 @@ def test_two_lifts_of_the_same_timeframe_keep_their_own_locals():
             ]}}
     program = lower_pine(spec)
     bodies = [c for c in program.calculations if c.startswith("nk_htf_")]
-    assert len(bodies) == 2
-    declared = [{line.split(" = ")[0].strip() for line in body.splitlines()
-                 if " = " in line} for body in bodies]
-    assert not declared[0] & declared[1]
-    for body, names in zip(bodies, declared):
-        assert any(name.startswith("nk_ema_") for name in names)
-        assert body.splitlines()[-1].strip().removesuffix("[1]") in names
+    assert len(bodies) == 1
+    assert len([c for c in program.calculations
+                if "request.security(" in c]) == 1
+    lines = [line.strip() for line in bodies[0].splitlines()]
+    assert len([line for line in lines if "ta.ema(" in line]) == 1
+    assert len([line for line in lines if "ta.sma(" in line]) == 2
+    # The shared ema is what both moving averages are taken OF, so the sharing
+    # is the calculation rather than a coincidence of naming.
+    ema, = [line.split(" = ")[0] for line in lines if "ta.ema(" in line]
+    assert all(f"ta.sma({ema}," in line for line in lines if "ta.sma(" in line)
 
 
 def test_identical_nodes_on_both_sides_share_one_calculation(load_spec):
@@ -546,6 +551,28 @@ def test_only_a_play_off_the_driving_frame_carries_a_freshness_gate(timeframe,
     if gate:
         assert any(line.startswith(f"{gate} = ")
                    for line in _lines(program)), _lines(program)
+
+
+def test_the_gate_does_not_depend_on_what_the_risk_block_happens_to_need():
+    """The regression for a real defect, and the shape that reached it.
+
+    A play off the driving frame whose conditions are ALL foreign requests
+    nothing of its own timeframe, and with a percent stop there is no ATR
+    distance to request either. The freshness gate used to be resolved inside
+    that request's emission, behind its early return, so the whole program came
+    out ungated: every decision fired on all four 15m bars of an hour where the
+    engine fires on one. Changing only the risk block to atr brought the gate
+    back, which is not a property anything should rest on.
+    """
+    foreign = {"all": [{"lhs": {"src": "close", "tf": "1d"}, "op": ">",
+                        "rhs": {"src": "open", "tf": "1d"}}]}
+    for stop in ({"kind": "percent", "pct": 2.0}, {"kind": "atr"}):
+        program = lower_pine({
+            "version": 2, "name": "probe", "timeframe": "1h", "long": foreign,
+            "risk": {"stop": stop, "target": {"kind": "rr", "rr": 2.0}}})
+        assert program.decision_gate == "nk_visible_60", stop
+        assert 'nk_visible_60 = time_close("60") == time_close' \
+            in program.calculations
 
 
 def test_a_session_aligned_play_separates_visibility_from_freshness():

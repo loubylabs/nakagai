@@ -57,6 +57,13 @@
 //     margin without an equivalent settlement ledger.
 //   - TradingView input changes alter the exported play without changing its
 //     embedded hash.
+//   - Nakagai's daily bars differ from any chart's by construction, measured
+//     over ten symbols and three years. They carry a dividend adjustment the
+//     intraday bars do not, which moved a high-yield name 8.4% at the far end
+//     of that window and a non-payer not at all, and their close is the
+//     consolidated official close including the auction rather than the last
+//     intraday print. A play on 1d therefore reads different numbers from the
+//     engine's, whatever the chart shows.
 //
 // Editing any input below creates a TradingView-local variation: its results
 // no longer represent the spec hash above, and Nakagai cannot read that
@@ -124,18 +131,6 @@ nk_new_session() =>
     na(key[1]) or key != key[1]
 
 // --- Calculations ---
-nk_visible_d = nk_new_session()
-
-nk_htf_1() =>
-    nk_sma_1 = ta.sma(close, nk_long_all_0_rhs_sma_n)
-    nk_sma_1[1]
-
-nk_sma_2_raw = request.security(syminfo.tickerid, "D", nk_htf_1(), lookahead=barmerge.lookahead_on, gaps=barmerge.gaps_off)
-var float nk_sma_2 = na
-
-if nk_visible_d
-    nk_sma_2 := nk_sma_2_raw
-
 nk_visible_60 = time_close("60") == time_close
 
 nk_frame_1() =>
@@ -164,6 +159,18 @@ if nk_visible_60
     nk_short_all_1 := nk_short_all_1_raw
     nk_short_all_2 := nk_short_all_2_raw
     nk_risk_stop_distance := nk_risk_stop_distance_raw
+
+nk_visible_d = nk_new_session()
+
+nk_htf_1() =>
+    nk_sma_1 = ta.sma(close, nk_long_all_0_rhs_sma_n)
+    nk_sma_1[1]
+
+nk_sma_2_raw = request.security(syminfo.tickerid, "D", nk_htf_1(), lookahead=barmerge.lookahead_on, gaps=barmerge.gaps_off)
+var float nk_sma_2 = na
+
+if nk_visible_d
+    nk_sma_2 := nk_sma_2_raw
 
 nk_long_entry = (nk_close_1 > nk_sma_2 and nk_long_all_1 and nk_long_all_2)
 nk_short_entry = (nk_close_1 < nk_sma_2 and nk_short_all_1 and nk_short_all_2)

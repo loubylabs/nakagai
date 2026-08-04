@@ -1,6 +1,6 @@
 """The exact source a TradingView user pastes, frozen byte for byte.
 
-Five plays, chosen so that between them they reach every shape of the language
+Six plays, chosen so that between them they reach every shape of the language
 that changes what the renderer writes:
 
     sma_cross           ordinary indicators, crosses, and a chart that is not
