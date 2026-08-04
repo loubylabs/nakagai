@@ -313,45 +313,65 @@ def _probe_spec(timeframe: str) -> dict:
                      "target": {"kind": "rr", "rr": 2.0}}}
 
 
-def _chart_frame() -> pd.DataFrame:
-    """Six New York sessions of 15m bars, 09:00 through 15:45 Eastern.
+def _stamps(days: int) -> pd.DatetimeIndex:
+    """`days` New York sessions of 15m bars, 09:00 through 15:45 Eastern.
 
     Whole hours on purpose: the 1h bars derived from these start on the hour,
     so the last 15m bar of each hour is the one whose close IS the 1h close,
     which is the bar the whole defect turned on.
     """
-    stamps = []
+    out = []
     for day in ("2026-01-05", "2026-01-06", "2026-01-07", "2026-01-08",
-                "2026-01-09", "2026-01-12"):
+                "2026-01-09", "2026-01-12", "2026-01-13", "2026-01-14")[:days]:
         start = pd.Timestamp(f"{day} 09:00", tz="America/New_York")
-        stamps.extend(start + CHART_STEP * k for k in range(28))
-    index = pd.DatetimeIndex(stamps).tz_convert("UTC")
+        out.extend(start + CHART_STEP * k for k in range(28))
+    return pd.DatetimeIndex(out).tz_convert("UTC")
+
+
+def _market(index: pd.DatetimeIndex, close: np.ndarray, step: np.ndarray):
+    """One chart frame and the higher-timeframe frames a request of it reads."""
+    chart = pd.DataFrame(
+        {"open": close - step, "high": np.maximum(close, close - step) + 0.2,
+         "low": np.minimum(close, close - step) - 0.2, "close": close,
+         "volume": np.full(len(index), 1000.0)}, index=index)
+    agg = {"open": "first", "high": "max", "low": "min", "close": "last",
+           "volume": "sum"}
+    frames = {"15m": chart,
+              **{tf: chart.resample(rule).agg(agg).dropna()
+                 for tf, rule in (("1h", "1h"), ("4h", "4h"), ("1d", "1D"))}}
+    requested = {"60": (frames["1h"], pd.Timedelta(hours=1)),
+                 "D": (frames["1d"], pd.Timedelta(days=1))}
+    return chart, frames, requested
+
+
+def _trending():
+    index = _stamps(6)
     rng = np.random.default_rng(11)
-    steps = rng.normal(0, 0.5, len(index))
+    step = rng.normal(0, 0.5, len(index))
     # A drift that alternates by SESSION, big enough to decide a day's
     # direction and small enough to leave the hours inside it mixed. Without it
     # a daily probe can run six sessions the same way and compare a short side
     # that never fired, which would agree with anything.
-    steps += np.where((np.arange(len(index)) // 28) % 2 == 0, 0.25, -0.25)
-    close = 100 + np.cumsum(steps)
-    return pd.DataFrame(
-        {"open": close - steps, "high": np.maximum(close, close - steps) + 0.2,
-         "low": np.minimum(close, close - steps) - 0.2, "close": close,
-         "volume": np.full(len(index), 1000.0)}, index=index)
+    step += np.where((np.arange(len(index)) // 28) % 2 == 0, 0.25, -0.25)
+    return _market(index, 100 + np.cumsum(step), step)
 
 
-def _resample(bars: pd.DataFrame, rule: str) -> pd.DataFrame:
-    out = bars.resample(rule).agg({"open": "first", "high": "max", "low": "min",
-                                   "close": "last", "volume": "sum"})
-    return out.dropna()
+def _oscillating():
+    """A price that keeps recrossing the previous day's close.
+
+    A cross against a foreign operand is the sparsest thing this file measures:
+    the reference moves once a day, so a trending walk supplies two crossings in
+    six sessions and a mutation can miss both and look harmless. Noise around a
+    level supplies a dozen, which is what makes the net able to fail.
+    """
+    index = _stamps(6)
+    rng = np.random.default_rng(5)
+    close = 100 + rng.normal(0, 1.2, len(index))
+    return _market(index, close, rng.normal(0, 0.4, len(index)))
 
 
-CHART = _chart_frame()
-FRAMES = {"15m": CHART, "1h": _resample(CHART, "1h"),
-          "4h": _resample(CHART, "4h"), "1d": _resample(CHART, "1D")}
-# What a request of each timeframe reads, keyed the way Pine spells it.
-REQUESTED = {"60": (FRAMES["1h"], pd.Timedelta(hours=1)),
-             "D": (FRAMES["1d"], pd.Timedelta(days=1))}
+CHART, FRAMES, REQUESTED = _trending()
+CROSS_CHART, CROSS_FRAMES, CROSS_REQUESTED = _oscillating()
 
 
 def _body(source: str) -> list[str]:
@@ -364,20 +384,22 @@ def _body(source: str) -> list[str]:
     return source[start:source.index("// --- Markers ---")].splitlines()
 
 
-def _engine_decisions(spec: dict, side: str) -> np.ndarray:
+def _engine_decisions(spec: dict, side: str, chart=None, frames=None) -> np.ndarray:
     """The driving bars RuleStrategy would signal `side` on, from the engine."""
+    chart = CHART if chart is None else chart
+    frames = FRAMES if frames is None else frames
     timeframe = spec["timeframe"]
-    lifted = FrameEval(FRAMES, DEFAULT_TIMEFRAMES).driving_group(
+    lifted = FrameEval(frames, DEFAULT_TIMEFRAMES).driving_group(
         spec[side], timeframe).to_numpy()
-    out = np.zeros(len(CHART), dtype=bool)
-    for i in range(len(CHART)):
-        now = CHART.index[i] + CHART_STEP
-        visible = FRAMES[timeframe][FRAMES[timeframe].index
+    out = np.zeros(len(chart), dtype=bool)
+    for i in range(len(chart)):
+        now = chart.index[i] + CHART_STEP
+        visible = frames[timeframe][frames[timeframe].index
                                     + DEFAULT_TIMEFRAMES.deltas.get(
                                         timeframe, pd.Timedelta(0)) <= now]
         ctx = SimpleNamespace(bars={timeframe: visible}, now=now,
                               tfs=DEFAULT_TIMEFRAMES,
-                              driving_bars=CHART.iloc[:i + 1])
+                              driving_bars=chart.iloc[:i + 1])
         fresh = (first_bar_of_session(ctx)
                  if timeframe in DEFAULT_TIMEFRAMES.session_aligned
                  else fresh_bar(ctx, timeframe))
@@ -442,6 +464,99 @@ def test_the_comparison_notices_the_defect_it_was_written_for():
         mutated = [line.replace(before, after) for line in lines]
         assert mutated != lines, f"{label} no longer describes the artifact"
         rows = run_program(sources, mutated, CHART, CHART_STEP, REQUESTED)
+        pine = np.array([bool(row["nk_long_decision"]) for row in rows])
+        assert (pine != engine).any(), \
+            f"{label} changed nothing this file can see, so it guards nothing"
+
+
+# -- a play that reads two timeframes at once -------------------------------
+#
+# The shape of discount_pullback and mfi_bounce: a 1h play with a 1d operand.
+# The engine composes 1d -> 1h -> 15m, and the artifact requests the 1d
+# straight onto the chart, so the two routes have to agree at every bar the
+# gate admits. They do because a gated chart bar closes at the same instant its
+# 1h bar does, and both routes ask which daily bar had closed by then. That is
+# an argument; these tests are the measurement.
+
+MIXED_GROUPS = {
+    "long": {"all": [{"lhs": {"src": "close"}, "op": ">",
+                      "rhs": {"src": "open", "tf": "1d"}},
+                     {"lhs": {"src": "close"}, "op": ">", "rhs": {"src": "open"}}]},
+    "short": {"all": [{"lhs": {"src": "close"}, "op": "<",
+                       "rhs": {"src": "open", "tf": "1d"}},
+                      {"lhs": {"src": "close"}, "op": "<", "rhs": {"src": "open"}}]},
+}
+# The same, with the foreign operand INSIDE a cross, which is the case that
+# needs the gate-cadence snapshots. No catalog play is shaped this way yet, so
+# it is pinned here rather than left to be discovered.
+CROSS_GROUPS = {
+    "long": {"all": [{"lhs": {"src": "close"}, "op": "crosses_above",
+                      "rhs": {"src": "close", "tf": "1d"}}]},
+    "short": {"all": [{"lhs": {"src": "close"}, "op": "crosses_below",
+                       "rhs": {"src": "close", "tf": "1d"}}]},
+}
+
+
+def _spec_with(groups: dict) -> dict:
+    return {"version": 2, "name": "probe", "timeframe": "1h", **groups,
+            "risk": {"stop": {"kind": "percent", "pct": 2.0},
+                     "target": {"kind": "rr", "rr": 2.0}}}
+
+
+@pytest.mark.parametrize("groups, market", [(MIXED_GROUPS, "trending"),
+                                            (CROSS_GROUPS, "oscillating")],
+                         ids=["a plain comparison", "a cross"])
+@pytest.mark.parametrize("side", ["long", "short"])
+def test_a_foreign_operand_decides_where_the_engine_decides(groups, market,
+                                                            side):
+    spec = _spec_with(groups)
+    chart, frames, requested = ((CHART, FRAMES, REQUESTED)
+                                if market == "trending" else
+                                (CROSS_CHART, CROSS_FRAMES, CROSS_REQUESTED))
+    rows = run_program({h.id: h.source for h in HELPERS.values()},
+                       _body(compile_pine(spec).indicator), chart, CHART_STEP,
+                       requested)
+    pine = np.array([bool(row[f"nk_{side}_decision"]) for row in rows])
+    engine = _engine_decisions(spec, side, chart, frames)
+    wrong = np.flatnonzero(pine != engine)
+    assert not len(wrong), (
+        f"{market} {side}: rows {wrong[:8].tolist()} at "
+        f"{[str(t) for t in chart.index[wrong[:8]]]}, Pine "
+        f"{pine[wrong[:8]].tolist()} against engine {engine[wrong[:8]].tolist()}")
+    assert 2 <= int(engine.sum()) <= len(frames["1h"])
+
+
+def test_a_chart_composed_cross_reads_the_previous_hour_not_the_previous_bar():
+    # The net for the snapshots. Reading the chart's own history where the
+    # engine reads the previous SPEC bar is the whole family of bug this file
+    # exists to catch, so both wrong readings are applied and both must show.
+    spec = _spec_with(CROSS_GROUPS)
+    lines = _body(compile_pine(spec).indicator)
+    engine = _engine_decisions(spec, "long", CROSS_CHART, CROSS_FRAMES)
+    sources = {h.id: h.source for h in HELPERS.values()}
+    assert any("_prior" in line for line in lines), \
+        "the artifact no longer takes gate-cadence snapshots"
+    for label, edits in (
+            ("the cross compares chart bars rather than the play's own",
+             [("nk_close_1_prior <=", "close[1] <="),
+              ("nk_close_1_gated >", "close >")]),
+            # The two snapshot lines swapped, so the pair samples this bar
+            # twice. Ordering is the whole content of a carry-forward, and no
+            # substring assertion anywhere can see it.
+            ("the snapshot is taken after the latch it samples",
+             [("    nk_close_1_prior := nk_close_1_gated", "    SWAP"),
+              ("    nk_close_1_gated := nk_close_1",
+               "    nk_close_1_prior := nk_close_1_gated"),
+              ("    SWAP", "    nk_close_1_gated := nk_close_1")]),
+            ("previous means the current value",
+             [("nk_close_1_prior", "nk_close_1_gated"),
+              ("nk_close_2_prior", "nk_close_2_gated")])):
+        mutated = list(lines)
+        for before, after in edits:
+            mutated = [line.replace(before, after) for line in mutated]
+        assert mutated != lines, f"{label} no longer describes the artifact"
+        rows = run_program(sources, mutated, CROSS_CHART, CHART_STEP,
+                           CROSS_REQUESTED)
         pine = np.array([bool(row["nk_long_decision"]) for row in rows])
         assert (pine != engine).any(), \
             f"{label} changed nothing this file can see, so it guards nothing"

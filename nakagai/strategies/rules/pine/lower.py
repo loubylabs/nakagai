@@ -97,6 +97,10 @@ def _tuple(names: list[str]) -> str:
     return names[0] if len(names) == 1 else f"[{', '.join(names)}]"
 
 
+def _is_group(node) -> bool:
+    return isinstance(node, dict) and ("all" in node or "any" in node)
+
+
 def _sanitize(part: str) -> str:
     return "".join(c if c.isalnum() and c.isascii() else "_"
                    for c in str(part)).lower()
@@ -518,14 +522,24 @@ class SpecLowerer:
         self.lifted: set[str] = set()
         self.gates: dict[str, str] = {}
         self.decision_gate = ""
-        self._frame_values: list[tuple[RulePath, str, str]] = []
+        # Three sinks, because a play that reads more than one timeframe has to
+        # emit in dependency order rather than in walk order: what the play's
+        # own frame computes, what the chart composes out of the latches
+        # afterwards, and the gate-cadence snapshots that sit between them.
+        self._frame_values: list[tuple[RulePath, str, str, str]] = []
+        self._frame_body: list[str] = []
+        self._chart_after: list[str] = []
+        self._samples: list[tuple[str, str]] = []
 
     def run(self) -> PineProgram:
-        with self._frame_scope():
-            long_decision = self._side("long")
-            short_decision = self._side("short")
-            exits = self._exits()
-            risk = self._risk()
+        long_decision = self._side("long")
+        short_decision = self._side("short")
+        exits = self._exits()
+        risk = self._risk()
+        self._emit_frame()
+        self._emit_samples()
+        for line in self._chart_after:
+            self.ctx.statement(line)
         # Resolved before the assumptions, and that order is load-bearing:
         # helper_sources settles the transitive closure, and _assumptions asks
         # what the program reaches.
@@ -549,46 +563,54 @@ class SpecLowerer:
         )
 
     # -- the play's own timeframe ---------------------------------------
-    @contextmanager
-    def _frame_scope(self):
-        """Collect everything the play reads off its own timeframe, then lift it.
-
-        ONE request for the whole play, not one per value. Every condition
-        group and every ATR distance the engine computes on the spec's
-        timeframe is a member of a single tuple, so the nodes underneath them
-        are shared the way `ONE NODE, ONE CALCULATION` promises and the gate is
-        checked once. A request per value would give sma_cross's two sides a
-        moving average each.
-
-        A 15m play needs none of it: the chart IS its timeframe, so this is a
-        plain pass-through and the artifact carries no request at all.
-        """
-        if self.frame == self.chart:
-            yield
-            return
-        with self.ctx.block(scoped=False) as body:
-            yield
-        self._emit_frame(body)
-
     def _frame_value(self, path: RulePath, name: str, kind: str,
                      produce) -> str:
         """One value the engine computes on the play's OWN timeframe.
+
+        ONE request for the whole play, not one per value: every caller here
+        adds a member to a single tuple, so the nodes underneath them are
+        shared the way `ONE NODE, ONE CALCULATION` promises and the gate is
+        checked once. A request per value would give sma_cross's two sides a
+        moving average each.
 
         The identifier handed back names the LATCH, not the raw read, so every
         caller downstream is reading the last closed spec-timeframe value
         whatever bar it reads on. That is `_align`, and it is why no consumer
         of this needs to know whether a request happened at all.
+
+        A 15m play needs none of it: the chart IS its timeframe, so this is a
+        plain calculation and the artifact carries no request at all.
         """
         self.ctx.claim(name, path)
-        text = produce(self.frame)
         if self.frame == self.chart:
-            self.ctx.statement(f"{name} = {text}")
-        else:
-            self.ctx.statement(f"{kind} {name}_native = {text}")
-            self._frame_values.append((path, name, kind))
+            self.ctx.statement(f"{name} = {produce(self.frame)}")
+            return name
+        with self.ctx.block(scoped=False) as body:
+            text = produce(self.frame)
+        self._frame_body += [*body, f"{kind} {name}_native = {text}"]
+        self._frame_values.append((path, name, kind, f"{name}_native"))
         return name
 
-    def _emit_frame(self, body: list[str]) -> None:
+    def _frame_fields(self, path: RulePath, stem: str, produce) -> dict[str, str]:
+        """One NODE the play reads off its own timeframe, as request members.
+
+        The path a foreign-timeframe operand takes when the timeframe it names
+        is the play's own. It joins the request the play already makes instead
+        of opening a second one of the same timeframe, which would compute the
+        same series twice and read it once.
+        """
+        with self.ctx.block(scoped=False) as body:
+            inner = produce(self.frame)
+        self._frame_body += body
+        slot = self.ctx.slot(stem, path)
+        out = {}
+        for field, expr in inner.items():
+            name = self.ctx.claim(f"{slot}_{field}" if field else slot, path)
+            self._frame_values.append((path, name, "float", expr))
+            out[field] = name
+        return out
+
+    def _emit_frame(self) -> None:
         """The play's own timeframe: requested once, gated once, latched once."""
         if not self._frame_values:
             return
@@ -611,19 +633,40 @@ class SpecLowerer:
         # it is conditioned on and a reader meets it before the latch it guards.
         gate = self._gate(tf)
         self.decision_gate = self._fresh_gate()
-        returned = [f"{name}_native{offset}" for _p, name, _k in self._frame_values]
+        returned = [f"{member}{offset}"
+                    for _p, _n, _k, member in self._frame_values]
         function = self.ctx.slot("nk_frame", path)
-        lines = "\n".join(f"    {line}" for line in [*body, _tuple(returned)])
+        lines = "\n".join(f"    {line}"
+                          for line in [*self._frame_body, _tuple(returned)])
         self.ctx.statement(f"{function}() =>\n{lines}")
         raws = [self.ctx.claim(f"{name}_raw", p)
-                for p, name, _k in self._frame_values]
+                for p, name, _k, _m in self._frame_values]
         self.ctx.statement(f"{_tuple(raws)} = " + REQUEST.format(
             tf=PINE_TIMEFRAMES[tf], call=function))
-        for _p, name, kind in self._frame_values:
+        for _p, name, kind, _m in self._frame_values:
             self.ctx.statement(f"var {kind} {name} = {SEED[kind]}")
         self.ctx.statement(f"if {gate}\n" + "\n".join(
-            f"    {name} := {name}_raw" for _p, name, _k in self._frame_values))
+            f"    {name} := {name}_raw"
+            for _p, name, _k, _m in self._frame_values))
         self.lifted.add(tf)
+
+    def _emit_samples(self) -> None:
+        """The play's operands as its OWN timeframe's bars saw them, and before.
+
+        Only a cross composed on the chart needs these. frame_eval._cross_prev
+        shifts an operand by one row of the SPEC's index, so "previous" is the
+        previous spec-timeframe bar and never the previous chart bar. A snapshot
+        pair advanced on the visibility gate is exactly that shift, and it sits
+        after every latch has been updated so the pair samples the same instant.
+        """
+        if not self._samples:
+            return
+        for name, kind in self._samples:
+            self.ctx.statement(f"var {kind} {name}_gated = {SEED[kind]}")
+            self.ctx.statement(f"var {kind} {name}_prior = {SEED[kind]}")
+        self.ctx.statement(f"if {self._gate(self.frame)}\n" + "\n".join(
+            f"    {name}_prior := {name}_gated\n    {name}_gated := {name}"
+            for name, _kind in self._samples))
 
     def _gate(self, tf: str) -> str:
         """The chart bar a newly closed `tf` bar first becomes readable on.
@@ -675,13 +718,75 @@ class SpecLowerer:
         return self._gate(self.frame)
 
     # -- blocks --------------------------------------------------------
+    def _decide(self, group: dict, path: RulePath, name: str) -> str:
+        """One condition tree, read at the cadence the engine reads it.
+
+        The whole tree is computed on the play's own timeframe and lifted as
+        ONE boolean whenever it can be, which is what driving_group does. It
+        can be unless the tree also reads another timeframe, because
+        request.security does not nest.
+
+        When it does, the tree is split at the smallest place that works: the
+        LARGEST subtree reading only the play's own frame is still one lifted
+        boolean, and only what sits above it is composed on the chart out of
+        latched operands. Composing there is the same answer, and measurably
+        so: aligning a 1d value onto 1h and lifting that onto 15m gives, at
+        every bar the gate admits, what requesting the 1d straight onto the
+        chart gives, because a gated chart bar closes at the same instant its
+        1h bar does and both ask which daily bar had closed by then.
+        """
+        if self.frame == self.chart or not self._foreign(group):
+            # A play ON the driving frame never needs splitting: its host IS
+            # the chart, so a foreign operand is simply lifted onto it and the
+            # whole tree stays one expression.
+            return self._frame_value(
+                path, name, "bool",
+                lambda frame: self._group(group, path, frame, frame))
+        # Only the composition is held back. Whatever the walk emits under it
+        # (a foreign frame's request, gate and latch) goes out where it is
+        # reached, so it stands above both the play's own request and the
+        # snapshots, which is the order Pine needs to read them in.
+        text = self._tree(group, path)
+        self._chart_after.append(f"{self.ctx.claim(name, path)} = {text}")
+        return name
+
+    def _tree(self, node, path: RulePath) -> str:
+        """A mixed tree, split into native subtrees and chart-level composition."""
+        if not self._foreign(node):
+            # Named after its path, like everything else here, so a reader of
+            # the chart-level composition can see which part of the spec each
+            # lifted boolean came from.
+            return self._frame_value(
+                path, "nk_" + "_".join(_sanitize(p) for p in path.parts), "bool",
+                lambda frame: (self._group(node, path, frame, frame)
+                               if _is_group(node)
+                               else self._condition(node, path, frame, frame)))
+        if not _is_group(node):
+            return self._condition(node, path, self.frame, self.chart)
+        key, items = next(iter(node.items()))
+        joiner = " and " if key == "all" else " or "
+        return "(" + joiner.join(
+            self._tree(item, path.child(key, i))
+            for i, item in enumerate(items)) + ")"
+
+    def _foreign(self, node) -> bool:
+        """True when this subtree reads any timeframe but the play's own."""
+        stack = [node]
+        while stack:
+            item = stack.pop()
+            if isinstance(item, dict):
+                if str(item.get("tf", self.frame)) != self.frame:
+                    return True
+                stack += [v for k, v in item.items() if k != "tf"]
+            elif isinstance(item, list):
+                stack += item
+        return False
+
     def _side(self, side: str) -> str:
         if side not in self.spec:
             return ""
         path = RulePath((side,))
-        return self._frame_value(
-            path, f"nk_{side}_entry", "bool",
-            lambda frame: self._group(self.spec[side], path, frame))
+        return self._decide(self.spec[side], path, f"nk_{side}_entry")
 
     def _exits(self) -> PineExits:
         exits = self.spec.get("exits", {})
@@ -691,9 +796,7 @@ class SpecLowerer:
             # Latched but NOT freshness-gated, because manage() is not: it asks
             # the exit group on every driving bar a position is open on, and
             # only on_bar is gated.
-            out["signal"] = self._frame_value(
-                path, "nk_exit_signal", "bool",
-                lambda frame: self._group(exits["exit"], path, frame))
+            out["signal"] = self._decide(exits["exit"], path, "nk_exit_signal")
         if "trailing" in exits:
             trailing, path = exits["trailing"], base.child("trailing")
             out["trailing_kind"] = trailing["kind"]
@@ -766,25 +869,49 @@ class SpecLowerer:
                                  lambda _frame: f"ta.atr({n}) * {mult}")
 
     # -- conditions ----------------------------------------------------
-    def _group(self, group: dict, path: RulePath, frame: str) -> str:
+    #
+    # Two timeframes travel together through the walk and they are not the same
+    # question, which the engine also keeps apart. FRAME is what a node without
+    # a `tf` inherits, exactly as FrameEval._eval passes `tf` down and an `of`
+    # chain inherits its parent's. HOST is the context the Pine is being
+    # emitted into, which is either the chart or the inside of one request. A
+    # node is lifted when its own timeframe is not the host's, and the two
+    # differ only where a condition has to be composed on the chart out of
+    # operands that still belong to the play's own frame.
+    def _group(self, group: dict, path: RulePath, frame: str, host: str) -> str:
         key, items = next(iter(group.items()))
         joiner = " and " if key == "all" else " or "
         parts = []
         for i, item in enumerate(items):
             child = path.child(key, i)
-            parts.append(self._group(item, child, frame)
+            parts.append(self._group(item, child, frame, host)
                          if "all" in item or "any" in item
-                         else self._condition(item, child, frame))
+                         else self._condition(item, child, frame, host))
         return "(" + joiner.join(parts) + ")"
 
-    def _condition(self, cond: dict, path: RulePath, frame: str) -> str:
-        lhs = self._expr(cond["lhs"], path.child("lhs"), frame)
-        rhs = self._expr(cond["rhs"], path.child("rhs"), frame)
+    def _condition(self, cond: dict, path: RulePath, frame: str,
+                   host: str) -> str:
+        lhs = self._expr(cond["lhs"], path.child("lhs"), frame, host)
+        rhs = self._expr(cond["rhs"], path.child("rhs"), frame, host)
         op = cond["op"]
         if op not in COMPARISONS:
             # Comparisons bind tighter than `and`/`or` in Pine, so the
             # enclosing group's parentheses are the only ones a plain one needs.
             return f"{lhs} {op} {rhs}"
+        if host != frame:
+            # A cross composed on the chart, because one of its operands comes
+            # off another timeframe. "Previous" still has to mean the previous
+            # bar of the PLAY's timeframe, which is the row _cross_prev shifts
+            # by, so both sides are read off gate-cadence snapshots rather than
+            # off the chart's own history. Comparing `[1]` here would ask what
+            # the previous 15m bar said, which is the error this whole file
+            # exists to avoid.
+            held, crossed = (("<=", ">") if op == "crosses_above"
+                             else (">=", "<"))
+            lhs_now, lhs_prev = self._sampled(lhs, cond["lhs"])
+            rhs_now, rhs_prev = self._sampled(rhs, cond["rhs"])
+            return (f"({lhs_prev} {held} {rhs_prev} and "
+                    f"{lhs_now} {crossed} {rhs_now})")
         if self._end_anchored(cond["rhs"]):
             # frame_eval._cross_prev broadcasts an end-anchored operand rather
             # than shifting it, and ta.crossover shifts both sides. The
@@ -802,6 +929,25 @@ class SpecLowerer:
             return (f"({series}[1] {held} {rhs} and "
                     f"{series} {crossed} {rhs})")
         return f"{COMPARISONS[op]}({lhs}, {rhs})"
+
+    def _sampled(self, ident: str, node) -> tuple[str, str]:
+        """One cross operand as (this spec-timeframe bar, the one before).
+
+        Two operands answer their own previous value rather than a snapshot:
+
+        - a NUMBER, because a constant series shifted by one row is the same
+          constant, and a snapshot pair would be two more globals saying so.
+        - an END-ANCHORED primitive, because _cross_prev broadcasts those
+          instead of shifting them. The nearest gap one bar ago is a different
+          object, not this level's history, so both sides of the cross ask
+          about THIS level. That reading is deliberate in the engine and the
+          same reading is deliberate here.
+        """
+        if isinstance(node, (int, float)) or self._end_anchored(node):
+            return ident, ident
+        if (ident, "float") not in self._samples:
+            self._samples.append((ident, "float"))
+        return f"{ident}_gated", f"{ident}_prior"
 
     def _end_anchored(self, node) -> bool:
         if not isinstance(node, dict):
@@ -825,14 +971,14 @@ class SpecLowerer:
         return name
 
     # -- expressions ---------------------------------------------------
-    def _expr(self, node, path: RulePath, frame: str) -> str:
+    def _expr(self, node, path: RulePath, frame: str, host: str) -> str:
         if isinstance(node, (int, float)):
             return self.ctx.number(path, node)
         if "src" in node:
-            return self._node(node, path, frame, f"nk_{node['src']}",
+            return self._node(node, path, frame, host, f"nk_{node['src']}",
                               lambda _frame: {"": node["src"]})[""]
         if "op" in node:
-            return self._math(node, path, frame)
+            return self._math(node, path, frame, host)
         kind = "ind" if "ind" in node else "prim"
         name = node[kind]
         term = self.vocabulary.resolve(
@@ -842,7 +988,7 @@ class SpecLowerer:
                 "pine_unsupported",
                 f"{path.text}: {name} has no Pine lowering, so this spec "
                 "cannot be generated", path=path.text, term=name)
-        fields = self._node(node, path, frame, f"nk_{name}",
+        fields = self._node(node, path, frame, host, f"nk_{name}",
                             lambda inner: self._term(node, term, path, inner))
         field = str(node.get("field", term.defaults.get("field", "")))
         # ctx.fields already refuses a mapping that misses a declared choice,
@@ -856,9 +1002,9 @@ class SpecLowerer:
                 path=path.text, term=name)
         return fields[field]
 
-    def _math(self, node: dict, path: RulePath, frame: str) -> str:
+    def _math(self, node: dict, path: RulePath, frame: str, host: str) -> str:
         op = node["op"]
-        args = [self._expr(a, path.child("args", i), frame)
+        args = [self._expr(a, path.child("args", i), frame, host)
                 for i, a in enumerate(node["args"])]
         if op == "abs":
             return f"math.abs({args[0]})"
@@ -878,14 +1024,17 @@ class SpecLowerer:
                    if k not in ("ind", "prim", "of", "tf", "cond")}}
         source = ""
         if term.kind in ("series", "frame"):
+            # A term's own operands inherit ITS timeframe and are emitted
+            # where it is, so frame and host are one and the same here.
             source = self._expr(node.get("of", {"src": "close"}),
-                                path.child("of"), frame)
+                                path.child("of"), frame, frame)
         elif "cond" in node:
             # bars_since measures a condition rather than a series, and a
             # condition is the walk's to lower: an emit function is handed
             # operands, never spec shapes. Same slot, because it is the same
             # concept, the operand the term is applied to.
-            source = self._condition(node["cond"], path.child("cond"), frame)
+            source = self._condition(node["cond"], path.child("cond"),
+                                     frame, frame)
         call = TermCall(term=term, args=args, path=path,
                         slot=self.ctx.slot(f"nk_{term.name}", path),
                         source=source, content=_content(node, self.vocabulary))
@@ -895,10 +1044,17 @@ class SpecLowerer:
         return self.ctx.take_fields(call.slot) or {"": expr.text}
 
     # -- timeframes ----------------------------------------------------
-    def _node(self, node: dict, path: RulePath, frame: str, stem: str,
-              produce) -> dict[str, str]:
-        """One source or term node, on its own frame or lifted onto the chart's."""
-        key = (frame, _content(node, self.vocabulary))
+    def _node(self, node: dict, path: RulePath, frame: str, host: str,
+              stem: str, produce) -> dict[str, str]:
+        """One source or term node, on the host's frame or lifted onto it.
+
+        The memo is keyed on the HOST as well as the content, so the same node
+        read natively inside a request and read again on the chart are two
+        entries. They have to be: the native one is a function local, and
+        handing that identifier to a chart-level expression would emit Pine
+        that does not compile.
+        """
+        key = (host, _content(node, self.vocabulary))
         memo = self.ctx.nodes.get(key)
         if memo is not None:
             # The node itself is already built, but this path is a new way in:
@@ -909,14 +1065,20 @@ class SpecLowerer:
             return fields
         src_tf = node.get("tf", frame)
         term = _term_name(node)
-        if src_tf != frame and frame != self.chart:
+        if src_tf != host and host != self.chart:
+            # Genuinely inexpressible: this node names a timeframe other than
+            # the one whose request it sits inside, and request.security does
+            # not nest. A condition's own operands never land here, because
+            # _decide composes those on the chart instead; what does is a
+            # reference buried under a term, where there is no chart-level
+            # composition to hoist it into.
             raise PineCompileError(
                 "pine_nested_timeframe",
-                f"{path.text}: {src_tf} is read inside a {frame} request, and "
+                f"{path.text}: {src_tf} is read inside a {host} request, and "
                 "request.security does not nest; move the reference up to the "
                 "spec's own timeframe", path=path.text, term=term)
         with self.ctx.reaching() as touched:
-            fields = (produce(frame) if src_tf == frame
+            fields = (produce(host) if src_tf == host
                       else self._lift(node, path, src_tf, stem, produce, term))
         self.ctx.nodes[key] = (fields, frozenset(touched))
         return fields
@@ -928,6 +1090,11 @@ class SpecLowerer:
                 "pine_unsupported",
                 f"{path.text}: {src_tf!r} has no Pine timeframe string",
                 path=path.text, term=term)
+        if src_tf == self.frame:
+            # The play's own timeframe, reached from a condition that had to be
+            # composed on the chart. It belongs in the request the play already
+            # makes, not in a second one of the same timeframe.
+            return self._frame_fields(path, stem, produce)
         gate = self._gate(src_tf)
         with self.ctx.block() as body:
             inner = produce(src_tf)

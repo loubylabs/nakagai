@@ -9,8 +9,11 @@ that changes what the renderer writes:
     ifvg_reversal       a foreign timeframe, bars_since, swings, and fair value
                         gap state
     ob_bounce           order block state and the deepest history buffer
-    bollinger_breakout  a multi-field indicator, a daily chart, and a trailing
+    bollinger_breakout  a multi-field indicator, a daily play, and a trailing
                         exit
+    discount_pullback   a play whose own timeframe is not the chart's AND that
+                        reads a second one, so the tree is split between a
+                        native subtree and a chart-level composition
 
 A golden diff is not a failure by itself; it is the renderer saying the text a
 user pastes changed. Read the diff, decide whether the new text is right, and
@@ -26,7 +29,7 @@ from nakagai.strategies.rules import compile_pine
 
 GOLDEN = Path(__file__).resolve().parent / "golden" / "pine"
 PLAYS = ("sma_cross", "orb", "ifvg_reversal", "ob_bounce",
-         "bollinger_breakout")
+         "bollinger_breakout", "discount_pullback")
 
 
 @pytest.mark.parametrize("name", PLAYS)
@@ -38,7 +41,7 @@ def test_the_golden_artifact_is_what_the_compiler_writes(name, artifact,
         (GOLDEN / f"{name}.{artifact}.pine").read_text()
 
 
-def test_the_golden_set_is_exactly_the_five_representative_plays():
+def test_the_golden_set_is_exactly_the_representative_plays():
     assert {path.name for path in GOLDEN.glob("*.pine")} == {
         f"{name}.{artifact}.pine"
         for name in PLAYS for artifact in ("indicator", "strategy")}
