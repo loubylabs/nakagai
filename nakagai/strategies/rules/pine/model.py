@@ -177,6 +177,11 @@ class PineProgram:
     title: str
     spec_hash: str
     generator_version: str
+    # The timeframe the calculations below are written for. The spec's own,
+    # because a node without a `tf` is emitted on the chart's bars rather than
+    # requested, so this is the one chart the program's arithmetic is true on
+    # and the renderer owes a runtime guard against every other one.
+    chart: str
     inputs: tuple[PineInput, ...]
     helpers: tuple[PineHelper, ...]
     calculations: tuple[str, ...]

@@ -476,6 +476,7 @@ class SpecLowerer:
             title=str(self.spec["name"]).strip(),
             spec_hash=spec_hash(self.spec, self.vocabulary),
             generator_version=GENERATOR_VERSION,
+            chart=self.chart,
             inputs=self.ctx.inputs(),
             helpers=helpers,
             calculations=self.ctx.calculations(),

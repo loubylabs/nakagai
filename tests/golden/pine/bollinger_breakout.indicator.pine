@@ -1,0 +1,109 @@
+//@version=6
+// Nakagai Pine export: bollinger_breakout
+// Artifact: indicator. It marks the bars Nakagai would signal on, draws the
+// levels that signal froze, and raises one alert for each one. It places no
+// orders.
+// Generator version: 1
+// Spec hash: f41b415366d225bdb2c7a4319b1137df8c08ad83704ecd4647546420619b4a20
+//
+// Chart: a standard daily candle chart. Heikin Ashi, Renko, Line Break, Kagi,
+// Point and Figure, Range and every other synthetic-price chart show prices no
+// market printed, so a decision read off one would be fiction. This script
+// refuses to run on one, and on a chart of any other length.
+//
+// Assumptions:
+//   - The chart must be on 1d bars: the spec's own timeframe is charted rather
+//     than requested.
+//   - Every condition is read on the close of its bar.
+//   - Pine seeds its recursive averages (ema, rsi, atr and the terms built on
+//     them) differently from the engine, so the first bars of a chart can
+//     differ.
+//
+// Fidelity boundary. A TradingView result is a separate simulation and is
+// never Nakagai evidence:
+//   - TradingView and Alpaca can differ in session coverage, adjustments,
+//     volume, missing bars, and aggregate boundaries.
+//   - Nakagai resolves an ambiguous bar pessimistically with stop first.
+//     TradingView infers an intrabar path or uses Bar Magnifier data.
+//   - Nakagai uses one basis point of slippage with a one-cent floor. Pine's
+//     built-in slippage is a fixed number of ticks, set to one here, which is
+//     the same cent on a stock at or under $100 and less than Nakagai charges
+//     above it.
+//   - Nakagai enforces a T+1 settled-funds ledger. Pine models capital and
+//     margin without an equivalent settlement ledger.
+//   - TradingView input changes alter the exported play without changing its
+//     embedded hash.
+//   - Nakagai drives every play on 15-minute bars: a play on a longer
+//     timeframe signals on the first 15-minute bar after its own bar closes
+//     and fills at the next one. This chart decides and fills on its own bars
+//     instead, so an entry lands one driving bar earlier and at a different
+//     price.
+//
+// Editing any input below creates a TradingView-local variation: its results
+// no longer represent the spec hash above, and Nakagai cannot read that
+// variation back.
+indicator("Nakagai · bollinger_breakout", overlay=true)
+
+// --- Chart contract ---
+if barstate.isfirst and timeframe.in_seconds() != 24 * 60 * 60
+    runtime.error("Nakagai Pine exports require a standard daily chart.")
+if barstate.isfirst and not chart.is_standard
+    runtime.error("Nakagai Pine exports require a standard candle chart.")
+
+// --- Inputs ---
+nk_long_all_0_rhs_bb_n = input.int(20, "rhs · bb · n", minval=2, maxval=200)
+nk_long_all_0_rhs_bb_k = input.float(2.0, "rhs · bb · k", minval=0.5, maxval=5.0)
+nk_long_all_1_rhs_sma_n = input.int(200, "rhs · sma · n", minval=2, maxval=500)
+nk_exits_trailing_n = input.int(14, "Exits · trailing · n", minval=2, maxval=100)
+nk_exits_trailing_mult = input.float(3.0, "Exits · trailing · mult", minval=0.5, maxval=10.0)
+nk_risk_stop_n = input.int(14, "Risk · stop · n", minval=2, maxval=100)
+nk_risk_stop_mult = input.float(2.0, "Risk · stop · mult", minval=0.1, maxval=10.0)
+nk_risk_target_rr = input.float(6.0, "Risk · target · rr", minval=0.1, maxval=20.0)
+
+// --- Calculations ---
+[nk_bb_1_mid, nk_bb_1_upper, nk_bb_1_lower] = ta.bb(close, nk_long_all_0_rhs_bb_n, nk_long_all_0_rhs_bb_k)
+nk_sma_1 = ta.sma(close, nk_long_all_1_rhs_sma_n)
+nk_long_entry = (ta.crossover(close, nk_bb_1_upper) and close > nk_sma_1)
+nk_short_entry = (ta.crossunder(close, nk_bb_1_lower) and close < nk_sma_1)
+nk_exits_trailing_distance = ta.atr(nk_exits_trailing_n) * nk_exits_trailing_mult
+nk_risk_stop_distance = ta.atr(nk_risk_stop_n) * nk_risk_stop_mult
+
+// --- Decisions ---
+nk_long_stop = close - nk_risk_stop_distance
+nk_long_target = close + nk_risk_target_rr * (close - nk_long_stop)
+nk_long_decision = nk_long_entry and not na(nk_long_stop) and nk_long_stop < close and nk_long_target > close
+nk_short_stop = close + nk_risk_stop_distance
+nk_short_target = close - nk_risk_target_rr * (nk_short_stop - close)
+nk_short_decision = nk_short_entry and not na(nk_short_stop) and nk_short_stop > close and nk_short_target < close
+
+// --- Markers ---
+plotshape(nk_long_decision, "Nakagai long", shape.triangleup, location.belowbar, color.teal, size=size.tiny)
+plotshape(nk_short_decision, "Nakagai short", shape.triangledown, location.abovebar, color.maroon, size=size.tiny)
+
+// --- Alert body ---
+nk_signal_json(direction, reference, stop, target) =>
+    string head = "{\"schema\":\"nakagai.pine.signal.v1\",\"spec_hash\":\"f41b415366d225bdb2c7a4319b1137df8c08ad83704ecd4647546420619b4a20\",\"symbol\":\"" + syminfo.ticker + "\""
+    string where = ",\"timeframe\":\"" + timeframe.period + "\",\"direction\":\"" + direction + "\""
+    string when = ",\"bar_time\":" + str.tostring(time)
+    string levels = ",\"reference\":" + str.tostring(reference) + ",\"stop\":" + str.tostring(stop) + ",\"target\":" + str.tostring(target)
+    head + where + when + levels + "}"
+
+// --- Signal levels ---
+var float nk_reference = na
+var float nk_stop = na
+var float nk_target = na
+if nk_long_decision
+    nk_reference := close
+    nk_stop := nk_long_stop
+    nk_target := nk_long_target
+    alert(nk_signal_json("long", nk_reference, nk_stop, nk_target), alert.freq_once_per_bar_close)
+else if nk_short_decision
+    nk_reference := close
+    nk_stop := nk_short_stop
+    nk_target := nk_short_target
+    alert(nk_signal_json("short", nk_reference, nk_stop, nk_target), alert.freq_once_per_bar_close)
+
+// --- Level plots ---
+plot(nk_reference, "Nakagai reference", color=color.gray, style=plot.style_linebr)
+plot(nk_stop, "Nakagai stop", color=color.maroon, style=plot.style_linebr)
+plot(nk_target, "Nakagai target", color=color.teal, style=plot.style_linebr)

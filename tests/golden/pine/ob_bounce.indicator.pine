@@ -1,0 +1,134 @@
+//@version=6
+// Nakagai Pine export: ob_bounce
+// Artifact: indicator. It marks the bars Nakagai would signal on, draws the
+// levels that signal froze, and raises one alert for each one. It places no
+// orders.
+// Generator version: 1
+// Spec hash: dd19702d6c2f92c572e66db49609726e3786e4e502dc0225a422f9583c814ab7
+//
+// Chart: a standard 15-minute candle chart. Heikin Ashi, Renko, Line Break,
+// Kagi, Point and Figure, Range and every other synthetic-price chart show
+// prices no market printed, so a decision read off one would be fiction. This
+// script refuses to run on one, and on a chart of any other length.
+//
+// Assumptions:
+//   - The chart must be on 15m bars: the spec's own timeframe is charted
+//     rather than requested.
+//   - Every condition is read on the close of its bar.
+//   - Pine seeds its recursive averages (ema, rsi, atr and the terms built on
+//     them) differently from the engine, so the first bars of a chart can
+//     differ.
+//
+// Fidelity boundary. A TradingView result is a separate simulation and is
+// never Nakagai evidence:
+//   - TradingView and Alpaca can differ in session coverage, adjustments,
+//     volume, missing bars, and aggregate boundaries.
+//   - Nakagai resolves an ambiguous bar pessimistically with stop first.
+//     TradingView infers an intrabar path or uses Bar Magnifier data.
+//   - Nakagai uses one basis point of slippage with a one-cent floor. Pine's
+//     built-in slippage is a fixed number of ticks, set to one here, which is
+//     the same cent on a stock at or under $100 and less than Nakagai charges
+//     above it.
+//   - Nakagai enforces a T+1 settled-funds ledger. Pine models capital and
+//     margin without an equivalent settlement ledger.
+//   - TradingView input changes alter the exported play without changing its
+//     embedded hash.
+//
+// Editing any input below creates a TradingView-local variation: its results
+// no longer represent the spec hash above, and Nakagai cannot read that
+// variation back.
+indicator("Nakagai · ob_bounce", overlay=true, max_bars_back=200)
+
+// --- Chart contract ---
+if barstate.isfirst and timeframe.in_seconds() != 15 * 60
+    runtime.error("Nakagai Pine exports require a standard 15-minute chart.")
+if barstate.isfirst and not chart.is_standard
+    runtime.error("Nakagai Pine exports require a standard candle chart.")
+
+// --- Inputs ---
+nk_long_all_0_rhs_order_block_body_atr = input.float(1.5, "Long · rhs · order_block · body_atr", minval=0.5, maxval=5.0)
+nk_long_all_0_rhs_order_block_lookback = input.int(40, "Long · rhs · order_block · lookback", minval=10, maxval=200)
+nk_long_all_1_rhs_sma_n = input.int(100, "rhs · sma · n", minval=2, maxval=500)
+nk_short_all_0_rhs_order_block_body_atr = input.float(1.5, "Short · rhs · order_block · body_atr", minval=0.5, maxval=5.0)
+nk_short_all_0_rhs_order_block_lookback = input.int(40, "Short · rhs · order_block · lookback", minval=10, maxval=200)
+nk_risk_stop_n = input.int(14, "Risk · stop · n", minval=2, maxval=100)
+nk_risk_stop_mult = input.float(1.5, "Risk · stop · mult", minval=0.1, maxval=10.0)
+nk_risk_target_rr = input.float(1.5, "Risk · target · rr", minval=0.1, maxval=20.0)
+
+// --- Helpers ---
+nk_window_atr(bars) =>
+    int n = math.min(14, bars - 1)
+    float total = 0.0
+    for i = 0 to n - 1
+        total += math.max(high[i] - low[i], math.max(math.abs(high[i] - close[i + 1]), math.abs(low[i] - close[i + 1])))
+    total / n
+
+nk_order_block(body_atr, lookback, want_long) =>
+    float unit = nk_window_atr(lookback)
+    float top = na
+    float bottom = na
+    if not na(unit) and unit != 0
+        int shove = -1
+        for back = 0 to lookback - 1
+            float body = close[back] - open[back]
+            if want_long ? body >= body_atr * unit : body <= -body_atr * unit
+                shove := back
+                break
+        if shove >= 0 and shove < lookback - 1
+            for back = shove + 1 to lookback - 1
+                float body = close[back] - open[back]
+                if want_long ? body < 0 : body > 0
+                    top := high[back]
+                    bottom := low[back]
+                    break
+    [top, bottom]
+
+// --- Calculations ---
+[nk_order_block_1_top, nk_order_block_1_bottom] = nk_order_block(nk_long_all_0_rhs_order_block_body_atr, nk_long_all_0_rhs_order_block_lookback, true)
+nk_order_block_1_mid = (nk_order_block_1_top + nk_order_block_1_bottom) / 2
+nk_sma_1 = ta.sma(close, nk_long_all_1_rhs_sma_n)
+nk_long_entry = ((close[1] <= nk_order_block_1_top and close > nk_order_block_1_top) and close > nk_sma_1)
+[nk_order_block_2_top, nk_order_block_2_bottom] = nk_order_block(nk_short_all_0_rhs_order_block_body_atr, nk_short_all_0_rhs_order_block_lookback, false)
+nk_order_block_2_mid = (nk_order_block_2_top + nk_order_block_2_bottom) / 2
+nk_short_entry = ((close[1] >= nk_order_block_2_bottom and close < nk_order_block_2_bottom) and close < nk_sma_1)
+nk_risk_stop_distance = ta.atr(nk_risk_stop_n) * nk_risk_stop_mult
+
+// --- Decisions ---
+nk_long_stop = close - nk_risk_stop_distance
+nk_long_target = close + nk_risk_target_rr * (close - nk_long_stop)
+nk_long_decision = nk_long_entry and not na(nk_long_stop) and nk_long_stop < close and nk_long_target > close
+nk_short_stop = close + nk_risk_stop_distance
+nk_short_target = close - nk_risk_target_rr * (nk_short_stop - close)
+nk_short_decision = nk_short_entry and not na(nk_short_stop) and nk_short_stop > close and nk_short_target < close
+
+// --- Markers ---
+plotshape(nk_long_decision, "Nakagai long", shape.triangleup, location.belowbar, color.teal, size=size.tiny)
+plotshape(nk_short_decision, "Nakagai short", shape.triangledown, location.abovebar, color.maroon, size=size.tiny)
+
+// --- Alert body ---
+nk_signal_json(direction, reference, stop, target) =>
+    string head = "{\"schema\":\"nakagai.pine.signal.v1\",\"spec_hash\":\"dd19702d6c2f92c572e66db49609726e3786e4e502dc0225a422f9583c814ab7\",\"symbol\":\"" + syminfo.ticker + "\""
+    string where = ",\"timeframe\":\"" + timeframe.period + "\",\"direction\":\"" + direction + "\""
+    string when = ",\"bar_time\":" + str.tostring(time)
+    string levels = ",\"reference\":" + str.tostring(reference) + ",\"stop\":" + str.tostring(stop) + ",\"target\":" + str.tostring(target)
+    head + where + when + levels + "}"
+
+// --- Signal levels ---
+var float nk_reference = na
+var float nk_stop = na
+var float nk_target = na
+if nk_long_decision
+    nk_reference := close
+    nk_stop := nk_long_stop
+    nk_target := nk_long_target
+    alert(nk_signal_json("long", nk_reference, nk_stop, nk_target), alert.freq_once_per_bar_close)
+else if nk_short_decision
+    nk_reference := close
+    nk_stop := nk_short_stop
+    nk_target := nk_short_target
+    alert(nk_signal_json("short", nk_reference, nk_stop, nk_target), alert.freq_once_per_bar_close)
+
+// --- Level plots ---
+plot(nk_reference, "Nakagai reference", color=color.gray, style=plot.style_linebr)
+plot(nk_stop, "Nakagai stop", color=color.maroon, style=plot.style_linebr)
+plot(nk_target, "Nakagai target", color=color.teal, style=plot.style_linebr)

@@ -1,7 +1,10 @@
-"""The public seam: one validated spec in, one PineProgram out."""
+"""The public seam: one validated spec in, one pair of Pine artifacts out."""
 
 from nakagai.strategies.rules.pine.lower import SpecLowerer
-from nakagai.strategies.rules.pine.model import PineCompileError, PineProgram
+from nakagai.strategies.rules.pine.model import (
+    PineBundle, PineCompileError, PineProgram,
+)
+from nakagai.strategies.rules.pine.render import render
 from nakagai.strategies.rules.spec import validate_spec
 from nakagai.strategies.rules.vocabulary import Vocabulary, resolve_vocabulary
 
@@ -27,3 +30,12 @@ def lower_pine(spec: dict, vocabulary: Vocabulary | None = None) -> PineProgram:
             "the spec does not validate, so there is nothing to lower: "
             + "; ".join(errs))
     return SpecLowerer(spec, vocabulary).run()
+
+
+def compile_pine(spec: dict, vocabulary: Vocabulary | None = None) -> PineBundle:
+    """Compile a RuleSpec v2 into a Pine indicator and a Pine strategy.
+
+    One lowering feeds both renderers, so the pair cannot disagree about which
+    bar decided, and neither is returned unless both were built.
+    """
+    return render(lower_pine(spec, vocabulary))
