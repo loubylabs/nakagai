@@ -76,6 +76,18 @@ _SYNTHETIC = ("a standard {label} candle chart. Heikin Ashi, Renko, Line "
               "decision read off one would be fiction. This script refuses to "
               "run on one, and on a chart of any other length.")
 
+# The one chart setting a user has to change, and the reason it is a refusal
+# rather than a note. Nakagai's own bars carry pre-market and post-market
+# prints (measured across the ten proving symbols: between 0.1% and 10.7% of
+# every 15m frame), so a regular-hours chart is missing bars the engine had.
+# Every aggregate built on it is then built from fewer bars, silently, and the
+# script computes a different strategy rather than a slightly different one.
+_EXTENDED = ("Extended trading hours must be ENABLED on the chart. Nakagai's "
+             "bars include pre-market and post-market prints, so a "
+             "regular-hours chart holds different bars, aggregates them into "
+             "different higher-timeframe bars, and decides differently. This "
+             "script refuses to run without them.")
+
 _ARTIFACT = {
     "indicator": ("indicator. It marks the bars Nakagai would signal on, draws "
                   "the levels that signal froze, and raises one alert for each "
@@ -161,7 +173,8 @@ def _header(program: PineProgram, kind: str, warnings) -> list[str]:
     lines += _prose(f"Artifact: {_ARTIFACT[kind]}")
     lines += [f"// Generator version: {program.generator_version}",
               f"// Spec hash: {program.spec_hash}", "//"]
-    lines += _prose("Chart: " + _SYNTHETIC.format(label=label)) + ["//"]
+    lines += _prose("Chart: " + _SYNTHETIC.format(label=label))
+    lines += _prose(_EXTENDED) + ["//"]
     lines += ["// Assumptions:"]
     for text in program.assumptions:
         lines += _prose(text, bullet=True)
@@ -180,6 +193,13 @@ def _guards(program: PineProgram) -> list[str]:
         "if barstate.isfirst and not chart.is_standard",
         "    runtime.error(" + _string(
             "Nakagai Pine exports require a standard candle chart.") + ")",
+        # The third contract, and the one a user is most likely to have wrong
+        # without noticing, because an RTH-only chart looks entirely normal.
+        # See _EXTENDED: it changes which bars exist, not merely how they look.
+        "if barstate.isfirst and syminfo.session != session.extended",
+        "    runtime.error(" + _string(
+            "Nakagai Pine exports require extended trading hours to be "
+            "enabled on the chart.") + ")",
     ])
 
 

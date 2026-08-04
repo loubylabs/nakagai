@@ -163,6 +163,20 @@ def test_the_guard_table_holds_the_driving_cadence_and_nothing_else():
     assert render.CHART[DRIVING] == ("15 * 60", "15-minute")
 
 
+def test_a_regular_hours_chart_is_refused_at_runtime_and_stated_in_the_header():
+    # Not a preference. Nakagai's own 15m frames carry pre-market and
+    # post-market prints, so an RTH-only chart is missing bars the engine had
+    # and every aggregate over it is built from fewer of them. An RTH chart
+    # looks completely normal, which is exactly why this is a runtime refusal
+    # rather than a line of prose on its own.
+    for source in (compile_pine(_spec()).indicator,
+                   compile_pine(_spec(timeframe="1h")).strategy):
+        assert ("if barstate.isfirst and syminfo.session != session.extended\n"
+                '    runtime.error("Nakagai Pine exports require extended '
+                'trading hours to be enabled on the chart.")') in source
+        assert "Extended trading hours must be ENABLED" in _header(source)
+
+
 def test_a_synthetic_chart_is_refused_at_runtime_and_warned_about_in_the_header():
     source = compile_pine(_spec()).indicator
     assert ("if barstate.isfirst and not chart.is_standard\n"

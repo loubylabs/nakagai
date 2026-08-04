@@ -10,6 +10,10 @@
 // Kagi, Point and Figure, Range and every other synthetic-price chart show
 // prices no market printed, so a decision read off one would be fiction. This
 // script refuses to run on one, and on a chart of any other length.
+// Extended trading hours must be ENABLED on the chart. Nakagai's bars include
+// pre-market and post-market prints, so a regular-hours chart holds different
+// bars, aggregates them into different higher-timeframe bars, and decides
+// differently. This script refuses to run without them.
 //
 // Assumptions:
 //   - The chart must be on 15m bars. Nakagai replays every play on its 15m
@@ -52,6 +56,8 @@ if barstate.isfirst and timeframe.in_seconds() != 15 * 60
     runtime.error("Nakagai Pine exports require a standard 15-minute chart.")
 if barstate.isfirst and not chart.is_standard
     runtime.error("Nakagai Pine exports require a standard candle chart.")
+if barstate.isfirst and syminfo.session != session.extended
+    runtime.error("Nakagai Pine exports require extended trading hours to be enabled on the chart.")
 
 // --- Inputs ---
 nk_long_all_0_lhs_sma_n = input.int(20, "lhs · sma · n", minval=2, maxval=500)
