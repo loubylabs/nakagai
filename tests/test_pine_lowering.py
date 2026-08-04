@@ -467,9 +467,11 @@ def test_an_origin_dependent_cumulation_warns_the_same_way():
 def test_a_variable_history_offset_asks_the_renderer_for_max_bars_back():
     # ichimoku displaces its cloud by `disp`, an input rather than a constant,
     # and TradingView cannot infer a buffer from an offset it cannot read.
+    # What it owes is a buffer SIZE: the lines index [disp], and reading
+    # [100] needs 101 values, this bar's and a hundred behind it.
     program = _program({"ind": "ichimoku", "field": "senkou_a"})
     assert program.max_bars_back == core_vocabulary().indicators[
-        "ichimoku"].args["disp"][1] == 100
+        "ichimoku"].args["disp"][1] + 1 == 101
     assert f"[{LHS}_ichimoku_disp]" in "\n".join(program.calculations)
 
 

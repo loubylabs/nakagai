@@ -160,16 +160,61 @@ def test_fvg_nearest_returns_float_or_nan():
     assert isinstance(v, float)                        # NaN when no unfilled FVG exists
 
 
+def _flat(idx):
+    return pd.DataFrame({"open": 100.0, "high": 101.0, "low": 99.0,
+                         "close": 100.0, "volume": 1000.0}, index=idx)
+
+
 def test_day_of_week_reads_the_utc_calendar_day_on_daily_frames():
     # Session-aligned daily bars are labeled midnight UTC of their session date;
-    # converting midnight UTC to NY lands on the prior evening, which used to
+    # converting midnight UTC to NY lands on the prior evening, which would
     # shift every weekday back by one (a Monday bar read as Sunday).
     from nakagai.strategies.rules.primitives import day_of_week
     idx = pd.date_range("2026-01-05", periods=5, freq="B", tz="UTC")  # Mon..Fri
-    bars = pd.DataFrame({"open": 100.0, "high": 101.0, "low": 99.0,
-                         "close": 100.0, "volume": 1000.0}, index=idx)
-    dow = day_of_week(None, bars)
+    dow = day_of_week(None, _flat(idx))
     assert list(dow) == [0.0, 1.0, 2.0, 3.0, 4.0]
+
+
+def test_day_of_week_reads_a_daily_frame_stamped_at_the_eastern_midnight():
+    # The other daily convention: Alpaca stamps a 1Day bar at midnight Eastern,
+    # which is 04:00 UTC under EDT and 05:00 under EST. Same session date, a
+    # different clock on the label, so a rule reading the label's clock would
+    # have to know both. Reading the FRAME knows neither.
+    from nakagai.strategies.rules.primitives import day_of_week
+    idx = pd.DatetimeIndex([f"2026-01-{d:02d} 05:00" for d in (5, 6, 7, 8, 9)],
+                           tz="UTC")
+    assert list(day_of_week(None, _flat(idx))) == [0.0, 1.0, 2.0, 3.0, 4.0]
+
+
+def test_an_after_hours_bar_keeps_its_own_session_s_weekday():
+    # The trap the midnight-UTC rule fell into. The caches are not RTH-only, so
+    # a 19:00 EST post-market bar carries exactly the 00:00 UTC label a
+    # resampled daily bar carries. Reading the label's clock answered Tuesday
+    # for a Monday evening, on one bar of the session and no other. An intraday
+    # frame is intraday on every bar of it.
+    from nakagai.strategies.rules.primitives import day_of_week
+    idx = pd.DatetimeIndex(["2026-01-05 23:00",   # NY Mon 18:00
+                            "2026-01-06 00:00",   # NY Mon 19:00
+                            "2026-01-06 01:00",   # NY Mon 20:00
+                            "2026-01-06 14:30"],  # NY Tue 09:30
+                           tz="UTC")
+    assert list(day_of_week(None, _flat(idx))) == [0.0, 0.0, 0.0, 1.0]
+
+
+def test_a_frame_is_read_as_daily_only_when_it_holds_one_bar_per_session():
+    from nakagai.strategies.rules.primitives import _is_session_frame
+    daily = pd.date_range("2026-01-05", periods=5, freq="B", tz="UTC")
+    assert _is_session_frame(daily)
+    intraday = pd.date_range("2026-01-05 14:30", periods=5, freq="15min",
+                             tz="UTC")
+    assert not _is_session_frame(intraday)
+    # An intraday frame whose rows happen to sit on different dates is still
+    # one bar per date, and that is the honest reading: nothing in the frame
+    # says otherwise.
+    assert _is_session_frame(pd.DatetimeIndex(
+        ["2026-01-05 14:30", "2026-01-06 15:30"], tz="UTC"))
+    # Too short to carry evidence of its own cadence.
+    assert not _is_session_frame(daily[:1])
 
 
 def _ny(day: str, clock: str) -> pd.Timestamp:

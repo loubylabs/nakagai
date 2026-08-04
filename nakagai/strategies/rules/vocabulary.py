@@ -256,10 +256,10 @@ def core_vocabulary() -> Vocabulary:
     # different measurement wearing the same name, while on "1h" bars the
     # buckets are whole hours, so a 15m spec's 09:30 bar is answered from a
     # 09:30-to-10:30 aggregate; day_of_week reads calendar identity that
-    # belongs to the spec's own session, so answering it from a foreign frame
-    # is a category error even though the primitive itself now handles
-    # midnight-UTC daily labels. These must always run on the spec's own
-    # driving bars, so `tf` is rejected outright.
+    # belongs to the spec's own session, and it reads the weekday off whichever
+    # clock ITS OWN frame's cadence calls for, so answering it from a foreign
+    # frame is a category error twice over. These must always run on the spec's
+    # own driving bars, so `tf` is rejected outright.
     #
     # driving_frame_intraday is the SECOND rule and a second set: what a
     # session-aligned driving frame cannot answer at all, because there one bar
@@ -306,11 +306,11 @@ def core_vocabulary() -> Vocabulary:
         # a weekday off a 1h frame inside a 15m spec is a category error, which
         # is why it takes no tf; reading a weekday off your own daily bars is
         # not. A daily bar is one session, so its weekday is exactly the
-        # calendar identity the primitive promises, and day_of_week already
-        # special-cases session-aligned daily labels for precisely that reading
-        # (see its docstring). turnaround_tuesday is a shipped 1d catalog play
-        # whose entire premise is day_of_week; refusing it would break a
-        # shipped play over a reading that is right.
+        # calendar identity the primitive promises, and day_of_week reads a
+        # session frame on the clock that reading needs (see its docstring).
+        # turnaround_tuesday is a shipped 1d catalog play whose entire premise
+        # is day_of_week; refusing it would break a shipped play over a reading
+        # that is right.
         _primitive("day_of_week", {}, {}, prim.day_of_week,
                    PineLowering(pine.emit_primitive(pine.DAY_OF_WEEK),
                                 helpers=(pine.DAY_OF_WEEK,)),

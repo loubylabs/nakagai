@@ -138,15 +138,46 @@ def order_block(ctx: MarketContext, bars: pd.DataFrame,
     return {"top": top, "bottom": bottom, "mid": (top + bottom) / 2}[field]
 
 
+def _is_session_frame(idx: pd.DatetimeIndex) -> bool:
+    """True when the frame's rows are SESSION bars: at most one per UTC date.
+
+    The property, not a label pattern. Both daily conventions the engine meets
+    satisfy it and neither is recognisable from a single timestamp: the cache's
+    own resample buckets on "1D" in UTC (midnight exactly) and Alpaca's 1Day
+    bars are stamped at midnight Eastern (04:00 or 05:00 UTC). What they share
+    is one row per session, which is also exactly what makes the UTC calendar
+    date of the label the session date, the fact engine/context.closed_before
+    already rests on.
+
+    A frame of fewer than two rows carries no evidence of its own cadence, so
+    it reads as intraday: that is the answer for the driving frames the grammar
+    admits everywhere except a 1d spec, and a 1d spec reaching one row has one
+    session of history.
+    """
+    return len(idx) >= 2 and idx.normalize().is_unique
+
+
 def day_of_week(ctx: MarketContext, bars: pd.DataFrame) -> pd.Series:
-    """Weekday of each bar's session, 0 = Monday. Intraday labels convert to
-    NY time; session-aligned daily bars are labeled midnight UTC of their
-    session date, where the NY conversion would land on the prior evening,
-    so exact-midnight labels read the UTC calendar day instead."""
+    """Weekday of each bar's session, 0 = Monday.
+
+    Which clock the weekday is read on is the FRAME's to decide, never the
+    individual label's. An intraday bar belongs to the New York calendar day it
+    falls in, which is how _ny_dates groups every other session-scoped
+    primitive. A session bar is one whole session in one row, and its label's
+    UTC calendar date IS that session's date, where converting to New York
+    would land on the prior evening and shift every weekday back by one.
+
+    Branching on the label's own clock instead is the bug this must not go back
+    to. The caches are not RTH-only (see data/schema.SESSION_OPEN), so a 19:00
+    EST post-market bar carries exactly the 00:00 UTC label a resampled daily
+    bar carries, and reading its UTC date answered Tuesday for a Monday
+    evening: a divergence that appeared on one bar of a session and nowhere
+    else, which is the shape of thing a spec author never catches.
+    """
     idx = bars.index
-    midnight_utc = (idx.hour == 0) & (idx.minute == 0)
-    dow = np.where(midnight_utc, idx.dayofweek, idx.tz_convert(EXCHANGE_TZ).dayofweek)
-    return pd.Series(dow.astype(float), index=idx)
+    dow = (idx.dayofweek if _is_session_frame(idx)
+           else idx.tz_convert(EXCHANGE_TZ).dayofweek)
+    return pd.Series(np.asarray(dow, dtype="float64"), index=idx)
 
 
 def minutes_into_session(ctx: MarketContext, bars: pd.DataFrame) -> pd.Series:

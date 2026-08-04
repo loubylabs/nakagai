@@ -430,14 +430,19 @@ def test_no_helper_leans_on_a_look_alike_built_in(helper_id):
 
 def test_the_swing_history_reach_is_twice_its_confirmation_lag():
     # The pivot sits k bars back and its own left window reaches k further, so
-    # the deepest offset is 2k. Declaring only k would let TradingView size a
-    # buffer the script reads past.
-    program = _program({"prim": "swing_high"})
-    assert program.max_bars_back == 2 * core_vocabulary().primitives[
-        "swing_high"].args["k"][1] == 20
+    # the deepest offset is [2k]. Declaring only k would let TradingView size a
+    # buffer the script reads past, and so would declaring 2k: what the script
+    # owes is the BUFFER, and reading [20] needs 21 values.
+    for name in ("swing_high", "swing_low", "leg_retrace"):
+        program = _program({"prim": name})
+        assert program.max_bars_back == 2 * core_vocabulary().primitives[
+            name].args["k"][1] + 1 == 21
 
 
 def test_an_end_anchored_window_declares_the_history_it_scans():
+    # `lookback` counts BARS rather than an offset: the scan reads [0] through
+    # [lookback - 1], so the count is already the buffer and one more would
+    # declare a bar the script never indexes.
     for name in ("fvg_nearest", "order_block"):
         program = _program({"prim": name})
         assert program.max_bars_back == core_vocabulary().primitives[
@@ -455,20 +460,56 @@ SESSION_WARNING = (
     "engine's own frame does.")
 
 
-@pytest.mark.parametrize("name", ["opening_range_high", "opening_range_low",
-                                  "prev_session_high", "prev_session_low",
-                                  "prev_session_close", "gap_pct",
-                                  "minutes_into_session"])
+WARNS = ["opening_range_high", "opening_range_low", "prev_session_high",
+         "prev_session_low", "prev_session_close", "gap_pct",
+         "minutes_into_session"]
+QUIET = ["day_of_week", "rvol", "swing_high", "swing_low", "leg_retrace",
+         "bars_since", "fvg_nearest", "order_block"]
+
+
+@pytest.mark.parametrize("name", WARNS)
 def test_a_session_anchored_primitive_warns_where_the_chart_decides_the_session(
         name):
     assert SESSION_WARNING in _program({"prim": name}).warnings
 
 
-@pytest.mark.parametrize("name", ["day_of_week", "rvol", "swing_high",
-                                  "swing_low", "leg_retrace", "fvg_nearest",
-                                  "order_block"])
+@pytest.mark.parametrize("name", QUIET)
 def test_a_primitive_that_does_not_read_the_session_shape_stays_quiet(name):
-    assert _program({"prim": name}).warnings == ()
+    node = {"prim": name}
+    if name == "bars_since":
+        node["cond"] = CLOSE_OVER_OPEN
+    assert _program(node).warnings == ()
+
+
+def test_every_primitive_is_classified_as_warning_or_quiet():
+    # The two lists above are a partition, not a sample. A primitive in
+    # neither is one whose fidelity nothing states either way, which is how
+    # bars_since sat unpinned: correct, and correct by nobody's decision.
+    assert sorted(WARNS + QUIET) == sorted(core_vocabulary().primitives)
+
+
+DAILY_STAMP = ("A daily bar's timestamp is its session's start in New York, "
+               "which is TradingView's convention for a US equity, so "
+               "converting it gives the session's own weekday.")
+
+
+def test_the_daily_weekday_states_the_bar_stamp_it_rests_on():
+    # day_of_week reads a session frame's weekday off the UTC date of the
+    # bar's label, and the Pine converts the bar's own timestamp to New York.
+    # The two agree only while a daily bar is stamped at its session's start,
+    # which is a fact about the chart rather than about the compiler, so it is
+    # stated where a reader of the artifact looks for the others.
+    program = _program({"prim": "day_of_week"}, "<", 4, "1d")
+    assert DAILY_STAMP in program.assumptions
+
+
+def test_an_intraday_chart_does_not_carry_the_daily_bar_assumption():
+    # An intraday chart converts the bar's own timestamp, which is the
+    # primitive's intraday reading exactly, and the spec's timeframe is pinned
+    # by the first assumption, so the daily premise can never apply there.
+    assert DAILY_STAMP not in _program({"prim": "day_of_week"}).assumptions
+    assert DAILY_STAMP not in _program({"prim": "prev_session_high"}, ">", 0,
+                                       "1d").assumptions
 
 
 def test_the_session_warning_is_stated_once_however_many_terms_reach_it():

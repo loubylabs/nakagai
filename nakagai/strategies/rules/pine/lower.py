@@ -28,13 +28,13 @@ from contextlib import contextmanager
 from dataclasses import replace
 
 from nakagai.strategies.rules.canon import canonical_expr, spec_hash
-from nakagai.strategies.rules.pine.lowerings import DIV, HELPERS
+from nakagai.strategies.rules.pine.lowerings import DAY_OF_WEEK, DIV, HELPERS
 from nakagai.strategies.rules.pine.model import (
     GENERATOR_VERSION, PineCompileError, PineExits, PineHelper, PineInput,
     PineProgram, PineRisk, RulePath, TermCall,
 )
 from nakagai.strategies.rules.spec import (
-    BREAKEVEN_RR_BOUNDS, DEFAULT_RISK, STOP_ATR_MULT_BOUNDS,
+    BREAKEVEN_RR_BOUNDS, DEFAULT_RISK, SESSION_ALIGNED, STOP_ATR_MULT_BOUNDS,
     STOP_ATR_MULT_DEFAULT, STOP_ATR_N_BOUNDS, STOP_ATR_N_DEFAULT,
     STOP_PCT_BOUNDS, STOP_PCT_DEFAULT, TARGET_PCT_BOUNDS, TARGET_PCT_DEFAULT,
     TARGET_RR_BOUNDS, TARGET_RR_DEFAULT, TIME_STOP_BOUNDS, TIMEFRAMES,
@@ -288,19 +288,30 @@ class PineContext:
         for name in names:
             self._touch(name, path)
 
-    def needs_history(self, call: TermCall, name: str, reach: int = 1) -> None:
+    def needs_history(self, call: TermCall, name: str, reach: int = 1, *,
+                      window: bool = False) -> None:
         """Declare that this term indexes history by a non-constant offset.
 
         TradingView reads a series' historical buffer off the constant offsets
         it can see, so an offset carried by an input makes it refuse with
         "Pine cannot determine the referencing length of series" unless the
-        script declares max_bars_back. The argument's own upper bound is the
-        deepest the offset can reach, times `reach` where the term indexes a
-        multiple of it: a swing confirmed k bars after its pivot compares that
-        pivot against the k bars on each side, so it reads 2k bars back and a
-        buffer sized for k would be short by half.
+        script declares max_bars_back. What the script owes is a BUFFER SIZE,
+        which is one more than the deepest offset it indexes: reading `x[20]`
+        needs 21 values, this bar's and twenty behind it.
+
+        The argument's own upper bound says how deep that reach goes, in one of
+        two readings, and they differ by exactly that one:
+
+        - an OFFSET (the default). `reach` multiplies it where the term indexes
+          a multiple: a swing confirmed k bars after its pivot compares that
+          pivot against the k bars on each side, so it indexes [2k] and needs
+          2k + 1 values.
+        - a WINDOW of that many bars ending at this one, which is what an
+          end-anchored scan takes. A 200-bar lookback indexes [0] through
+          [199], so the count IS the buffer.
         """
-        self._history = max(self._history, reach * int(self._rule(call, name)[1]))
+        deepest = reach * int(self._rule(call, name)[1])
+        self._history = max(self._history, deepest if window else deepest + 1)
 
     def max_bars_back(self) -> int:
         return self._history
@@ -408,6 +419,12 @@ class PineContext:
                     "cycle, so no order defines each one above its callers")
             out.extend(needed[i] for i in ready)
             emitted.update(ready)
+        # The closure, not just what the walk declared. uses() answers what the
+        # PROGRAM reaches, and a helper pulled in behind another one is as
+        # present in the artifact as a directly declared one: without this, a
+        # future helper depending on nk_div would emit the divide and drop the
+        # zero-denominator assumption that explains it.
+        self._helpers.update(needed)
         return tuple(out)
 
 
@@ -451,12 +468,16 @@ class SpecLowerer:
         short_decision = self._side("short")
         exits = self._exits()
         risk = self._risk()
+        # Resolved before the assumptions, and that order is load-bearing:
+        # helper_sources settles the transitive closure, and _assumptions asks
+        # what the program reaches.
+        helpers = self.ctx.helper_sources()
         return PineProgram(
             title=str(self.spec["name"]).strip(),
             spec_hash=spec_hash(self.spec, self.vocabulary),
             generator_version=GENERATOR_VERSION,
             inputs=self.ctx.inputs(),
-            helpers=self.ctx.helper_sources(),
+            helpers=helpers,
             calculations=self.ctx.calculations(),
             long_decision=long_decision,
             short_decision=short_decision,
@@ -743,6 +764,19 @@ class SpecLowerer:
         out += [f"{tf} values are read with request.security on the last "
                 f"confirmed {tf} bar, so they do not repaint."
                 for tf in TIMEFRAMES if tf in self.lifted]
+        if self.chart in SESSION_ALIGNED and self.ctx.uses(DAY_OF_WEEK):
+            # The one premise the daily weekday rests on, and the only one a
+            # chart could break without saying so. The engine reads a session
+            # bar's weekday off the UTC date of its label, which is that
+            # session's date; the Pine converts the bar's own timestamp to New
+            # York, which agrees only while a daily bar is stamped at its
+            # session's start. It is for a US equity on TradingView, and the
+            # engine models no other exchange, but a daily bar labelled 00:00
+            # UTC would land on the prior evening and read a weekday early.
+            out.append("A daily bar's timestamp is its session's start in New "
+                       "York, which is TradingView's convention for a US "
+                       "equity, so converting it gives the session's own "
+                       "weekday.")
         if self.ctx.uses(DIV):
             out.append("A zero denominator reads as na, so a condition over it "
                        "is false.")

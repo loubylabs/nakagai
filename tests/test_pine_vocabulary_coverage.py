@@ -141,6 +141,28 @@ def test_a_program_emits_the_helper_graph_it_actually_reaches():
     assert closure == set(HELPERS) - {"nk_div"}
 
 
+def test_resolving_the_graph_records_the_helpers_it_pulled_in_behind_others():
+    """`uses` answers what the PROGRAM reaches, not what the walk declared.
+
+    A helper pulled in by another one is as present in the artifact as a
+    directly declared one, and the assumptions are read off exactly this. Today
+    nothing depends on nk_div, so a walk that only seeded its direct helpers
+    would look right; the first helper that leans on the divide would emit it
+    and drop the zero-denominator line that explains what a na there means.
+    """
+    from nakagai.strategies.rules.pine.lower import PineContext
+    from nakagai.strategies.rules.pine.lowerings import (
+        LEG_RETRACE, SWING_HIGH, SWING_LOW)
+    from nakagai.strategies.rules.pine.model import RulePath
+
+    ctx = PineContext()
+    ctx.helper(LEG_RETRACE, RulePath(("probe",)))
+    assert not ctx.uses(SWING_HIGH) and not ctx.uses(SWING_LOW)
+    emitted = {helper.id for helper in ctx.helper_sources()}
+    assert emitted == {LEG_RETRACE, SWING_HIGH, SWING_LOW}
+    assert all(ctx.uses(helper_id) for helper_id in emitted)
+
+
 # Compiled in a fresh interpreter so the comparison spans two hash seeds. The
 # helper graph is walked out of a set, which is exactly the shape an in-process
 # check cannot see: set iteration is stable within one process whatever

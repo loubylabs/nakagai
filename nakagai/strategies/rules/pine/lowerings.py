@@ -185,7 +185,7 @@ def emit_ichimoku(ctx, call):
     # disp is an input rather than a constant, so TradingView cannot infer how
     # far back the two senkou lines reach and answers "Pine cannot determine
     # the referencing length of series" unless the script declares
-    # max_bars_back. This is the one term that owes a renderer that number.
+    # max_bars_back. The lines index [disp], so the buffer is disp + 1.
     ctx.needs_history(call, "disp")
     # The senkou lines are displaced forward, so each bar carries the cloud
     # that applies to IT: `[disp]` is exactly indicators.ichimoku's .shift(disp).
@@ -243,8 +243,9 @@ def emit_swing(helper: str):
 
     def emit(ctx, call):
         # The pivot under test sits k bars back and its own left window reaches
-        # k further, so the deepest offset the helper indexes is 2k. Declaring
-        # only k would let TradingView size a buffer the script reads past.
+        # k further, so the deepest offset the helper indexes is [2k], which is
+        # 2k + 1 values. Declaring only k would let TradingView size a buffer
+        # the script reads past.
         ctx.needs_history(call, "k", reach=2)
         return PineExpr(ctx.calc(call, f"{helper}({ctx.arg(call, 'k')})"))
 
@@ -266,7 +267,9 @@ def emit_bars_since(ctx, call):
 
 
 def emit_fvg_nearest(ctx, call):
-    ctx.needs_history(call, "lookback")
+    # The scan reads `lookback` bars ending at this one, so the count is the
+    # buffer: [0] through [lookback - 1].
+    ctx.needs_history(call, "lookback", window=True)
     size, lookback = ctx.arg(call, "min_size_atr"), ctx.arg(call, "lookback")
     direction, state = ctx.choice(call, "direction"), ctx.choice(call, "state")
     # "open" reads an unfilled gap of the trade's own direction; "inverted"
@@ -281,7 +284,8 @@ def emit_fvg_nearest(ctx, call):
 
 
 def emit_order_block(ctx, call):
-    ctx.needs_history(call, "lookback")
+    # Same window reading as the gap scan: [0] through [lookback - 1].
+    ctx.needs_history(call, "lookback", window=True)
     body, lookback = ctx.arg(call, "body_atr"), ctx.arg(call, "lookback")
     want_long = _flag(ctx.choice(call, "direction") == "long")
     parts = ctx.destructure(call, ("top", "bottom"),
@@ -375,9 +379,17 @@ _PRIMITIVE_HELPERS = (
     100 * (session_open - previous) / previous""",
                (NEW_SESSION, PREV_SESSION_CLOSE)),
     # day_of_week: 0 = Monday, the way pandas numbers a weekday. Pine numbers
-    # Sunday 1 through Saturday 7, so the shift is +5 modulo 7. The primitive's
-    # midnight-UTC branch and its New York branch both answer the session
-    # date's weekday, and so does this.
+    # Sunday 1 through Saturday 7, so the shift is +5 modulo 7.
+    #
+    # One line answers both of the primitive's branches, and only because the
+    # primitive branches on the FRAME rather than on a label's clock. An
+    # intraday chart converts the bar's own timestamp to New York, which is the
+    # primitive's intraday reading exactly. A daily chart carries one bar per
+    # session stamped at that session's start, so converting it to New York
+    # lands inside the session and answers the same date the primitive reads
+    # off the label's UTC date. The daily half rests on that stamp, which is
+    # TradingView's for a US equity and is stated as an assumption on the
+    # program rather than assumed silently (see SpecLowerer._assumptions).
     PineHelper(DAY_OF_WEEK, f"""{DAY_OF_WEEK}() =>
     (dayofweek(time, "America/New_York") + 5) % 7"""),
     # minutes_into_session: elapsed minutes from the session's first bar.
