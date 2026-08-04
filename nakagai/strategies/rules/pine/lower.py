@@ -1155,9 +1155,10 @@ class SpecLowerer:
                  "the first chart bar of a new New York day, so they neither "
                  "repaint nor lead the engine."
                  if tf in SESSION_ALIGNED else
-                 f"{tf} values are latched on the chart bar that closes with "
-                 f"the {tf} bar, which is where the engine first reads them, "
-                 "so they neither repaint nor lead it.")
+                 f"The chart bar that closes with the {tf} bar is where the "
+                 f"engine first reads {tf}, whether latching a requested "
+                 f"value there or only checking time_close(\"{PINE_TIMEFRAMES[tf]}\") "
+                 "for a gate, so it neither repaints nor leads the engine.")
                 for tf in TIMEFRAMES if tf in self.lifted]
         intraday = sorted(self.lifted - SESSION_ALIGNED,
                           key=lambda tf: TIMEFRAMES.index(tf))
@@ -1178,14 +1179,15 @@ class SpecLowerer:
             # requirement and not merely a coverage one.
             names = " and ".join(PINE_TIMEFRAMES[tf] for tf in intraday)
             out.append(
-                f"This play requests {' and '.join(intraday)} bars from "
-                "TradingView rather than building them, and TradingView "
-                "anchors an intraday aggregate to the chart's session. With "
+                f"This play reads {' and '.join(intraday)} off TradingView's "
+                "idea of where each bar closes, whether by requesting the "
+                "bar itself or only gating on its close, and either way "
+                "TradingView anchors that close to the chart's session. With "
                 "extended trading hours enabled that session opens at 04:00 "
-                f"New York, so its {names} minute bars fall on the same "
-                "wall-clock boundaries Nakagai aggregates on and the two hold "
-                "the same bars. That is the one premise of this export nobody "
-                f"has measured on a chart: plot time(\"{PINE_TIMEFRAMES[intraday[0]]}\") "
+                f"New York, so its {names} minute boundaries fall on the "
+                "same wall-clock lines Nakagai aggregates on and the two "
+                "agree. That is the one premise of this export nobody has "
+                f"measured on a chart: plot time(\"{PINE_TIMEFRAMES[intraday[0]]}\") "
                 "and read where the boundaries land before trusting a result.")
         if (self.ctx.uses(DAY_OF_WEEK)
                 and ({self.frame} | self.lifted) & SESSION_ALIGNED):

@@ -10,11 +10,11 @@ from pathlib import Path
 
 import pytest
 
+import nakagai
 from nakagai.strategies.rules import (
     PineCompileError, PineExpr, PineHelper, PineLowering, lower_pine,
     validate_spec,
 )
-from nakagai.strategies.rules import pine
 from nakagai.strategies.rules.pine.lowerings import HELPERS
 from nakagai.strategies.rules.vocabulary import Term, core_vocabulary
 
@@ -250,19 +250,26 @@ def test_a_nested_timeframe_names_the_term_it_refuses():
 
 
 def _codes_the_compiler_can_raise() -> set[str]:
-    """Every code literal the pine package hands PineCompileError, off its AST.
+    """Every code literal nakagai/ hands PineCompileError, off its AST.
 
     Source rather than behaviour on purpose: a code only some unreached branch
     can raise is still part of the contract, and a test that could only see the
     ones this suite happens to trigger would miss exactly the new one. The
-    WHOLE package, for the same reason: today only compiler.py and lower.py
-    refuse, and a first refusal added in render.py has to land here too.
+    WHOLE package, walked recursively rather than globbed one directory deep,
+    for the same reason: today only compiler.py and lower.py refuse, and a
+    first refusal added in render.py, or anywhere else under nakagai/, has to
+    land here too. The call is matched on either a bare `PineCompileError(...)`
+    or a qualified `model.PineCompileError(...)`, since a qualified call is the
+    same refusal and an id-only match would let it through unseen.
     """
     out, sites = set(), 0
-    for path in sorted(Path(pine.__file__).parent.glob("*.py")):
+    root = Path(nakagai.__file__).parent
+    for path in sorted(root.rglob("*.py")):
         for node in ast.walk(ast.parse(path.read_text())):
             if (isinstance(node, ast.Call)
-                    and getattr(node.func, "id", "") == "PineCompileError"):
+                    and (getattr(node.func, "id", None) == "PineCompileError"
+                         or getattr(node.func, "attr", None)
+                         == "PineCompileError")):
                 sites += 1
                 assert isinstance(node.args[0], ast.Constant), \
                     f"{path.name}:{node.lineno} raises a code that is not a literal"

@@ -493,9 +493,10 @@ def test_assumptions_state_the_chart_and_the_request_semantics():
         "driving cadence whatever the play's own timeframe says, so the script "
         "charts that cadence and requests the play's own timeframe rather than "
         "charting it.")
-    assert ("1h values are latched on the chart bar that closes with the 1h "
-            "bar, which is where the engine first reads them, so they neither "
-            "repaint nor lead it." in program.assumptions)
+    assert ("The chart bar that closes with the 1h bar is where the engine "
+            "first reads 1h, whether latching a requested value there or "
+            "only checking time_close(\"60\") for a gate, so it neither "
+            "repaints nor leads the engine." in program.assumptions)
     assert len(set(program.assumptions)) == len(program.assumptions)
 
 
@@ -515,7 +516,7 @@ def test_a_requested_intraday_frame_states_the_premise_it_rests_on():
 
     for timeframe, spelled in (("1h", "60"), ("4h", "240")):
         text, = premise(_spec({"ind": "sma"}, timeframe=timeframe))
-        assert "anchors an intraday aggregate to the chart's session" in text
+        assert "TradingView anchors that close to the chart's session" in text
         assert "opens at 04:00 New York" in text
         assert f'plot time("{spelled}")' in text
     # A FOREIGN intraday reference rests on it just as much as a play's own.

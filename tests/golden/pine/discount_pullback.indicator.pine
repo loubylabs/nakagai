@@ -30,18 +30,20 @@
 //   - Pine seeds its recursive averages (ema, rsi, atr and the terms built on
 //     them) differently from the engine, so the first bars of a chart can
 //     differ.
-//   - 1h values are latched on the chart bar that closes with the 1h bar,
-//     which is where the engine first reads them, so they neither repaint nor
-//     lead it.
+//   - The chart bar that closes with the 1h bar is where the engine first
+//     reads 1h, whether latching a requested value there or only checking
+//     time_close("60") for a gate, so it neither repaints nor leads the
+//     engine.
 //   - 1d values are the last completed 1d bar's, latched on the first chart
 //     bar of a new New York day, so they neither repaint nor lead the engine.
-//   - This play requests 1h bars from TradingView rather than building them,
-//     and TradingView anchors an intraday aggregate to the chart's session.
-//     With extended trading hours enabled that session opens at 04:00 New
-//     York, so its 60 minute bars fall on the same wall-clock boundaries
-//     Nakagai aggregates on and the two hold the same bars. That is the one
-//     premise of this export nobody has measured on a chart: plot time("60")
-//     and read where the boundaries land before trusting a result.
+//   - This play reads 1h off TradingView's idea of where each bar closes,
+//     whether by requesting the bar itself or only gating on its close, and
+//     either way TradingView anchors that close to the chart's session. With
+//     extended trading hours enabled that session opens at 04:00 New York, so
+//     its 60 minute boundaries fall on the same wall-clock lines Nakagai
+//     aggregates on and the two agree. That is the one premise of this export
+//     nobody has measured on a chart: plot time("60") and read where the
+//     boundaries land before trusting a result.
 //
 // Fidelity boundary. A TradingView result is a separate simulation and is
 // never Nakagai evidence:

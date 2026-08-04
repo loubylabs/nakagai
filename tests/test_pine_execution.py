@@ -608,6 +608,20 @@ def test_the_gate_alone_pins_the_premise_it_rests_on():
                if "nobody has measured on a chart" in line]
     assert len(premise) == 1
     assert 'plot time("60")' in premise[0]
+    # This play requests nothing of its own 1h frame, so the sentence must
+    # not claim a request or a latched value it never makes; its only fact
+    # on 1h is the gate's time_close("60") check.
+    assert "requests" not in premise[0]
+    assert "latched" not in premise[0]
+    assert 'time_close("60")' not in premise[0]
+    assert "gating on its close" in premise[0]
+    # The per-timeframe latch sentence carries the same distinction: no
+    # latch happened, only a gate's boundary check.
+    latch = [line for line in program.assumptions
+             if line.startswith("The chart bar that closes with the 1h bar")]
+    assert len(latch) == 1
+    assert "whether latching a requested value there or only checking " \
+        'time_close("60") for a gate' in latch[0]
     # A 15m play has no such gate and must not carry the sentence.
     flat = dict(_spec_with(ALL_FOREIGN), timeframe="15m")
     assert not [line for line in lower_pine(flat).assumptions

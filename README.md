@@ -47,6 +47,7 @@ from nakagai.data.schema import TimeframeSet, validate_bars
 from nakagai.engine.engine import Engine
 from nakagai.engine.metrics import buy_and_hold_return, summarize
 from nakagai.strategies.catalog import load_catalog
+from nakagai.strategies.rules import core_vocabulary
 
 # 1. Generate a deterministic hourly series. Swap this block for
 #    AlpacaProvider().fetch_bars("SPY", "1h", start, end) once you have
@@ -70,7 +71,7 @@ cache.upsert("SPY", "1h", bars)
 
 # 3. Load a shipped example strategy from the catalog.
 specs_dir = Path("nakagai/strategies/catalog/specs")
-catalog = load_catalog(specs_dir)
+catalog = load_catalog(specs_dir, core_vocabulary)
 strategy = catalog["sma_cross"]({})
 
 # 4. Run the engine over the cached window.
@@ -135,8 +136,9 @@ fields (catalog card metadata like `category` and `tags` omitted):
 ```
 
 Two more examples ship in `nakagai/strategies/catalog/specs/`: `rsi_reversion.json`
-(mean reversion) and `macd_trend.json` (momentum). `load_catalog(specs_dir)` turns
-every JSON file in a directory like this one into a `RuleStrategy` subclass.
+(mean reversion) and `macd_trend.json` (momentum). `load_catalog(specs_dir,
+core_vocabulary)` turns every JSON file in a directory like this one into a
+`RuleStrategy` subclass.
 
 ## The lab
 
