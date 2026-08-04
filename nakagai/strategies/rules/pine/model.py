@@ -14,6 +14,16 @@ decisions, and the risk and exit expressions. It holds no `indicator()` or
 `strategy()` statement, because those are the two renderers' entire difference
 and a program that already picked one could only render the other by editing
 text it had already committed to.
+
+PineContext DOES NOT LIVE HERE, and that is a decision rather than an
+oversight. It is the obvious next tenant, and moving it is the obvious way to
+shorten lower.py, but it would close an import cycle: PineContext resolves
+helpers out of HELPERS in lowerings.py, lowerings.py imports PineLowering from
+this module, and vocabulary.py imports this module for the lowering slot before
+lower.py has run at all. The cycle is the reason lower.py is long. Whoever
+comes to split it should move the WALK out instead, or move HELPERS, and prove
+`import nakagai.strategies.rules.vocabulary` still works from a cold
+interpreter before believing it.
 """
 
 from collections.abc import Callable, Mapping
@@ -31,12 +41,19 @@ class PineCompileError(ValueError):
     `code` is the machine-readable reason, `path` the RuleSpec path that
     carries it (spelled exactly as validate_spec spells it), and `term` the
     vocabulary term involved when one is.
+
+    `errors` carries the validator's own message strings, unedited, for the one
+    refusal that has a list of them (`invalid_spec`). The joined prose in the
+    message is for a human reading a traceback; a caller rendering a 422 body
+    wants the strings themselves, and the only other way to get them would be
+    to run validate_spec a second time and hope the two passes agree.
     """
 
     def __init__(self, code: str, message: str, *, path: str = "",
-                 term: str = ""):
+                 term: str = "", errors: tuple[str, ...] = ()):
         super().__init__(message)
         self.code, self.path, self.term = code, path, term
+        self.errors = errors
 
 
 @dataclass(frozen=True)

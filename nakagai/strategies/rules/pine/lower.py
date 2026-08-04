@@ -197,8 +197,9 @@ class PineContext:
         self._sinks: list[list[str]] = [[]]
         # One memo entry per node: the identifiers it answers, and every input
         # its production touched, so a later block hitting the memo can still
-        # say it reached those inputs.
-        self._scopes: list[dict[tuple[str, str], _Memo]] = [{}]
+        # say it reached those inputs. ONE dict for the whole program, not a
+        # stack under the sinks: see block().
+        self.nodes: dict[tuple[str, str], _Memo] = {}
         self._blocks: dict[str, set[str]] = {}
         self._reaching: list[set[str]] = []
         self._history = 0
@@ -208,32 +209,24 @@ class PineContext:
         self._sinks[-1].append(text)
 
     @contextmanager
-    def block(self, scoped: bool = True):
-        """Collect statements, and maybe memoize nodes, somewhere other than the top.
+    def block(self):
+        """Collect statements somewhere other than the top, memo untouched.
 
-        Both stacks move together for a request that owns its own function: a
-        calculation emitted into that body is only reachable from inside it, so
-        its memo entry has to disappear with it.
+        The sink moves and the memo does NOT, and that is the whole shape: a
+        timeframe's request owns one function, everything computed for that
+        timeframe lands in it, so a node two blocks reach is one calculation
+        there exactly as it is on a 15m chart. Scoping the memo alongside the
+        sink would give sma_cross's two sides a moving average each.
 
-        `scoped=False` moves the sink and leaves the memo where it is, which is
-        what the play's OWN timeframe needs. Everything it computes lands in
-        one function, so a node two blocks reach is one calculation there,
-        exactly as it is on a 15m chart. Scoping that body would give
-        sma_cross's two sides a moving average each.
+        The memo entries are keyed on the host frame (see SpecLowerer._node),
+        which is what keeps a function local from being handed to a
+        chart-level expression even though one dict holds both.
         """
         self._sinks.append([])
-        if scoped:
-            self._scopes.append({})
         try:
             yield self._sinks[-1]
         finally:
             self._sinks.pop()
-            if scoped:
-                self._scopes.pop()
-
-    @property
-    def nodes(self) -> dict:
-        return self._scopes[-1]
 
     def calculations(self) -> tuple[str, ...]:
         """The top-level statements, in the order the walk produced them."""
@@ -557,6 +550,14 @@ class SpecLowerer:
         # play is gated cannot depend on the shape of its risk block.
         if self.frame != self.chart:
             self.decision_gate = self._fresh_gate(front)
+            # The gate leans on the same TradingView session-anchoring premise
+            # a request does (`time_close("60") == time_close` is only the
+            # engine's hour if the chart's hours fall where Nakagai's do), so
+            # the play's own frame is pinned whether or not anything asked for
+            # it. Without this a play gated on 1h that requests nothing of its
+            # own frame carried no premise sentence at all, and the artifact is
+            # the only place that premise is written down.
+            self.lifted.add(self.frame)
         self._sample_lines(front)
         calculations = (tuple(front) + self.ctx.calculations()
                         + tuple(self._chart_after))
@@ -620,7 +621,7 @@ class SpecLowerer:
         if self.frame == self.chart:
             self.ctx.statement(f"{name} = {produce(self.frame)}")
             return name
-        with self.ctx.block(scoped=False) as body:
+        with self.ctx.block() as body:
             text = produce(self.frame)
         request = self._request_for(self.frame)
         request["body"] += [*body, f"{kind} {name}_native = {text}"]
@@ -631,12 +632,13 @@ class SpecLowerer:
                    produce) -> dict[str, str]:
         """One NODE computed on `tf`, as members of the one request for `tf`.
 
-        The memo scope is deliberately NOT pushed. Every node of a timeframe
-        lands in that timeframe's single function, so two of them sharing a
-        sub-calculation is correct rather than a dangling local, which is the
-        opposite of what a function per node required.
+        Only the SINK moves; the memo is one dict for the whole program and
+        stays reachable in here. Every node of a timeframe lands in that
+        timeframe's single function, so two of them sharing a sub-calculation
+        is correct rather than a dangling local, which is the opposite of what
+        a function per node required.
         """
-        with self.ctx.block(scoped=False) as body:
+        with self.ctx.block() as body:
             inner = produce(tf)
         request = self._request_for(tf)
         request["body"] += body
@@ -1098,8 +1100,16 @@ class SpecLowerer:
             # _decide composes those on the chart instead; what does is a
             # reference buried under a term, where there is no chart-level
             # composition to hoist it into.
+            #
+            # `pine_unsupported`, not a code of its own, and the reason is the
+            # caller's rather than this walk's: the validator accepts this
+            # shape and the engine evaluates it happily, so it reaches here
+            # from an ordinary saved spec. That is a 422 (Pine cannot say
+            # this), never a 500 (the compiler broke), and a distinct code
+            # would fall through to the latter on the caller's side. The
+            # message still names the nesting exactly.
             raise PineCompileError(
-                "pine_nested_timeframe",
+                "pine_unsupported",
                 f"{path.text}: {src_tf} is read inside a {host} request, and "
                 "request.security does not nest; move the reference up to the "
                 "spec's own timeframe", path=path.text, term=term)

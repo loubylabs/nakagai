@@ -4,20 +4,28 @@ Each JSON file under a specs directory is card metadata + a RuleSpec v2
 `spec`. load_catalog() turns them into RuleStrategy subclasses so a registry
 can serve them alongside user rules and composites. The directory is the
 content slot: the platform points these loaders at its curated specs
-(nakagai/registry.py); the loaders themselves know no fixed location."""
+(nakagai/registry.py); the loaders themselves know no fixed location.
+
+BOTH ARGUMENTS ARE REQUIRED, and the factory has no default on purpose. These
+loaders are @cache'd on their argument tuple, so `load_catalog(dir)` and
+`load_catalog(dir, house_vocabulary)` would be two entries over the same specs
+and hand back two different `Catalog_*` classes per play. Nothing raises on
+that: isinstance and registry identity simply start disagreeing, in a process
+where both spellings are reachable. A caller that has a vocabulary must say so,
+and a caller that wants the core's must pass core_vocabulary by name."""
 
 import json
 from functools import cache
 from pathlib import Path
 
 from nakagai.strategies.rules import (
-    RuleStrategy, VocabularyFactory, core_vocabulary, validate_spec,
+    RuleStrategy, VocabularyFactory, validate_spec,
 )
 
 
 @cache
 def load_entries(specs_dir: Path,
-                 vocabulary_factory: VocabularyFactory = core_vocabulary) -> dict[str, dict]:
+                 vocabulary_factory: VocabularyFactory) -> dict[str, dict]:
     vocabulary = vocabulary_factory()
     out = {}
     for path in sorted(Path(specs_dir).glob("*.json")):
@@ -31,7 +39,7 @@ def load_entries(specs_dir: Path,
 
 @cache
 def load_catalog(specs_dir: Path,
-                 vocabulary_factory: VocabularyFactory = core_vocabulary
+                 vocabulary_factory: VocabularyFactory
                  ) -> dict[str, type[RuleStrategy]]:
     out = {}
     base = RuleStrategy.bound(vocabulary_factory)

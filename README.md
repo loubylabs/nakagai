@@ -206,6 +206,37 @@ strategy specs), the evidence store and proving pipeline, the intraday scanner, 
 the hosted platform: API, web UI, and the mandate and approvals judgment layer.
 The hosted product at nakag.ai is built on top of this core.
 
+## Release notes
+
+### 0.2.0
+
+**Behavior change: `day_of_week` reads the weekday off the FRAME, not off a
+label's clock.** Backtest output moves for any play using `day_of_week` on an
+intraday frame; re-run anything that depends on it. The old predicate decided
+which clock to read by looking for a midnight-UTC label, and the bar caches are
+not regular-hours-only, so a 19:00 New York post-market bar carries exactly the
+label a resampled daily bar carries and was read as the next day: Tuesday, for a
+Monday evening. It answered wrong on one bar of a session and right on all the
+others, which is the shape of divergence a spec author never catches. The
+weekday is now the frame's to decide, per `strategies/rules/primitives.py`.
+
+**New: a Pine v6 compiler for RuleSpec v2.** `compile_pine(spec, vocabulary)`
+returns an indicator and a strategy, rendered from one lowering so the pair
+cannot disagree about which bar decided; `lower_pine` returns the
+target-neutral program underneath. Both are exported from
+`nakagai.strategies.rules`, alongside `PineBundle` and `PineCompileError`.
+Every export charts the engine's 15-minute driving cadence and requests a
+play's own timeframe rather than charting it, so the script refuses any other
+chart at runtime, and it requires extended trading hours for the same reason
+the engine's own frames carry pre-market bars.
+
+**Breaking: the catalog loaders require a vocabulary factory.**
+`load_catalog(specs_dir)` becomes `load_catalog(specs_dir, core_vocabulary)`,
+and the same for `load_entries`. Both are cached on their whole argument tuple,
+so a defaulted call and an explicit one built two different strategy classes
+over the same spec files, with `isinstance` quietly disagreeing and nothing
+raising.
+
 ## Development
 
 ```bash

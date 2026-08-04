@@ -1,5 +1,6 @@
 import importlib
 import json
+from functools import cache
 from pathlib import Path
 
 import pandas as pd
@@ -171,9 +172,20 @@ def test_vocabulary_is_immutable_and_rejects_cross_namespace_duplicates():
         vocab.with_terms(Term("sma", "primitive", {}, {}, lambda *_: None))
 
 
+def test_a_vocabulary_cannot_be_a_cache_key():
+    # Its docstring says so, and a docstring alone rots. Frozen dataclass, so
+    # __hash__ exists and the failure is a TypeError from inside the CALL, not
+    # a decorator error at import: a @cache keyed on one looks fine until the
+    # day it runs. Cache on the factory instead.
+    cached = cache(lambda vocab: len(vocab.indicators))
+    with pytest.raises(TypeError, match="unhashable"):
+        cached(core_vocabulary())
+    assert cache(lambda factory: len(factory().indicators))(core_vocabulary) == 22
+
+
 def test_existing_catalog_hashes_do_not_move():
     got = {name: spec_hash(entry["spec"])
-           for name, entry in load_entries(SPECS).items()}
+           for name, entry in load_entries(SPECS, core_vocabulary).items()}
     assert json.dumps(got, sort_keys=True) == json.dumps(CATALOG_HASHES, sort_keys=True)
 
 

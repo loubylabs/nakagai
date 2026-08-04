@@ -61,14 +61,18 @@ FVG_NEAREST = "nk_fvg_nearest"
 ORDER_BLOCK = "nk_order_block"
 
 # What the chart decides and the engine does not. Both group a session by the
-# bar's New York calendar day, so the rule is the same; the BARS in that day
-# are the chart's, and a chart with extended hours enabled opens its session
-# hours before the engine's own frame does. Everything measured from a
-# session's first bar, or aggregated over its whole span, moves with that.
+# bar's New York calendar day, and both start it in the pre-market rather than
+# at 09:30: extended hours are mandatory for an export and the script refuses a
+# chart without them. What is left is which pre-market bar comes FIRST.
+# TradingView opens its extended session at 04:00 New York and prints a bar
+# there whether or not one traded; Alpaca returns the day's first actual print,
+# which on a thin name can be an hour later or not exist at all. Everything
+# measured from a session's first bar, or aggregated over its whole span,
+# moves with that.
 SESSION_WINDOW = ("A session is the bar's New York calendar day in both "
-                  "engines, so a chart showing extended-hours bars opens its "
-                  "session on a different bar than the engine's own frame "
-                  "does.")
+                  "engines and both open it in the pre-market, but a chart's "
+                  "extended session opens at 04:00 while the engine's frame "
+                  "opens on the day's first actual print.")
 
 
 def emit_series_call(fn: str, *args: str):
@@ -388,8 +392,15 @@ _PRIMITIVE_HELPERS = (
     current := close
     previous""", (NEW_SESSION,)),
     # gap_pct: 100 * (this session's first open - last session's close) over
-    # that close. No zero guard, because the engine has none either: a zero
-    # prior close is not a price, and both sides answer na for it.
+    # that close. No zero guard, because the engine has none either.
+    #
+    # The two sides DIVERGE on a zero prior close, and that is recorded rather
+    # than fixed: pandas answers inf and Pine answers na, so `gap_pct > 2`
+    # would read True on the engine and False on the chart. Unreachable, since
+    # a zero close is not a price any equity prints. Guarding it here would put
+    # a branch in the artifact for a case neither side can meet, and guarding
+    # it on both sides would be a change to engine arithmetic to serve an
+    # export. If a zero close ever becomes reachable, this is the note.
     PineHelper(GAP_PCT, f"""{GAP_PCT}() =>
     var float session_open = na
     if {NEW_SESSION}()

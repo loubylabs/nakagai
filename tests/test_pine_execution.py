@@ -28,7 +28,7 @@ from types import SimpleNamespace
 
 from nakagai.data.schema import DEFAULT_TIMEFRAMES
 from nakagai.strategies.ict.primitives import atr as window_atr
-from nakagai.strategies.rules import compile_pine, primitives as prim
+from nakagai.strategies.rules import compile_pine, lower_pine, primitives as prim
 from nakagai.strategies.rules.frame_eval import FrameEval
 from nakagai.strategies.rules.pine.lowerings import HELPERS
 from nakagai.strategies.util import first_bar_of_session, fresh_bar
@@ -593,3 +593,22 @@ def test_a_play_that_requests_nothing_of_its_own_frame_is_still_gated(side):
     # defect's own signature and not only the bar set.
     assert 2 <= int(engine.sum()) <= len(FRAMES["1h"])
     assert int(pine.sum()) == int(engine.sum())
+
+
+def test_the_gate_alone_pins_the_premise_it_rests_on():
+    # Same shape as above, read for what the artifact SAYS rather than what it
+    # decides. The gate is `time_close("60") == time_close`, which is
+    # TradingView's hourly aggregation and is therefore anchored to the chart's
+    # session exactly as a request.security of 1h would be. The premise used to
+    # be written down only for timeframes something asked a value of, so this
+    # play, whose only 1h fact is its gate, shipped an artifact that never named
+    # the assumption its every signal rests on.
+    program = lower_pine(_spec_with(ALL_FOREIGN))
+    premise = [line for line in program.assumptions
+               if "nobody has measured on a chart" in line]
+    assert len(premise) == 1
+    assert 'plot time("60")' in premise[0]
+    # A 15m play has no such gate and must not carry the sentence.
+    flat = dict(_spec_with(ALL_FOREIGN), timeframe="15m")
+    assert not [line for line in lower_pine(flat).assumptions
+                if "nobody has measured on a chart" in line]

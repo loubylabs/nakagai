@@ -454,10 +454,13 @@ def test_a_primitive_with_a_fixed_reach_declares_no_history():
     assert _program({"prim": "prev_session_high"}).max_bars_back == 0
 
 
+# Not "extended hours might be off": they are mandatory and the script refuses
+# a chart without them. The residual difference is which pre-market bar is
+# first, TradingView's fixed 04:00 print against the day's first actual one.
 SESSION_WARNING = (
-    "A session is the bar's New York calendar day in both engines, so a chart "
-    "showing extended-hours bars opens its session on a different bar than the "
-    "engine's own frame does.")
+    "A session is the bar's New York calendar day in both engines and both "
+    "open it in the pre-market, but a chart's extended session opens at 04:00 "
+    "while the engine's frame opens on the day's first actual print.")
 
 
 WARNS = ["opening_range_high", "opening_range_low", "prev_session_high",

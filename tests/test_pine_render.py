@@ -106,7 +106,7 @@ def test_rendering_is_atomic(monkeypatch, load_rule_spec):
 def test_a_spec_that_does_not_compile_yields_no_artifact_at_all():
     with pytest.raises(PineCompileError) as exc:
         compile_pine({"version": 2, "name": "probe", "timeframe": "15m"})
-    assert exc.value.code == "pine_invalid_spec"
+    assert exc.value.code == "invalid_spec"
 
 
 def test_repeated_compilation_is_byte_identical(load_rule_spec):
@@ -534,4 +534,3 @@ def test_no_dash_lookalike_reaches_an_artifact(name, load_rule_spec):
         assert "—" not in source
         assert "–" not in source
         assert " · " in source
-

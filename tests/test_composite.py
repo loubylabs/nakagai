@@ -6,6 +6,7 @@ import pytest
 
 from nakagai.strategies.catalog import load_catalog
 from nakagai.strategies.composite import CompositeStrategy, validate_composite_spec
+from nakagai.strategies.rules import core_vocabulary
 
 SPECS = Path(__file__).resolve().parents[1] / "nakagai" / "strategies" / "catalog" / "specs"
 
@@ -22,7 +23,7 @@ def _two_member_spec():
 
 
 def test_validate_against_example_members():
-    members = load_catalog(SPECS)
+    members = load_catalog(SPECS, core_vocabulary)
     assert validate_composite_spec(_two_member_spec(), members, allow_refs=False) == []
 
 
@@ -32,7 +33,7 @@ def test_validate_rejects_unknown_member():
 
 
 def test_bound_composite_instantiates_members():
-    bound = CompositeStrategy.bound(load_catalog(SPECS))
+    bound = CompositeStrategy.bound(load_catalog(SPECS, core_vocabulary))
     strat = bound({"spec": _two_member_spec()})
     assert strat is not None
 

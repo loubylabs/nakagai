@@ -3,8 +3,10 @@
 Six plays, chosen so that between them they reach every shape of the language
 that changes what the renderer writes:
 
-    sma_cross           ordinary indicators, crosses, and a chart that is not
-                        15m, so the runtime guard has to name its own
+    sma_cross           ordinary indicators, crosses, and a 1h PLAY on the one
+                        15m chart every export charts, so its conditions are
+                        requested rather than charted and its decisions are
+                        gated to one chart bar an hour
     orb                 session primitives, a conditional exit, and a time stop
     ifvg_reversal       a foreign timeframe, bars_since, swings, and fair value
                         gap state

@@ -25,10 +25,15 @@ def lower_pine(spec: dict, vocabulary: Vocabulary | None = None) -> PineProgram:
     vocabulary = resolve_vocabulary(vocabulary)
     errs = validate_spec(spec, vocabulary)
     if errs:
+        # The strings ride along on `errors` as well as in the joined message.
+        # A caller turning this into a 422 owes the user the validator's own
+        # wording per error, and re-running validate_spec to recover it would
+        # be a second validation pass that could in principle disagree with
+        # the one that already refused.
         raise PineCompileError(
-            "pine_invalid_spec",
+            "invalid_spec",
             "the spec does not validate, so there is nothing to lower: "
-            + "; ".join(errs))
+            + "; ".join(errs), errors=tuple(errs))
     return SpecLowerer(spec, vocabulary).run()
 
 

@@ -5,11 +5,16 @@ RuleSpec path and term, rather than emitting Pine that looks plausible and
 trades differently from the engine.
 """
 
+import ast
+from pathlib import Path
+
 import pytest
 
 from nakagai.strategies.rules import (
     PineCompileError, PineExpr, PineHelper, PineLowering, lower_pine,
+    validate_spec,
 )
+from nakagai.strategies.rules import pine
 from nakagai.strategies.rules.pine.lowerings import HELPERS
 from nakagai.strategies.rules.vocabulary import Term, core_vocabulary
 
@@ -181,8 +186,34 @@ def test_a_lowering_that_names_no_field_at_all_is_refused_too():
 def test_a_spec_that_does_not_validate_is_refused_before_any_pine_is_built():
     with pytest.raises(PineCompileError) as exc:
         lower_pine({"version": 2, "name": "probe", "timeframe": "15m"})
-    assert exc.value.code == "pine_invalid_spec"
+    assert exc.value.code == "invalid_spec"
     assert "long/short" in str(exc.value)
+
+
+def test_an_invalid_spec_carries_the_validator_strings_it_was_refused_by():
+    # A caller rendering this as a 422 owes the user the validator's own
+    # wording, per error. Recovering it by joining and re-splitting the
+    # message would break on any error containing the separator, and
+    # re-running validate_spec would be a second pass that could disagree.
+    spec = {"version": 2, "name": "probe", "timeframe": "15m",
+            "long": {"all": [{"lhs": {"ind": "sma", "n": 9000}, "op": ">",
+                              "rhs": 0}]}}
+    with pytest.raises(PineCompileError) as exc:
+        lower_pine(spec)
+    assert exc.value.code == "invalid_spec"
+    assert exc.value.errors == tuple(validate_spec(spec, core_vocabulary()))
+    assert exc.value.errors
+    for err in exc.value.errors:
+        assert err in str(exc.value)
+
+
+def test_every_other_refusal_carries_no_error_list():
+    # `errors` is the invalid_spec refusal's alone. A caller reading it on any
+    # other code would render an empty list as if the validator had spoken.
+    vocab = _vocabulary_with_unsupported_indicator("moon_phase")
+    with pytest.raises(PineCompileError) as exc:
+        lower_pine(_spec_using("moon_phase"), vocab)
+    assert exc.value.errors == ()
 
 
 def test_a_timeframe_inside_another_timeframe_is_refused():
@@ -194,7 +225,11 @@ def test_a_timeframe_inside_another_timeframe_is_refused():
                               "op": ">", "rhs": 0}]}}
     with pytest.raises(PineCompileError) as exc:
         lower_pine(spec)
-    assert exc.value.code == "pine_nested_timeframe"
+    # pine_unsupported, because this reaches the compiler from a spec the
+    # validator accepts: it is the language's limit, not a broken compiler,
+    # and a caller maps it to 422 alongside every other thing Pine cannot say.
+    assert exc.value.code == "pine_unsupported"
+    assert "does not nest" in str(exc.value)
     assert exc.value.path == "long.all[0].lhs.of"
     # A source has no term to name; the next test covers the one that has.
     assert exc.value.term == ""
@@ -208,9 +243,45 @@ def test_a_nested_timeframe_names_the_term_it_refuses():
                               "op": ">", "rhs": 0}]}}
     with pytest.raises(PineCompileError) as exc:
         lower_pine(spec)
-    assert exc.value.code == "pine_nested_timeframe"
+    assert exc.value.code == "pine_unsupported"
+    assert "does not nest" in str(exc.value)
     assert exc.value.path == "long.all[0].lhs.of"
     assert exc.value.term == "ema"
+
+
+def _codes_the_compiler_can_raise() -> set[str]:
+    """Every code literal the pine package hands PineCompileError, off its AST.
+
+    Source rather than behaviour on purpose: a code only some unreached branch
+    can raise is still part of the contract, and a test that could only see the
+    ones this suite happens to trigger would miss exactly the new one. The
+    WHOLE package, for the same reason: today only compiler.py and lower.py
+    refuse, and a first refusal added in render.py has to land here too.
+    """
+    out, sites = set(), 0
+    for path in sorted(Path(pine.__file__).parent.glob("*.py")):
+        for node in ast.walk(ast.parse(path.read_text())):
+            if (isinstance(node, ast.Call)
+                    and getattr(node.func, "id", "") == "PineCompileError"):
+                sites += 1
+                assert isinstance(node.args[0], ast.Constant), \
+                    f"{path.name}:{node.lineno} raises a code that is not a literal"
+                out.add(node.args[0].value)
+    assert sites, "found no refusal at all, so this proves nothing"
+    return out
+
+
+def test_the_whole_refusal_vocabulary_is_exactly_these_six_codes():
+    # The platform pins this core by SHA and maps the codes to HTTP status, so
+    # the set is a published contract rather than an implementation detail. A
+    # seventh code added without a caller taught about it lands in that
+    # caller's 500 bucket, whatever it actually means, and the caller cannot
+    # fix a name from its side. Only invalid_spec and pine_unsupported are
+    # things a user did; the other four are the compiler admitting a hole.
+    assert _codes_the_compiler_can_raise() == {
+        "invalid_spec", "pine_unsupported", "pine_bad_input",
+        "pine_identifier_collision", "pine_unknown_helper",
+        "pine_generation_failed"}
 
 
 def test_a_term_whose_pine_slot_is_not_a_lowering_is_refused_where_it_is_built():

@@ -54,9 +54,9 @@
 //     decided. So a re-entry after one lands a bar later here: the engine can
 //     signal again on the very bar it closed, while this strategy is still
 //     holding the position when that bar's decision is read and skips it.
-//   - A session is the bar's New York calendar day in both engines, so a chart
-//     showing extended-hours bars opens its session on a different bar than
-//     the engine's own frame does.
+//   - A session is the bar's New York calendar day in both engines and both
+//     open it in the pre-market, but a chart's extended session opens at 04:00
+//     while the engine's frame opens on the day's first actual print.
 //
 // Editing any input below creates a TradingView-local variation: its results
 // no longer represent the spec hash above, and Nakagai cannot read that

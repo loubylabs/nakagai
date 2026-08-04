@@ -104,6 +104,16 @@ class Term:
 
 @dataclass(frozen=True)
 class Vocabulary:
+    """Two namespaces of Terms; see the module docstring for what a Term owns.
+
+    UNHASHABLE, despite being a frozen dataclass: both fields are mappings, so
+    the generated __hash__ raises TypeError on the dicts it hashes. That makes
+    @cache or @lru_cache keyed on a Vocabulary fail at CALL time rather than at
+    import, which is the trap. Cache on the FACTORY instead (VocabularyFactory
+    is a plain callable and hashes by identity), which is what the catalog
+    loaders take and why they take it.
+    """
+
     indicators: Mapping[str, Term]
     primitives: Mapping[str, Term]
 

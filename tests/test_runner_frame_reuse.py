@@ -13,12 +13,13 @@ from nakagai.data.schema import DEFAULT_TIMEFRAMES
 from nakagai.engine.runner import run_grid
 from nakagai.engine.windows import walk_forward
 from nakagai.strategies.catalog import load_catalog
+from nakagai.strategies.rules import core_vocabulary
 
 SPECS = Path(__file__).resolve().parents[1] / "nakagai" / "strategies" / "catalog" / "specs"
 
 
 def _registry():
-    return load_catalog(SPECS)
+    return load_catalog(SPECS, core_vocabulary)
 
 
 def test_frames_load_once_per_symbol_not_once_per_window(tmp_path, make_bars, monkeypatch):

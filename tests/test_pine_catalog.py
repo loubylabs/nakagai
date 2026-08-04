@@ -9,10 +9,10 @@ this is the near end of that guarantee rather than a duplicate of it.
 import pytest
 
 from nakagai.strategies.catalog import load_entries
-from nakagai.strategies.rules import compile_pine, spec_hash
+from nakagai.strategies.rules import compile_pine, core_vocabulary, spec_hash
 from tests.test_catalog import SPECS
 
-ENTRIES = sorted(load_entries(SPECS).items())
+ENTRIES = sorted(load_entries(SPECS, core_vocabulary).items())
 
 
 @pytest.mark.parametrize("name, entry", ENTRIES, ids=[n for n, _ in ENTRIES])
