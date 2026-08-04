@@ -149,11 +149,11 @@ def _bar(name, args, defaults, fn, pine) -> Term:
     return Term(name, "bar", args, defaults, fn, pine=pine)
 
 
-def _primitive(name, args, defaults, fn, *, end_anchored=False,
+def _primitive(name, args, defaults, fn, pine, *, end_anchored=False,
                session_scoped=False, driving_frame_intraday=False) -> Term:
     return Term(name, "primitive", args, defaults, fn, doc=fn.__doc__ or "",
                 end_anchored=end_anchored, session_scoped=session_scoped,
-                driving_frame_intraday=driving_frame_intraday)
+                driving_frame_intraday=driving_frame_intraday, pine=pine)
 
 
 @cache
@@ -270,17 +270,38 @@ def core_vocabulary() -> Vocabulary:
     # is why the two flags do not track each other; see day_of_week and rvol.
     primitives = (
         _primitive("opening_range_high", {"minutes": (5, 120)}, {"minutes": 30},
-                   prim.opening_range_high, session_scoped=True,
-                   driving_frame_intraday=True),
+                   prim.opening_range_high,
+                   PineLowering(pine.emit_primitive(pine.OPENING_RANGE_HIGH,
+                                                    "minutes", session=True),
+                                helpers=(pine.OPENING_RANGE_HIGH,)),
+                   session_scoped=True, driving_frame_intraday=True),
         _primitive("opening_range_low", {"minutes": (5, 120)}, {"minutes": 30},
-                   prim.opening_range_low, session_scoped=True,
-                   driving_frame_intraday=True),
-        _primitive("prev_session_high", {}, {}, prim.prev_session_high),
-        _primitive("prev_session_low", {}, {}, prim.prev_session_low),
-        _primitive("prev_session_close", {}, {}, prim.prev_session_close),
-        _primitive("gap_pct", {}, {}, prim.gap_pct),
-        _primitive("swing_high", {"k": (1, 10)}, {"k": 3}, prim.swing_high),
-        _primitive("swing_low", {"k": (1, 10)}, {"k": 3}, prim.swing_low),
+                   prim.opening_range_low,
+                   PineLowering(pine.emit_primitive(pine.OPENING_RANGE_LOW,
+                                                    "minutes", session=True),
+                                helpers=(pine.OPENING_RANGE_LOW,)),
+                   session_scoped=True, driving_frame_intraday=True),
+        _primitive("prev_session_high", {}, {}, prim.prev_session_high,
+                   PineLowering(pine.emit_primitive(pine.PREV_SESSION_HIGH,
+                                                    session=True),
+                                helpers=(pine.PREV_SESSION_HIGH,))),
+        _primitive("prev_session_low", {}, {}, prim.prev_session_low,
+                   PineLowering(pine.emit_primitive(pine.PREV_SESSION_LOW,
+                                                    session=True),
+                                helpers=(pine.PREV_SESSION_LOW,))),
+        _primitive("prev_session_close", {}, {}, prim.prev_session_close,
+                   PineLowering(pine.emit_primitive(pine.PREV_SESSION_CLOSE,
+                                                    session=True),
+                                helpers=(pine.PREV_SESSION_CLOSE,))),
+        _primitive("gap_pct", {}, {}, prim.gap_pct,
+                   PineLowering(pine.emit_primitive(pine.GAP_PCT, session=True),
+                                helpers=(pine.GAP_PCT,))),
+        _primitive("swing_high", {"k": (1, 10)}, {"k": 3}, prim.swing_high,
+                   PineLowering(pine.emit_swing(pine.SWING_HIGH),
+                                helpers=(pine.SWING_HIGH,))),
+        _primitive("swing_low", {"k": (1, 10)}, {"k": 3}, prim.swing_low,
+                   PineLowering(pine.emit_swing(pine.SWING_LOW),
+                                helpers=(pine.SWING_LOW,))),
         # Session-scoped, and deliberately NOT driving_frame_intraday. Reading
         # a weekday off a 1h frame inside a 15m spec is a category error, which
         # is why it takes no tf; reading a weekday off your own daily bars is
@@ -290,8 +311,14 @@ def core_vocabulary() -> Vocabulary:
         # (see its docstring). turnaround_tuesday is a shipped 1d catalog play
         # whose entire premise is day_of_week; refusing it would break a
         # shipped play over a reading that is right.
-        _primitive("day_of_week", {}, {}, prim.day_of_week, session_scoped=True),
+        _primitive("day_of_week", {}, {}, prim.day_of_week,
+                   PineLowering(pine.emit_primitive(pine.DAY_OF_WEEK),
+                                helpers=(pine.DAY_OF_WEEK,)),
+                   session_scoped=True),
         _primitive("minutes_into_session", {}, {}, prim.minutes_into_session,
+                   PineLowering(pine.emit_primitive(pine.MINUTES_INTO_SESSION,
+                                                    session=True),
+                                helpers=(pine.MINUTES_INTO_SESSION,)),
                    session_scoped=True, driving_frame_intraday=True),
         # driving_frame_intraday, and that is a decision rather than an
         # accident of grouping. On daily bars rvol does not go NaN, it
@@ -305,8 +332,12 @@ def core_vocabulary() -> Vocabulary:
         # its own name, never an overload of this one, and the refusal message
         # in spec.py says so.
         _primitive("rvol", {"sessions": (5, 60)}, {"sessions": 20}, prim.rvol,
+                   PineLowering(pine.emit_primitive(pine.RVOL, "sessions"),
+                                helpers=(pine.RVOL,)),
                    session_scoped=True, driving_frame_intraday=True),
-        _primitive("bars_since", {"cond": "condition"}, {}, prim.bars_since),
+        _primitive("bars_since", {"cond": "condition"}, {}, prim.bars_since,
+                   PineLowering(pine.emit_bars_since,
+                                helpers=(pine.BARS_SINCE,))),
         # end_anchored, here and on order_block: the value is anchored to the
         # END of the frame handed in, one float off the tail rather than a
         # causal series. A whole-frame pass may not broadcast that across
@@ -320,16 +351,24 @@ def core_vocabulary() -> Vocabulary:
                                     "lookback": (10, 200)},
                    {"direction": "long", "field": "top", "state": "open",
                     "min_size_atr": 0.25, "lookback": 40},
-                   prim.fvg_nearest, end_anchored=True),
+                   prim.fvg_nearest,
+                   PineLowering(pine.emit_fvg_nearest,
+                                helpers=(pine.FVG_NEAREST,)),
+                   end_anchored=True),
         _primitive("leg_retrace", {"direction": ("long", "short"),
                                     "k": (1, 10)},
-                   {"direction": "long", "k": 3}, prim.leg_retrace),
+                   {"direction": "long", "k": 3}, prim.leg_retrace,
+                   PineLowering(pine.emit_leg_retrace,
+                                helpers=(pine.LEG_RETRACE,))),
         _primitive("order_block", {"direction": ("long", "short"),
                                     "field": ("top", "bottom", "mid"),
                                     "body_atr": (0.5, 5.0),
                                     "lookback": (10, 200)},
                    {"direction": "long", "field": "top", "body_atr": 1.5,
-                    "lookback": 40}, prim.order_block, end_anchored=True),
+                    "lookback": 40}, prim.order_block,
+                   PineLowering(pine.emit_order_block,
+                                helpers=(pine.ORDER_BLOCK,)),
+                   end_anchored=True),
     )
     return Vocabulary({term.name: term for term in indicators},
                       {term.name: term for term in primitives})

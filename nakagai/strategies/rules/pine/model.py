@@ -103,6 +103,12 @@ class TermCall:
     inventing a second numbering. `content` is the node's canonical form with
     the field stripped, which is what makes two spellings of the same
     calculation share one set of inputs.
+
+    `source` is the operand the term is applied to, already lowered: the `of`
+    series for an indicator that measures one, and the condition for a
+    primitive that takes one. Both arrive here rather than as spec shapes,
+    because walking a spec belongs to the walk and an emit function only ever
+    composes Pine out of pieces it is handed.
     """
 
     # `Term` and `PineContext` stay forward references on purpose: vocabulary.py

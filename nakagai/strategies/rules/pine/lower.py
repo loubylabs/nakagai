@@ -41,7 +41,7 @@ from nakagai.strategies.rules.spec import (
     TRAILING_ATR_MULT_BOUNDS, TRAILING_ATR_MULT_DEFAULT, TRAILING_ATR_N_BOUNDS,
     TRAILING_ATR_N_DEFAULT, TRAILING_PCT_BOUNDS, TRAILING_PCT_DEFAULT,
 )
-from nakagai.strategies.rules.vocabulary import Vocabulary
+from nakagai.strategies.rules.vocabulary import Vocabulary, is_choice_rule
 
 # The engine's timeframes in Pine's spelling. Every timeframe the grammar
 # admits needs an entry; one without would otherwise reach request.security as
@@ -234,6 +234,27 @@ class PineContext:
                            call.args[name], rule,
                            share=(call.content, name), term=call.term.name)
 
+    def choice(self, call: TermCall, name: str) -> str:
+        """One of a term's declared choice arguments, as the name it picks.
+
+        A choice never becomes an input, and that is the point: it decides
+        which Pine the lowering writes (which gaps a scan keeps, which way a
+        retracement is measured), so a knob for it on the chart would let a
+        user select a strategy the compiler never generated. The rule is read
+        the same way arg() reads a numeric one, so a term whose own default
+        drifted outside its declared choices is refused by name rather than
+        silently baking an unknown literal into the artifact.
+        """
+        rule = self._rule(call, name)
+        value = call.args.get(name)
+        if not is_choice_rule(rule) or value not in rule:
+            raise PineCompileError(
+                "pine_bad_input",
+                f"{call.path.text}: {call.term.name}.{name} must be one of "
+                f"{rule}, got {value!r}",
+                path=call.path.text, term=call.term.name)
+        return str(value)
+
     def inputs(self) -> tuple[PineInput, ...]:
         return _resolve_labels(self._inputs, self._blocks)
 
@@ -267,16 +288,19 @@ class PineContext:
         for name in names:
             self._touch(name, path)
 
-    def needs_history(self, call: TermCall, name: str) -> None:
+    def needs_history(self, call: TermCall, name: str, reach: int = 1) -> None:
         """Declare that this term indexes history by a non-constant offset.
 
         TradingView reads a series' historical buffer off the constant offsets
         it can see, so an offset carried by an input makes it refuse with
         "Pine cannot determine the referencing length of series" unless the
         script declares max_bars_back. The argument's own upper bound is the
-        deepest the offset can reach.
+        deepest the offset can reach, times `reach` where the term indexes a
+        multiple of it: a swing confirmed k bars after its pivot compares that
+        pivot against the k bars on each side, so it reads 2k bars back and a
+        buffer sized for k would be short by half.
         """
-        self._history = max(self._history, int(self._rule(call, name)[1]))
+        self._history = max(self._history, reach * int(self._rule(call, name)[1]))
 
     def max_bars_back(self) -> int:
         return self._history
@@ -342,21 +366,48 @@ class PineContext:
         self.warnings.append(text)
 
     def helper_sources(self) -> tuple[PineHelper, ...]:
-        """Every required helper, dependencies first, in one stable order."""
+        """Every required helper, dependencies first, in one stable order.
+
+        A Pine function may only call a function already defined above it, so
+        the order is a topological sort of the graph the required helpers
+        reach. Ties break lexically, and a whole ready layer is emitted at once
+        in that order, so the same set of helpers comes out in the same order
+        whatever order the walk happened to reach them in. That is what makes
+        two compilations of one spec byte-identical rather than merely
+        equivalent.
+
+        Both ways the graph can be wrong stop generation rather than emitting
+        Pine that TradingView reports from the chart: a dependency no helper is
+        registered as would call an undefined function, and a cycle has no
+        order at all.
+        """
+        needed: dict[str, PineHelper] = {}
+        frontier = [(helper_id, "the program") for helper_id in self._helpers]
+        while frontier:
+            helper_id, named_by = frontier.pop()
+            if helper_id in needed:
+                continue
+            helper = HELPERS.get(helper_id)
+            if helper is None:
+                raise PineCompileError(
+                    "pine_generation_failed",
+                    f"{named_by} needs the Pine helper {helper_id!r}, which no "
+                    "helper is registered as")
+            needed[helper_id] = helper
+            frontier.extend((d, repr(helper_id)) for d in helper.dependencies)
         out: list[PineHelper] = []
-        seen: set[str] = set()
-
-        def visit(helper_id: str, path: RulePath) -> None:
-            if helper_id in seen:
-                return
-            seen.add(helper_id)
-            helper = HELPERS[self.helper(helper_id, path)]
-            for dependency in sorted(helper.dependencies):
-                visit(dependency, path)
-            out.append(helper)
-
-        for helper_id in sorted(self._helpers):
-            visit(helper_id, RulePath(("helpers",)))
+        emitted: set[str] = set()
+        while len(emitted) < len(needed):
+            ready = sorted(i for i, h in needed.items()
+                           if i not in emitted and set(h.dependencies) <= emitted)
+            if not ready:
+                raise PineCompileError(
+                    "pine_generation_failed",
+                    "the Pine helpers "
+                    f"{sorted(set(needed) - emitted)} call each other in a "
+                    "cycle, so no order defines each one above its callers")
+            out.extend(needed[i] for i in ready)
+            emitted.update(ready)
         return tuple(out)
 
 
@@ -514,10 +565,49 @@ class SpecLowerer:
     def _condition(self, cond: dict, path: RulePath, frame: str) -> str:
         lhs = self._expr(cond["lhs"], path.child("lhs"), frame)
         rhs = self._expr(cond["rhs"], path.child("rhs"), frame)
-        cross = COMPARISONS.get(cond["op"])
-        # Comparisons bind tighter than `and`/`or` in Pine, so the enclosing
-        # group's parentheses are the only ones a condition needs.
-        return f"{cross}({lhs}, {rhs})" if cross else f"{lhs} {cond['op']} {rhs}"
+        op = cond["op"]
+        if op not in COMPARISONS:
+            # Comparisons bind tighter than `and`/`or` in Pine, so the
+            # enclosing group's parentheses are the only ones a plain one needs.
+            return f"{lhs} {op} {rhs}"
+        if self._end_anchored(cond["rhs"]):
+            # frame_eval._cross_prev broadcasts an end-anchored operand rather
+            # than shifting it, and ta.crossover shifts both sides. The
+            # difference is not a rounding: between two bars the nearest gap
+            # can become a DIFFERENT gap at a different price, so the level one
+            # bar ago is another object rather than this level's history, and
+            # comparing against it registers a crossing where price crossed
+            # nothing. Ask the question the trader is asking, on both bars:
+            # did price cross THIS level. The grammar admits an end-anchored
+            # operand bare on the right of a cross and nowhere else, which is
+            # exactly the shape handled here.
+            series = self._named(lhs, path.child("lhs"))
+            held, crossed = (("<=", ">") if op == "crosses_above"
+                             else (">=", "<"))
+            return (f"({series}[1] {held} {rhs} and "
+                    f"{series} {crossed} {rhs})")
+        return f"{COMPARISONS[op]}({lhs}, {rhs})"
+
+    def _end_anchored(self, node) -> bool:
+        if not isinstance(node, dict):
+            return False
+        term = self.vocabulary.primitives.get(node.get("prim"))
+        return term is not None and term.end_anchored
+
+    def _named(self, text: str, path: RulePath) -> str:
+        """Bind an expression to an identifier, so Pine can index its history.
+
+        Pine's [] operator reads an identifier, not a parenthesized expression,
+        so an operand that lowered to `(high - low)` has to be named before the
+        cross above can ask it for its previous bar. An operand that is already
+        an identifier (a source, or a term's own calculation) is left alone.
+        """
+        if text.isidentifier():
+            return text
+        name = self.ctx.claim("nk_" + "_".join(_sanitize(p) for p in path.parts),
+                              path)
+        self.ctx.statement(f"{name} = {text}")
+        return name
 
     # -- expressions ---------------------------------------------------
     def _expr(self, node, path: RulePath, frame: str) -> str:
@@ -575,6 +665,12 @@ class SpecLowerer:
         if term.kind in ("series", "frame"):
             source = self._expr(node.get("of", {"src": "close"}),
                                 path.child("of"), frame)
+        elif "cond" in node:
+            # bars_since measures a condition rather than a series, and a
+            # condition is the walk's to lower: an emit function is handed
+            # operands, never spec shapes. Same slot, because it is the same
+            # concept, the operand the term is applied to.
+            source = self._condition(node["cond"], path.child("cond"), frame)
         call = TermCall(term=term, args=args, path=path,
                         slot=self.ctx.slot(f"nk_{term.name}", path),
                         source=source, content=_content(node, self.vocabulary))

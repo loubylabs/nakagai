@@ -39,10 +39,14 @@ def test_one_term_owns_its_complete_contract():
     assert term.args == {"n": (2, 500)}
     assert term.defaults == {"n": 20}
     assert callable(term.fn)
-    # The Pine slot is filled for the indicators and still empty for the
-    # stateful primitives, whose helpers are the next piece of the compiler.
+    # The Pine slot is part of the contract, on both sides of the vocabulary: a
+    # primitive carries the helpers its lowering leans on, an indicator that
+    # needs none carries an empty tuple.
     assert callable(term.pine.emit)
-    assert core_vocabulary().primitives["gap_pct"].pine is None
+    assert term.pine.helpers == ()
+    gap = core_vocabulary().primitives["gap_pct"]
+    assert callable(gap.pine.emit)
+    assert gap.pine.helpers == ("nk_gap_pct",)
 
 
 def test_injected_term_is_used_by_validation_and_frame_eval(make_bars):

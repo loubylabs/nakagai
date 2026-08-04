@@ -8,8 +8,9 @@ trades differently from the engine.
 import pytest
 
 from nakagai.strategies.rules import (
-    PineCompileError, PineExpr, PineLowering, lower_pine,
+    PineCompileError, PineExpr, PineHelper, PineLowering, lower_pine,
 )
+from nakagai.strategies.rules.pine.lowerings import HELPERS
 from nakagai.strategies.rules.vocabulary import Term, core_vocabulary
 
 
@@ -38,18 +39,6 @@ def test_missing_lowering_names_term_and_path():
     assert exc.value.term == "moon_phase"
 
 
-def test_a_stateful_primitive_is_named_as_the_gap_it_is():
-    # The primitives are Task 3's, and until then a spec using one is refused by
-    # name rather than compiled into something that only resembles it.
-    spec = {"version": 2, "name": "probe", "timeframe": "15m",
-            "long": {"all": [{"lhs": {"prim": "gap_pct"}, "op": ">", "rhs": 1}]}}
-    with pytest.raises(PineCompileError) as exc:
-        lower_pine(spec)
-    assert exc.value.code == "pine_unsupported"
-    assert exc.value.term == "gap_pct"
-    assert exc.value.path == "long.all[0].lhs"
-
-
 def test_a_lowering_that_names_an_unknown_helper_is_refused():
     vocab = core_vocabulary().with_terms(
         Term("borrowed", "series", {}, {}, lambda series, _args: series,
@@ -59,6 +48,55 @@ def test_a_lowering_that_names_an_unknown_helper_is_refused():
     assert exc.value.code == "pine_unknown_helper"
     assert exc.value.term == "borrowed"
     assert "nk_moon" in str(exc.value)
+
+
+def _borrowing(name: str, helper_id: str):
+    return core_vocabulary().with_terms(
+        Term(name, "series", {}, {}, lambda series, _args: series,
+             pine=PineLowering(_emit_close, helpers=(helper_id,))))
+
+
+def test_a_helper_dependency_nothing_answers_stops_generation(monkeypatch):
+    # A helper's dependencies decide what is defined above it. One naming a
+    # helper the registry does not hold would emit a call to an undefined Pine
+    # function, which TradingView reports from the chart rather than here.
+    monkeypatch.setitem(HELPERS, "nk_borrowed",
+                        PineHelper("nk_borrowed", "nk_borrowed() => nk_moon()",
+                                   ("nk_moon",)))
+    with pytest.raises(PineCompileError) as exc:
+        lower_pine(_spec_using("borrowed"), _borrowing("borrowed", "nk_borrowed"))
+    assert exc.value.code == "pine_generation_failed"
+    assert "nk_moon" in str(exc.value)
+
+
+def test_helpers_that_call_each_other_in_a_cycle_stop_generation(monkeypatch):
+    # Pine defines a function above its callers, so a cycle has no order at
+    # all. Emitting one of the two first would leave the other undefined.
+    for one, other in (("nk_ping", "nk_pong"), ("nk_pong", "nk_ping")):
+        monkeypatch.setitem(HELPERS, one,
+                            PineHelper(one, f"{one}() => {other}()", (other,)))
+    with pytest.raises(PineCompileError) as exc:
+        lower_pine(_spec_using("looped"), _borrowing("looped", "nk_ping"))
+    assert exc.value.code == "pine_generation_failed"
+    assert "nk_ping" in str(exc.value) and "nk_pong" in str(exc.value)
+
+
+def test_a_choice_argument_whose_default_drifted_is_refused():
+    # validate_spec only ever checks the values a SPEC supplies, so a term
+    # whose own default is not one of its declared choices reaches the compiler
+    # intact and would otherwise bake an unknown literal into the artifact.
+    def emit(ctx, call):
+        return PineExpr(ctx.calc(call, f"nk_side_{ctx.choice(call, 'side')}"))
+
+    vocab = core_vocabulary().with_terms(
+        Term("tilted", "series", {"side": ("long", "short")},
+             {"side": "sideways"}, lambda series, _args: series,
+             pine=PineLowering(emit)))
+    with pytest.raises(PineCompileError) as exc:
+        lower_pine(_spec_using("tilted"), vocab)
+    assert exc.value.code == "pine_bad_input"
+    assert exc.value.term == "tilted"
+    assert "sideways" in str(exc.value)
 
 
 def test_two_arguments_that_sanitize_alike_collide_rather_than_merge():
