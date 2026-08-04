@@ -11,7 +11,10 @@ from typing import ClassVar
 from nakagai.strategies import indicators as ind
 from nakagai.strategies.base import Direction, MarketContext, PositionAction, Signal, Strategy
 from nakagai.strategies.risk import stop_target
-from nakagai.strategies.rules.spec import validate_spec
+from nakagai.strategies.rules.spec import (
+    TRAILING_ATR_MULT_DEFAULT, TRAILING_ATR_N_DEFAULT, TRAILING_PCT_DEFAULT,
+    validate_spec,
+)
 from nakagai.strategies.rules.vocabulary import (
     Vocabulary, VocabularyFactory, core_vocabulary, resolve_vocabulary,
 )
@@ -130,9 +133,10 @@ class RuleStrategy(Strategy):
         if "trailing" in exits:
             t = exits["trailing"]
             if t["kind"] == "atr":
-                a = ind.atr(bars, int(t.get("n", 14))).iloc[-1]
-                dist = float(t.get("mult", 2.0)) * a if not pd.isna(a) else float("nan")
+                a = ind.atr(bars, int(t.get("n", TRAILING_ATR_N_DEFAULT))).iloc[-1]
+                dist = (float(t.get("mult", TRAILING_ATR_MULT_DEFAULT)) * a
+                        if not pd.isna(a) else float("nan"))
             else:
-                dist = ref * float(t.get("pct", 2.0)) / 100
+                dist = ref * float(t.get("pct", TRAILING_PCT_DEFAULT)) / 100
             ratchet(ref - dist if long else ref + dist)
         return PositionAction.HOLD

@@ -30,14 +30,16 @@ from dataclasses import replace
 from nakagai.strategies.rules.canon import canonical_expr, spec_hash
 from nakagai.strategies.rules.pine.lowerings import DIV, HELPERS
 from nakagai.strategies.rules.pine.model import (
-    GENERATOR_VERSION, PineCompileError, PineHelper, PineInput, PineProgram,
-    RulePath, TermCall,
+    GENERATOR_VERSION, PineCompileError, PineExits, PineHelper, PineInput,
+    PineProgram, PineRisk, RulePath, TermCall,
 )
 from nakagai.strategies.rules.spec import (
-    BREAKEVEN_RR_BOUNDS, DEFAULT_RISK, STOP_ATR_MULT_BOUNDS, STOP_ATR_N_BOUNDS,
-    STOP_PCT_BOUNDS, TARGET_PCT_BOUNDS, TARGET_RR_BOUNDS, TIME_STOP_BOUNDS,
-    TIMEFRAMES, TRAILING_ATR_MULT_BOUNDS, TRAILING_ATR_N_BOUNDS,
-    TRAILING_PCT_BOUNDS,
+    BREAKEVEN_RR_BOUNDS, DEFAULT_RISK, STOP_ATR_MULT_BOUNDS,
+    STOP_ATR_MULT_DEFAULT, STOP_ATR_N_BOUNDS, STOP_ATR_N_DEFAULT,
+    STOP_PCT_BOUNDS, STOP_PCT_DEFAULT, TARGET_PCT_BOUNDS, TARGET_PCT_DEFAULT,
+    TARGET_RR_BOUNDS, TARGET_RR_DEFAULT, TIME_STOP_BOUNDS, TIMEFRAMES,
+    TRAILING_ATR_MULT_BOUNDS, TRAILING_ATR_MULT_DEFAULT, TRAILING_ATR_N_BOUNDS,
+    TRAILING_ATR_N_DEFAULT, TRAILING_PCT_BOUNDS, TRAILING_PCT_DEFAULT,
 )
 from nakagai.strategies.rules.vocabulary import Vocabulary
 
@@ -59,10 +61,24 @@ def _sanitize(part: str) -> str:
                    for c in str(part)).lower()
 
 
-def _label(parts, with_index: bool = False) -> str:
+def _label(parts, with_index: bool = False, with_block: bool = True) -> str:
+    """One input's row in the settings dialog, read off its path.
+
+    The leading block name goes when with_block is False, which is how an
+    input more than one block reaches is labelled: sma_cross's two sides share
+    one moving average, and heading its row "Long" would tell a chart's user
+    that moving it retunes the long side when it retunes both.
+    """
     keep = [p for p in parts
             if p not in STRUCTURAL and (with_index or not p.isdigit())]
+    if not with_block:
+        return " · ".join(keep[1:])
     return " · ".join([keep[0].capitalize(), *keep[1:]])
+
+
+def _term_name(node) -> str:
+    """The vocabulary term a node names, or "" for a source or a math op."""
+    return str(node.get("ind") or node.get("prim") or "")
 
 
 def _content(node, vocabulary: Vocabulary) -> str:
@@ -108,6 +124,11 @@ def _typed(value, bounds, path: RulePath, term: str):
             None if bounds is None else tuple(cast(b) for b in bounds))
 
 
+# One memoized node: the identifier answering each of its fields, and every
+# input its production reached.
+_Memo = tuple[dict[str, str], frozenset[str]]
+
+
 class PineContext:
     """The mutable half of a lowering: symbols, inputs, statements, helpers.
 
@@ -125,7 +146,13 @@ class PineContext:
         self._shared: dict[tuple[str, str], str] = {}
         self._fields: dict[str, dict[str, str]] = {}
         self._sinks: list[list[str]] = [[]]
-        self._scopes: list[dict[tuple[str, str], dict[str, str]]] = [{}]
+        # One memo entry per node: the identifiers it answers, and every input
+        # its production touched, so a later block hitting the memo can still
+        # say it reached those inputs.
+        self._scopes: list[dict[tuple[str, str], _Memo]] = [{}]
+        self._blocks: dict[str, set[str]] = {}
+        self._reaching: list[set[str]] = []
+        self._history = 0
 
     # -- statements ----------------------------------------------------
     def statement(self, text: str) -> None:
@@ -175,30 +202,84 @@ class PineContext:
     def number(self, path: RulePath, value, bounds=None, *, share=None,
                term: str = "") -> str:
         if share is not None and share in self._shared:
-            return self._shared[share]
+            return self._touch(self._shared[share], path)
         name = self.claim("nk_" + "_".join(_sanitize(p) for p in path.parts),
                           path)
         kind, default, bounds = _typed(value, bounds, path, term)
-        self._inputs.append(
-            (path, PineInput(name, _label(path.parts), kind, default, bounds)))
+        # The label is left blank here and settled once, in _resolve_labels:
+        # what a row should read depends on the whole program, not on this path.
+        self._inputs.append((path, PineInput(name, "", kind, default, bounds)))
         if share is not None:
             self._shared[share] = name
-        return name
+        return self._touch(name, path)
 
-    def arg(self, call: TermCall, name: str) -> str:
-        """The input identifier for one of a term's declared arguments."""
+    def _rule(self, call: TermCall, name: str):
+        """One of a term's declared argument rules, or a refusal naming it."""
         if name not in call.term.args:
             raise PineCompileError(
                 "pine_bad_input",
                 f"{call.path.text}: {call.term.name} declares no argument "
                 f"{name!r}, so its Pine form cannot read one",
                 path=call.path.text, term=call.term.name)
+        return call.term.args[name]
+
+    def arg(self, call: TermCall, name: str) -> str:
+        """The input identifier for one of a term's declared arguments.
+
+        The rule is read before the value, so an argument the schema never
+        declared is refused by name rather than raising a KeyError on args.
+        """
+        rule = self._rule(call, name)
         return self.number(call.path.child(call.term.name, name),
-                           call.args[name], call.term.args[name],
+                           call.args[name], rule,
                            share=(call.content, name), term=call.term.name)
 
     def inputs(self) -> tuple[PineInput, ...]:
-        return _resolve_labels(self._inputs)
+        return _resolve_labels(self._inputs, self._blocks)
+
+    # -- reach ---------------------------------------------------------
+    def _touch(self, name: str, path: RulePath) -> str:
+        """Record that the block at `path` reaches the input `name`."""
+        if path.parts:
+            self._blocks.setdefault(name, set()).add(path.parts[0])
+        for frame in self._reaching:
+            frame.add(name)
+        return name
+
+    @contextmanager
+    def reaching(self):
+        """Collect every input the enclosed production reaches.
+
+        Nested frames merge outwards, so a node's set covers the inputs of the
+        nodes it is built from as well as its own.
+        """
+        frame: set[str] = set()
+        self._reaching.append(frame)
+        try:
+            yield frame
+        finally:
+            self._reaching.pop()
+            for outer in self._reaching:
+                outer |= frame
+
+    def reached(self, names, path: RulePath) -> None:
+        """Attribute an already-built node's inputs to another path's block."""
+        for name in names:
+            self._touch(name, path)
+
+    def needs_history(self, call: TermCall, name: str) -> None:
+        """Declare that this term indexes history by a non-constant offset.
+
+        TradingView reads a series' historical buffer off the constant offsets
+        it can see, so an offset carried by an input makes it refuse with
+        "Pine cannot determine the referencing length of series" unless the
+        script declares max_bars_back. The argument's own upper bound is the
+        deepest the offset can reach.
+        """
+        self._history = max(self._history, int(self._rule(call, name)[1]))
+
+    def max_bars_back(self) -> int:
+        return self._history
 
     # -- calculations --------------------------------------------------
     def calc(self, call: TermCall, text: str) -> str:
@@ -224,7 +305,20 @@ class PineContext:
         A single-valued term never calls this. A multi-field one must, because
         a request.security lifting the node has to carry every member across,
         not only the field this particular node happened to ask for.
+
+        The mapping is checked against the term's declared choices here rather
+        than after emit returns, because every lowering ends in
+        `ctx.fields(...)[call.field]`: a field the mapping missed would be a
+        raw KeyError out of the emit function, naming neither term nor path.
         """
+        missing = [f for f in self._rule(call, "field") if f not in mapping]
+        if missing:
+            raise PineCompileError(
+                "pine_bad_input",
+                f"{call.path.text}: {call.term.name}'s Pine form answers "
+                f"{sorted(mapping)!r} and so leaves the declared field(s) "
+                f"{missing!r} with nothing behind them",
+                path=call.path.text, term=call.term.name)
         self._fields[call.slot] = dict(mapping)
         return self._fields[call.slot]
 
@@ -266,20 +360,29 @@ class PineContext:
         return tuple(out)
 
 
-def _resolve_labels(items) -> tuple[PineInput, ...]:
-    """Give every input a label no other input in the program shares.
+def _resolve_labels(items, blocks: dict[str, set[str]]) -> tuple[PineInput, ...]:
+    """Settle every label at once: the one decision that needs the whole program.
 
-    Two conditions in one group differ only by their index, which a label
-    drops, so `sma(20) > 0 and sma(50) > 0` would put two identical rows in the
-    settings dialog with no way to tell which moved which line. The index comes
+    Two things are only knowable here. An input that more than one top-level
+    block reaches belongs to none of them, so its label drops the block name
+    rather than claiming a side it does not own. And two conditions in one
+    group differ only by their index, which a label drops, so
+    `sma(20) > 0 and sma(50) > 0` would otherwise put two identical rows in the
+    settings dialog with no way to tell which moved which line: the index comes
     back for exactly those, and stays out of the rest.
     """
+
+    def label(path: RulePath, item: PineInput, with_index: bool = False) -> str:
+        return _label(path.parts, with_index=with_index,
+                      with_block=len(blocks.get(item.name, ())) < 2)
+
+    plain = [label(path, item) for path, item in items]
     counts: dict[str, int] = {}
-    for _, item in items:
-        counts[item.label] = counts.get(item.label, 0) + 1
-    return tuple(item if counts[item.label] == 1
-                 else replace(item, label=_label(path.parts, with_index=True))
-                 for path, item in items)
+    for text in plain:
+        counts[text] = counts.get(text, 0) + 1
+    return tuple(replace(item, label=text if counts[text] == 1
+                         else label(path, item, with_index=True))
+                 for (path, item), text in zip(items, plain))
 
 
 class SpecLowerer:
@@ -308,6 +411,7 @@ class SpecLowerer:
             short_decision=short_decision,
             risk=risk,
             exits=exits,
+            max_bars_back=self.ctx.max_bars_back(),
             warnings=tuple(dict.fromkeys(self.ctx.warnings)),
             assumptions=self._assumptions(),
         )
@@ -322,7 +426,7 @@ class SpecLowerer:
         self.ctx.statement(f"{name} = {text}")
         return name
 
-    def _exits(self) -> dict[str, str]:
+    def _exits(self) -> PineExits:
         exits = self.spec.get("exits", {})
         base, out = RulePath(("exits",)), {}
         if "exit" in exits:
@@ -330,18 +434,19 @@ class SpecLowerer:
             text = self._group(exits["exit"], path, self.chart)
             name = self.ctx.claim("nk_exit_signal", path)
             self.ctx.statement(f"{name} = {text}")
-            out["exit"] = name
+            out["signal"] = name
         if "trailing" in exits:
             trailing, path = exits["trailing"], base.child("trailing")
             out["trailing_kind"] = trailing["kind"]
-            if trailing["kind"] == "atr":
-                out["trailing_distance"] = self._atr_distance(
+            out["trailing"] = (
+                self._atr_distance(
                     path, "nk_exits_trailing_distance", trailing,
-                    TRAILING_ATR_N_BOUNDS, TRAILING_ATR_MULT_BOUNDS)
-            else:
-                out["trailing_pct"] = self.ctx.number(
-                    path.child("pct"), trailing.get("pct", 2.0),
-                    TRAILING_PCT_BOUNDS)
+                    (TRAILING_ATR_N_BOUNDS, TRAILING_ATR_N_DEFAULT),
+                    (TRAILING_ATR_MULT_BOUNDS, TRAILING_ATR_MULT_DEFAULT))
+                if trailing["kind"] == "atr" else
+                self.ctx.number(path.child("pct"),
+                                trailing.get("pct", TRAILING_PCT_DEFAULT),
+                                TRAILING_PCT_BOUNDS))
         if "time_stop" in exits:
             out["time_stop_bars"] = self.ctx.number(
                 base.child("time_stop", "bars"), exits["time_stop"]["bars"],
@@ -350,43 +455,47 @@ class SpecLowerer:
             out["breakeven_rr"] = self.ctx.number(
                 base.child("breakeven_at", "rr"), exits["breakeven_at"]["rr"],
                 BREAKEVEN_RR_BOUNDS)
-        return out
+        return PineExits(**out)
 
-    def _risk(self) -> dict[str, str]:
+    def _risk(self) -> PineRisk:
         risk = self.spec.get("risk", {})
-        base, out = RulePath(("risk",)), {}
+        base = RulePath(("risk",))
         stop = risk.get("stop", DEFAULT_RISK["stop"])
-        out["stop_kind"] = stop["kind"]
-        if stop["kind"] == "atr":
-            out["stop_distance"] = self._atr_distance(
-                base.child("stop"), "nk_risk_stop_distance", stop,
-                STOP_ATR_N_BOUNDS, STOP_ATR_MULT_BOUNDS)
-        else:
-            out["stop_pct"] = self.ctx.number(
-                base.child("stop", "pct"), stop.get("pct", 2.0), STOP_PCT_BOUNDS)
         target = risk.get("target", DEFAULT_RISK["target"])
-        out["target_kind"] = target["kind"]
-        if target["kind"] == "rr":
-            out["target_rr"] = self.ctx.number(
-                base.child("target", "rr"), target.get("rr", 2.0),
-                TARGET_RR_BOUNDS)
-        else:
-            out["target_pct"] = self.ctx.number(
-                base.child("target", "pct"), target.get("pct", 4.0),
-                TARGET_PCT_BOUNDS)
-        return out
+        return PineRisk(
+            stop_kind=stop["kind"],
+            stop=(self._atr_distance(
+                      base.child("stop"), "nk_risk_stop_distance", stop,
+                      (STOP_ATR_N_BOUNDS, STOP_ATR_N_DEFAULT),
+                      (STOP_ATR_MULT_BOUNDS, STOP_ATR_MULT_DEFAULT))
+                  if stop["kind"] == "atr" else
+                  self.ctx.number(base.child("stop", "pct"),
+                                  stop.get("pct", STOP_PCT_DEFAULT),
+                                  STOP_PCT_BOUNDS)),
+            target_kind=target["kind"],
+            target=(self.ctx.number(base.child("target", "rr"),
+                                    target.get("rr", TARGET_RR_DEFAULT),
+                                    TARGET_RR_BOUNDS)
+                    if target["kind"] == "rr" else
+                    self.ctx.number(base.child("target", "pct"),
+                                    target.get("pct", TARGET_PCT_DEFAULT),
+                                    TARGET_PCT_BOUNDS)))
 
     def _atr_distance(self, path: RulePath, name: str, block: dict,
-                      n_bounds, mult_bounds) -> str:
+                      n_rule, mult_rule) -> str:
         """An ATR-sized distance, as a top-level calculation.
 
         Named rather than inlined into the renderer because `ta.atr` has to run
         on every bar: called from inside a conditional block instead, it would
         smooth over the bars the condition happened to be true on.
+
+        n_rule and mult_rule are each the (bounds, default) pair spec.py names
+        for that argument, so the chart starts where the engine does.
         """
-        n = self.ctx.number(path.child("n"), block.get("n", 14), n_bounds)
-        mult = self.ctx.number(path.child("mult"), block.get("mult", 2.0),
-                               mult_bounds)
+        (n_bounds, n_default), (mult_bounds, mult_default) = n_rule, mult_rule
+        n = self.ctx.number(path.child("n"), block.get("n", n_default), n_bounds)
+        mult = self.ctx.number(path.child("mult"),
+                               block.get("mult", mult_default), mult_bounds)
         self.ctx.statement(f"{self.ctx.claim(name, path)} = ta.atr({n}) * {mult}")
         return name
 
@@ -431,6 +540,9 @@ class SpecLowerer:
         fields = self._node(node, path, frame, f"nk_{name}",
                             lambda inner: self._term(node, term, path, inner))
         field = str(node.get("field", term.defaults.get("field", "")))
+        # ctx.fields already refuses a mapping that misses a declared choice,
+        # so what is left for this guard is the lowering that never called it:
+        # a term declaring fields whose Pine form answers one unnamed value.
         if field not in fields:
             raise PineCompileError(
                 "pine_bad_input",
@@ -476,29 +588,35 @@ class SpecLowerer:
               produce) -> dict[str, str]:
         """One source or term node, on its own frame or lifted onto the chart's."""
         key = (frame, _content(node, self.vocabulary))
-        if key in self.ctx.nodes:
-            return self.ctx.nodes[key]
+        memo = self.ctx.nodes.get(key)
+        if memo is not None:
+            # The node itself is already built, but this path is a new way in:
+            # its block reaches every input the first production touched, which
+            # is what stops a shared row heading itself after one side only.
+            fields, touched = memo
+            self.ctx.reached(touched, path)
+            return fields
         src_tf = node.get("tf", frame)
-        if src_tf == frame:
-            fields = produce(frame)
-        elif frame != self.chart:
+        term = _term_name(node)
+        if src_tf != frame and frame != self.chart:
             raise PineCompileError(
                 "pine_nested_timeframe",
                 f"{path.text}: {src_tf} is read inside a {frame} request, and "
                 "request.security does not nest; move the reference up to the "
-                "spec's own timeframe", path=path.text)
-        else:
-            fields = self._lift(node, path, src_tf, stem, produce)
-        self.ctx.nodes[key] = fields
+                "spec's own timeframe", path=path.text, term=term)
+        with self.ctx.reaching() as touched:
+            fields = (produce(frame) if src_tf == frame
+                      else self._lift(node, path, src_tf, stem, produce, term))
+        self.ctx.nodes[key] = (fields, frozenset(touched))
         return fields
 
     def _lift(self, node: dict, path: RulePath, src_tf: str, stem: str,
-              produce) -> dict[str, str]:
+              produce, term: str) -> dict[str, str]:
         if src_tf not in PINE_TIMEFRAMES:
             raise PineCompileError(
                 "pine_unsupported",
                 f"{path.text}: {src_tf!r} has no Pine timeframe string",
-                path=path.text)
+                path=path.text, term=term)
         with self.ctx.block() as body:
             inner = produce(src_tf)
         function = self.ctx.slot("nk_htf", path)

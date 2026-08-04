@@ -102,9 +102,12 @@ def test_an_argument_the_schema_never_declared_is_refused():
     assert "length" in str(exc.value)
 
 
-def test_a_field_the_lowering_does_not_answer_is_refused():
+def test_a_field_mapping_that_misses_a_declared_choice_is_refused():
     # The grammar admits every field a term declares, so a Pine form covering
-    # only some of them is a hole in the compiler, not in the spec.
+    # only some of them is a hole in the compiler, not in the spec. It is
+    # caught inside ctx.fields rather than after emit returns, because every
+    # real lowering ends in `ctx.fields(...)[call.field]`: the missing key
+    # would otherwise be a bare KeyError naming neither term nor path.
     def emit(ctx, call):
         return PineExpr(ctx.fields(call, {"a": ctx.local(call, "a", "close")})["a"])
 
@@ -115,6 +118,26 @@ def test_a_field_the_lowering_does_not_answer_is_refused():
         lower_pine(_spec_using("partial", field="b"), vocab)
     assert exc.value.code == "pine_bad_input"
     assert exc.value.term == "partial"
+    assert exc.value.path == "long.all[0].lhs"
+    assert "'b'" in str(exc.value)
+    # The refusal is the mapping's, not the node's: it stands even for the one
+    # field this lowering does answer.
+    with pytest.raises(PineCompileError) as exc:
+        lower_pine(_spec_using("partial", field="a"), vocab)
+    assert exc.value.code == "pine_bad_input"
+
+
+def test_a_lowering_that_names_no_field_at_all_is_refused_too():
+    # The other half of the same hole: a term declaring fields whose Pine form
+    # never calls ctx.fields answers one unnamed value, which no field selects.
+    vocab = core_vocabulary().with_terms(
+        Term("unnamed", "series", {"field": ("a", "b")}, {"field": "a"},
+             lambda series, _args: series, pine=PineLowering(_emit_close)))
+    with pytest.raises(PineCompileError) as exc:
+        lower_pine(_spec_using("unnamed", field="a"), vocab)
+    assert exc.value.code == "pine_bad_input"
+    assert exc.value.term == "unnamed"
+    assert exc.value.path == "long.all[0].lhs"
 
 
 def test_a_spec_that_does_not_validate_is_refused_before_any_pine_is_built():
@@ -135,6 +158,21 @@ def test_a_timeframe_inside_another_timeframe_is_refused():
         lower_pine(spec)
     assert exc.value.code == "pine_nested_timeframe"
     assert exc.value.path == "long.all[0].lhs.of"
+    # A source has no term to name; the next test covers the one that has.
+    assert exc.value.term == ""
+
+
+def test_a_nested_timeframe_names_the_term_it_refuses():
+    spec = {"version": 2, "name": "probe", "timeframe": "15m",
+            "long": {"all": [{"lhs": {"ind": "sma", "tf": "1h",
+                                      "of": {"ind": "ema", "n": 5,
+                                             "tf": "4h"}},
+                              "op": ">", "rhs": 0}]}}
+    with pytest.raises(PineCompileError) as exc:
+        lower_pine(spec)
+    assert exc.value.code == "pine_nested_timeframe"
+    assert exc.value.path == "long.all[0].lhs.of"
+    assert exc.value.term == "ema"
 
 
 def test_a_term_whose_pine_slot_is_not_a_lowering_is_refused_where_it_is_built():

@@ -57,13 +57,15 @@ def emit_bar_call(fn: str, *args: str, source: str = ""):
     return emit
 
 
-def emit_builtin(name: str):
-    """A Pine built-in series that takes no arguments: ta.obv."""
-
-    def emit(ctx, call):
-        return PineExpr(ctx.calc(call, name))
-
-    return emit
+def emit_obv(ctx, call):
+    # Both cumulate signed volume, but from different starting points:
+    # indicators.obv starts at the first bar the engine loaded, ta.obv at the
+    # start of the chart's history. The shape of the line agrees; its level
+    # does not, so a condition reading the level (obv > 0) can differ.
+    ctx.warn("ta.obv cumulates from the start of the chart's history, while "
+             "the engine cumulates from the first bar it loaded, so the two "
+             "lines share a shape but not a level.")
+    return PineExpr(ctx.calc(call, "ta.obv"))
 
 
 def emit_zscore(ctx, call):
@@ -141,6 +143,11 @@ def emit_ichimoku(ctx, call):
         ctx.arg(call, a) for a in ("tenkan_n", "kijun_n", "senkou_n", "disp"))
     tenkan = ctx.local(call, "tenkan", _midline(tenkan_n))
     kijun = ctx.local(call, "kijun", _midline(kijun_n))
+    # disp is an input rather than a constant, so TradingView cannot infer how
+    # far back the two senkou lines reach and answers "Pine cannot determine
+    # the referencing length of series" unless the script declares
+    # max_bars_back. This is the one term that owes a renderer that number.
+    ctx.needs_history(call, "disp")
     # The senkou lines are displaced forward, so each bar carries the cloud
     # that applies to IT: `[disp]` is exactly indicators.ichimoku's .shift(disp).
     # Both go through a named line first, because Pine indexes an identifier

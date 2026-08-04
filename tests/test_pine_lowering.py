@@ -5,12 +5,24 @@ target-neutral by contract, so no test in this file may expect an `indicator()`
 or a `strategy()` statement; those belong to the renderers.
 """
 
+import json
+import os
+import subprocess
+import sys
+
 import pytest
 
 from nakagai.data.schema import DEFAULT_TIMEFRAMES
-from nakagai.strategies.rules import lower_pine, spec_hash
+from nakagai.strategies.rules import (
+    PineExits, PineRisk, lower_pine, spec_hash,
+)
 from nakagai.strategies.rules.pine.lower import PINE_TIMEFRAMES
-from nakagai.strategies.rules.vocabulary import core_vocabulary
+from nakagai.strategies.rules.spec import (
+    STOP_ATR_MULT_DEFAULT, STOP_ATR_N_DEFAULT, STOP_PCT_DEFAULT,
+    TARGET_PCT_DEFAULT, TARGET_RR_DEFAULT, TRAILING_ATR_MULT_DEFAULT,
+    TRAILING_ATR_N_DEFAULT, TRAILING_PCT_DEFAULT,
+)
+from nakagai.strategies.rules.vocabulary import core_vocabulary, is_choice_rule
 
 # The path prefix every operand in a one-condition long group carries.
 LHS = "nk_long_all_0_lhs"
@@ -112,6 +124,51 @@ def test_every_indicator_lowers_to_its_pine_form(node, statements, operand):
 def test_the_indicator_table_covers_every_indicator_in_the_vocabulary():
     covered = {node["ind"] for node, _, _ in INDICATORS}
     assert covered == set(core_vocabulary().indicators)
+
+
+# One row per (indicator, field) the grammar admits. The table above lowers one
+# field per multi-field indicator; this one lowers all of them, so a mapping
+# that answered only the fields a test happened to ask for is caught here.
+FIELDS = {
+    ("macd", "macd"): "nk_macd_1_macd",
+    ("macd", "signal"): "nk_macd_1_signal",
+    ("macd", "hist"): "nk_macd_1_hist",
+    ("bb", "upper"): "nk_bb_1_upper",
+    ("bb", "mid"): "nk_bb_1_mid",
+    ("bb", "lower"): "nk_bb_1_lower",
+    ("donchian", "upper"): "nk_donchian_1_upper",
+    ("donchian", "lower"): "nk_donchian_1_lower",
+    ("donchian", "mid"): "nk_donchian_1_mid",
+    ("supertrend", "line"): "nk_supertrend_1_line",
+    ("supertrend", "direction"): "nk_supertrend_1_direction",
+    ("stoch", "k"): "nk_stoch_1_k",
+    ("stoch", "d"): "nk_stoch_1_d",
+    ("ichimoku", "tenkan"): "nk_ichimoku_1_tenkan",
+    ("ichimoku", "kijun"): "nk_ichimoku_1_kijun",
+    ("ichimoku", "senkou_a"): "nk_ichimoku_1_senkou_a",
+    ("ichimoku", "senkou_b"): "nk_ichimoku_1_senkou_b",
+    ("keltner", "upper"): "nk_keltner_1_upper",
+    ("keltner", "mid"): "nk_keltner_1_mid",
+    ("keltner", "lower"): "nk_keltner_1_lower",
+}
+
+
+@pytest.mark.parametrize("pair, operand", sorted(FIELDS.items()),
+                         ids=[f"{i}.{f}" for i, f in sorted(FIELDS)])
+def test_every_declared_field_of_every_indicator_reads_its_own_identifier(
+        pair, operand):
+    indicator, field = pair
+    program = _program({"ind": indicator, "field": field})
+    assert (f"nk_long_entry = ({operand} > nk_long_all_0_rhs)"
+            in program.calculations)
+
+
+def test_the_field_table_covers_every_field_choice_in_the_vocabulary():
+    declared = {(name, field)
+                for name, term in core_vocabulary().indicators.items()
+                for rule in [term.args.get("field")] if is_choice_rule(rule)
+                for field in rule}
+    assert declared == set(FIELDS)
 
 
 def test_sources_and_numbers_lower_to_plain_operands():
@@ -301,12 +358,13 @@ def test_a_side_the_spec_omits_leaves_an_empty_decision():
 
 def test_the_default_risk_block_becomes_one_distance_calculation():
     program = _program({"ind": "sma"})
-    assert program.risk == {"stop_kind": "atr",
-                            "stop_distance": "nk_risk_stop_distance",
-                            "target_kind": "rr", "target_rr": "nk_risk_target_rr"}
+    assert program.risk == PineRisk(stop_kind="atr",
+                                    stop="nk_risk_stop_distance",
+                                    target_kind="rr",
+                                    target="nk_risk_target_rr")
     assert ("nk_risk_stop_distance = ta.atr(nk_risk_stop_n) * nk_risk_stop_mult"
             in program.calculations)
-    assert program.exits == {}
+    assert program.exits == PineExits()
 
 
 def test_percent_risk_and_every_exit_become_expressions():
@@ -319,15 +377,15 @@ def test_percent_risk_and_every_exit_become_expressions():
                "trailing": {"kind": "atr", "n": 10, "mult": 3.0},
                "time_stop": {"bars": 8},
                "breakeven_at": {"rr": 1.0}})
-    assert program.risk == {"stop_kind": "percent", "stop_pct": "nk_risk_stop_pct",
-                            "target_kind": "percent",
-                            "target_pct": "nk_risk_target_pct"}
-    assert program.exits == {
-        "exit": "nk_exit_signal",
-        "trailing_kind": "atr",
-        "trailing_distance": "nk_exits_trailing_distance",
-        "time_stop_bars": "nk_exits_time_stop_bars",
-        "breakeven_rr": "nk_exits_breakeven_at_rr"}
+    assert program.risk == PineRisk(stop_kind="percent", stop="nk_risk_stop_pct",
+                                    target_kind="percent",
+                                    target="nk_risk_target_pct")
+    assert program.exits == PineExits(
+        signal="nk_exit_signal",
+        trailing_kind="atr",
+        trailing="nk_exits_trailing_distance",
+        time_stop_bars="nk_exits_time_stop_bars",
+        breakeven_rr="nk_exits_breakeven_at_rr")
     assert "nk_exit_signal = (close < open)" in program.calculations
     assert ("nk_exits_trailing_distance = ta.atr(nk_exits_trailing_n) * "
             "nk_exits_trailing_mult" in program.calculations)
@@ -336,8 +394,40 @@ def test_percent_risk_and_every_exit_become_expressions():
 def test_a_percent_trailing_stop_carries_its_own_input():
     program = _program({"ind": "sma"},
                        exits={"trailing": {"kind": "percent", "pct": 2.5}})
-    assert program.exits == {"trailing_kind": "percent",
-                             "trailing_pct": "nk_exits_trailing_pct"}
+    assert program.exits == PineExits(trailing_kind="percent",
+                                      trailing="nk_exits_trailing_pct")
+
+
+def test_a_kind_and_the_identifier_it_describes_are_separate_fields():
+    # A renderer must never have to tell a Pine identifier from a literal by
+    # reading the key it arrived under: "atr" is not something to emit.
+    program = _program({"ind": "sma"})
+    assert program.risk.stop_kind == "atr"
+    assert program.risk.stop.startswith("nk_")
+    assert program.exits.trailing_kind == ""
+    assert program.exits.trailing == ""
+
+
+def test_risk_and_exit_defaults_come_from_the_grammar_not_the_compiler():
+    # A spec that names a kind and omits its numbers takes spec.py's defaults,
+    # which is what the engine sizes a live stop with.
+    program = _program({"ind": "sma"},
+                       risk={"stop": {"kind": "atr"}, "target": {"kind": "rr"}},
+                       exits={"trailing": {"kind": "atr"}})
+    defaults = {item.name: item.default for item in program.inputs}
+    assert defaults["nk_risk_stop_n"] == STOP_ATR_N_DEFAULT == 14
+    assert defaults["nk_risk_stop_mult"] == STOP_ATR_MULT_DEFAULT == 2.0
+    assert defaults["nk_risk_target_rr"] == TARGET_RR_DEFAULT == 2.0
+    assert defaults["nk_exits_trailing_n"] == TRAILING_ATR_N_DEFAULT == 14
+    assert defaults["nk_exits_trailing_mult"] == TRAILING_ATR_MULT_DEFAULT == 2.0
+    percent = _program({"ind": "sma"},
+                       risk={"stop": {"kind": "percent"},
+                             "target": {"kind": "percent"}},
+                       exits={"trailing": {"kind": "percent"}})
+    defaults = {item.name: item.default for item in percent.inputs}
+    assert defaults["nk_risk_stop_pct"] == STOP_PCT_DEFAULT == 2.0
+    assert defaults["nk_risk_target_pct"] == TARGET_PCT_DEFAULT == 4.0
+    assert defaults["nk_exits_trailing_pct"] == TRAILING_PCT_DEFAULT == 2.0
 
 
 def test_assumptions_state_the_chart_and_the_request_semantics():
@@ -362,3 +452,72 @@ def test_a_session_anchored_term_warns_where_the_two_engines_differ():
         "ta.vwap anchors to the chart's own session, which follows the "
         "exchange's settings rather than the engine's New York session.",)
     assert _program({"ind": "sma"}).warnings == ()
+
+
+def test_an_origin_dependent_cumulation_warns_the_same_way():
+    # ta.obv counts from the start of the chart's history and indicators.obv
+    # from the first bar the engine loaded, so the two lines share a shape but
+    # sit at different levels: `obv > 0` is not the same condition on each.
+    assert _program({"ind": "obv"}).warnings == (
+        "ta.obv cumulates from the start of the chart's history, while the "
+        "engine cumulates from the first bar it loaded, so the two lines "
+        "share a shape but not a level.",)
+
+
+def test_a_variable_history_offset_asks_the_renderer_for_max_bars_back():
+    # ichimoku displaces its cloud by `disp`, an input rather than a constant,
+    # and TradingView cannot infer a buffer from an offset it cannot read.
+    program = _program({"ind": "ichimoku", "field": "senkou_a"})
+    assert program.max_bars_back == core_vocabulary().indicators[
+        "ichimoku"].args["disp"][1] == 100
+    assert f"[{LHS}_ichimoku_disp]" in "\n".join(program.calculations)
+
+
+def test_a_program_with_only_constant_offsets_needs_no_history_declared():
+    # donchian's [1] is a constant, so TradingView sizes its own buffer.
+    assert _program({"ind": "donchian", "field": "upper"}).max_bars_back == 0
+    assert _program({"ind": "sma"}).max_bars_back == 0
+
+
+# Compiled in a fresh interpreter, so the comparison spans two hash seeds
+# rather than two calls that share one. Set iteration order is stable inside a
+# single process whatever PYTHONHASHSEED says, which is exactly what makes an
+# in-process determinism check unable to see an unsorted set.
+_PROBE = """
+import json, sys
+from nakagai.strategies.rules import lower_pine
+print(repr(lower_pine(json.loads(sys.argv[1]))))
+"""
+
+# One spec that touches every ordering decision the compiler makes: nodes
+# shared across two blocks, a helper, a warning, a variable history offset, and
+# inputs at several depths.
+_DETERMINISM_SPEC = {
+    "version": 2, "name": "determinism_probe", "timeframe": "15m",
+    "long": {"all": [
+        {"lhs": {"ind": "sma", "n": 20}, "op": "crosses_above",
+         "rhs": {"ind": "sma", "n": 50}},
+        {"lhs": {"op": "/", "args": [{"src": "close"}, {"ind": "vwap"}]},
+         "op": ">", "rhs": 1},
+        {"lhs": {"ind": "ichimoku", "field": "senkou_b"}, "op": "<",
+         "rhs": {"src": "close"}},
+    ]},
+    "short": {"all": [
+        {"lhs": {"ind": "sma", "n": 20}, "op": "crosses_below",
+         "rhs": {"ind": "sma", "n": 50}},
+        {"lhs": {"ind": "obv"}, "op": "<", "rhs": 0},
+    ]},
+}
+
+
+def test_compilation_is_identical_across_processes_and_hash_seeds():
+    payload = json.dumps(_DETERMINISM_SPEC)
+    outputs = set()
+    for seed in ("0", "1", "524287"):
+        run = subprocess.run(
+            [sys.executable, "-c", _PROBE, payload],
+            capture_output=True, text=True, check=True,
+            env={**os.environ, "PYTHONHASHSEED": seed})
+        outputs.add(run.stdout)
+    assert len(outputs) == 1
+    assert outputs.pop().strip() == repr(lower_pine(_DETERMINISM_SPEC))

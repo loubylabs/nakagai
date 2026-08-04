@@ -31,24 +31,37 @@ TARGET_KINDS = ("rr", "percent")
 MAX_DEPTH = 8
 MAX_CONDITIONS = 30
 MAX_NODES = 40           # indicator + primitive nodes per spec
-# The risk and exit blocks are the one part of the grammar whose bounds do not
-# come from a Term, so they are named here rather than written inline in the
-# checks below: the Pine compiler puts the same pairs on the inputs it emits,
-# and a bound that drifted between the two would let a chart be set to a value
-# the engine refuses.
+# The risk and exit blocks are the one part of the grammar whose bounds and
+# defaults do not come from a Term, so both are named here rather than written
+# inline in the checks below. Three readers share every pair: the validator,
+# the engine that sizes a live stop from it, and the Pine compiler that puts
+# the same numbers on the inputs it emits. A bound that drifted would let a
+# chart be set to a value the engine refuses, and a default that drifted would
+# start a chart somewhere the engine never runs.
 STOP_ATR_MULT_BOUNDS = (0.1, 10.0)
+STOP_ATR_MULT_DEFAULT = 2.0
 STOP_ATR_N_BOUNDS = (2, 100)
+STOP_ATR_N_DEFAULT = 14
 STOP_PCT_BOUNDS = (0.05, 50.0)
+STOP_PCT_DEFAULT = 2.0
 TARGET_RR_BOUNDS = (0.1, 20.0)
+TARGET_RR_DEFAULT = 2.0
 TARGET_PCT_BOUNDS = (0.05, 100.0)
+TARGET_PCT_DEFAULT = 4.0
 TRAILING_ATR_MULT_BOUNDS = (0.5, 10.0)
+TRAILING_ATR_MULT_DEFAULT = 2.0
 TRAILING_ATR_N_BOUNDS = (2, 100)
+TRAILING_ATR_N_DEFAULT = 14
 TRAILING_PCT_BOUNDS = (0.1, 50.0)
+TRAILING_PCT_DEFAULT = 2.0
+# time_stop.bars and breakeven_at.rr have no default: a spec that names the
+# block must name the number, so there is nothing for a reader to fall back to.
 TIME_STOP_BOUNDS = (1, 500)
 BREAKEVEN_RR_BOUNDS = (0.1, 10.0)
 
-DEFAULT_RISK = {"stop": {"kind": "atr", "n": 14, "mult": 2.0},
-                "target": {"kind": "rr", "rr": 2.0}}
+DEFAULT_RISK = {"stop": {"kind": "atr", "n": STOP_ATR_N_DEFAULT,
+                         "mult": STOP_ATR_MULT_DEFAULT},
+                "target": {"kind": "rr", "rr": TARGET_RR_DEFAULT}}
 
 
 class _Budget:
@@ -397,15 +410,15 @@ def _check_exits(exits, errs: list[str], budget: _Budget,
         if not isinstance(t, dict) or t.get("kind") not in ("atr", "percent"):
             errs.append("exits.trailing.kind must be 'atr' or 'percent'")
         elif t["kind"] == "atr":
-            if _not_num(t.get("mult", 2.0), *TRAILING_ATR_MULT_BOUNDS):
+            if _not_num(t.get("mult", TRAILING_ATR_MULT_DEFAULT), *TRAILING_ATR_MULT_BOUNDS):
                 errs.append(f"exits.trailing.mult must be in {_span(TRAILING_ATR_MULT_BOUNDS)}")
-            if _not_num(t.get("n", 14), *TRAILING_ATR_N_BOUNDS):
+            if _not_num(t.get("n", TRAILING_ATR_N_DEFAULT), *TRAILING_ATR_N_BOUNDS):
                 errs.append(f"exits.trailing.n must be in {_span(TRAILING_ATR_N_BOUNDS)}")
             unknown_t = set(t) - {"kind", "mult", "n"}
             if unknown_t:
                 errs.append(f"exits.trailing: unknown keys {sorted(unknown_t)}")
         else:
-            if _not_num(t.get("pct", 2.0), *TRAILING_PCT_BOUNDS):
+            if _not_num(t.get("pct", TRAILING_PCT_DEFAULT), *TRAILING_PCT_BOUNDS):
                 errs.append(f"exits.trailing.pct must be in {_span(TRAILING_PCT_BOUNDS)}")
             unknown_t = set(t) - {"kind", "pct"}
             if unknown_t:
@@ -435,11 +448,11 @@ def validate_risk(risk) -> list[str]:
     elif stop.get("kind") not in STOP_KINDS:
         errs.append(f"risk.stop.kind must be one of {STOP_KINDS}")
     elif stop["kind"] == "atr":
-        if _not_num(stop.get("mult", 2.0), *STOP_ATR_MULT_BOUNDS):
+        if _not_num(stop.get("mult", STOP_ATR_MULT_DEFAULT), *STOP_ATR_MULT_BOUNDS):
             errs.append(f"risk.stop.mult must be in {_span(STOP_ATR_MULT_BOUNDS)}")
-        if _not_num(stop.get("n", 14), *STOP_ATR_N_BOUNDS):
+        if _not_num(stop.get("n", STOP_ATR_N_DEFAULT), *STOP_ATR_N_BOUNDS):
             errs.append(f"risk.stop.n must be in {_span(STOP_ATR_N_BOUNDS)}")
-    elif _not_num(stop.get("pct", 2.0), *STOP_PCT_BOUNDS):
+    elif _not_num(stop.get("pct", STOP_PCT_DEFAULT), *STOP_PCT_BOUNDS):
         errs.append(f"risk.stop.pct must be in {_span(STOP_PCT_BOUNDS)}")
     target = risk.get("target", DEFAULT_RISK["target"])
     if not isinstance(target, dict):
@@ -447,9 +460,9 @@ def validate_risk(risk) -> list[str]:
     elif target.get("kind") not in TARGET_KINDS:
         errs.append(f"risk.target.kind must be one of {TARGET_KINDS}")
     elif target["kind"] == "rr":
-        if _not_num(target.get("rr", 2.0), *TARGET_RR_BOUNDS):
+        if _not_num(target.get("rr", TARGET_RR_DEFAULT), *TARGET_RR_BOUNDS):
             errs.append(f"risk.target.rr must be in {_span(TARGET_RR_BOUNDS)}")
-    elif _not_num(target.get("pct", 4.0), *TARGET_PCT_BOUNDS):
+    elif _not_num(target.get("pct", TARGET_PCT_DEFAULT), *TARGET_PCT_BOUNDS):
         errs.append(f"risk.target.pct must be in {_span(TARGET_PCT_BOUNDS)}")
     return errs
 
@@ -458,10 +471,13 @@ def risk_text(risk: dict) -> str:
     """The 'Stop: … Target: …' sentence shared by both describe functions."""
     stop = risk.get("stop", DEFAULT_RISK["stop"])
     target = risk.get("target", DEFAULT_RISK["target"])
-    stop_text = (f"{stop.get('mult', 2.0):g}x ATR({int(stop.get('n', 14))}) from entry"
-                 if stop.get("kind") == "atr" else f"{stop.get('pct', 2.0):g}% from entry")
-    target_text = (f"{target.get('rr', 2.0):g}x the risked distance"
-                   if target.get("kind") == "rr" else f"{target.get('pct', 4.0):g}% from entry")
+    atr_stop = (f"{stop.get('mult', STOP_ATR_MULT_DEFAULT):g}x "
+                f"ATR({int(stop.get('n', STOP_ATR_N_DEFAULT))}) from entry")
+    stop_text = (atr_stop if stop.get("kind") == "atr"
+                 else f"{stop.get('pct', STOP_PCT_DEFAULT):g}% from entry")
+    target_text = (f"{target.get('rr', TARGET_RR_DEFAULT):g}x the risked distance"
+                   if target.get("kind") == "rr"
+                   else f"{target.get('pct', TARGET_PCT_DEFAULT):g}% from entry")
     return f"Stop: {stop_text}. Target: {target_text}."
 
 
@@ -601,9 +617,12 @@ def _exits_text(exits: dict, vocabulary: Vocabulary) -> list[str]:
     if "trailing" in exits:
         t = exits["trailing"]
         if t["kind"] == "atr":
-            lines.append(f"Trailing stop: {t.get('mult', 2.0):g}x ATR({int(t.get('n', 14))}).")
+            lines.append(
+                f"Trailing stop: {t.get('mult', TRAILING_ATR_MULT_DEFAULT):g}x "
+                f"ATR({int(t.get('n', TRAILING_ATR_N_DEFAULT))}).")
         else:
-            lines.append(f"Trailing stop: {t.get('pct', 2.0):g}% from the high water mark.")
+            lines.append(f"Trailing stop: {t.get('pct', TRAILING_PCT_DEFAULT):g}% "
+                         "from the high water mark.")
     if "time_stop" in exits:
         lines.append(f"Time stop: {exits['time_stop']['bars']} 15-minute bars.")
     if "breakeven_at" in exits:

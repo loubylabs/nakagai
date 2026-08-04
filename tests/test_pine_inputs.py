@@ -22,9 +22,12 @@ def _by_name(program):
 
 
 def test_numeric_rule_values_become_stable_typed_inputs(load_spec):
+    # The sma input is reached by both sides of sma_cross, so its label drops
+    # the block name; the risk input is reached by the risk block alone and
+    # keeps it. See test_a_label_names_its_block_only_when_one_block_owns_it.
     program = lower_pine(load_spec("sma_cross"))
     assert PineInput(
-        name="nk_long_all_0_lhs_sma_n", label="Long · lhs · sma · n",
+        name="nk_long_all_0_lhs_sma_n", label="lhs · sma · n",
         kind="int", default=20, bounds=(2, 500),
     ) in program.inputs
     assert PineInput(
@@ -94,6 +97,38 @@ def test_labels_drop_the_structural_parts_of_the_path():
     labels = {item.name: item.label for item in program.inputs}
     assert labels["nk_long_all_0_lhs_sma_n"] == "Long · lhs · sma · n"
     assert labels["nk_long_all_0_rhs_ema_n"] == "Long · rhs · ema · n"
+
+
+def test_a_label_names_its_block_only_when_one_block_owns_it(load_spec):
+    # sma_cross's two sides read the same pair of moving averages, so one input
+    # drives both. Heading its row "Long" would tell a chart's user that moving
+    # it retunes the long side, when it retunes the short side with it.
+    labels = {item.name: item.label
+              for item in lower_pine(load_spec("sma_cross")).inputs}
+    assert labels["nk_long_all_0_lhs_sma_n"] == "lhs · sma · n"
+    assert labels["nk_long_all_0_rhs_sma_n"] == "rhs · sma · n"
+    # Reached by the risk block only, so it keeps its block name.
+    assert labels["nk_risk_stop_n"] == "Risk · stop · n"
+    assert not any(label.startswith("Long") or label.startswith("Short")
+                   for label in labels.values())
+
+
+def test_a_shared_argument_nested_under_of_also_drops_its_block(load_spec):
+    # The sharing that drops a block name is the node memo's, so it reaches
+    # every input under the node, not only the outermost term's own arguments.
+    spec = {"version": 2, "name": "probe", "timeframe": "15m",
+            "long": {"all": [{"lhs": {"ind": "sma", "n": 10,
+                                      "of": {"ind": "ema", "n": 5}},
+                              "op": ">", "rhs": 0}]},
+            "short": {"all": [{"lhs": {"ind": "sma", "n": 10,
+                                       "of": {"ind": "ema", "n": 5}},
+                               "op": "<", "rhs": 0}]}}
+    labels = {item.name: item.label for item in lower_pine(spec).inputs}
+    assert labels["nk_long_all_0_lhs_sma_n"] == "lhs · sma · n"
+    assert labels["nk_long_all_0_lhs_of_ema_n"] == "lhs · of · ema · n"
+    # The bare thresholds are one per side, so they keep their block names.
+    assert labels["nk_long_all_0_rhs"] == "Long · rhs"
+    assert labels["nk_short_all_0_rhs"] == "Short · rhs"
 
 
 def test_labels_take_the_index_back_when_two_of_them_would_read_alike():

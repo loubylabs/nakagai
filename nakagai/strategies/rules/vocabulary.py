@@ -218,7 +218,7 @@ def core_vocabulary() -> Vocabulary:
              lambda b, a: ind.adx(b, a["n"]),
              PineLowering(pine.emit_adx)),
         _bar("obv", {}, {}, lambda b, _a: ind.obv(b),
-             PineLowering(pine.emit_builtin("ta.obv"))),
+             PineLowering(pine.emit_obv)),
         _bar("ichimoku", {"tenkan_n": (2, 100), "kijun_n": (2, 200),
                            "senkou_n": (2, 300), "disp": (1, 100),
                            "field": ("tenkan", "kijun", "senkou_a", "senkou_b")},

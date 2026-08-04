@@ -18,7 +18,6 @@ text it had already committed to.
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from types import MappingProxyType
 from typing import Literal
 
 # Bumped when the same spec would lower to different Pine. Part of a program's
@@ -130,6 +129,42 @@ class PineLowering:
 
 
 @dataclass(frozen=True)
+class PineRisk:
+    """The risk block, lowered: what each distance means, and what carries it.
+
+    A `kind` is a literal the renderer branches on; the field beside it is
+    always a Pine identifier. Keeping the two apart in the type is the point:
+    a renderer that had to tell them apart by key name would eventually read
+    one as the other and emit `strategy.exit(stop="atr")`.
+
+    `stop` names an absolute price distance when stop_kind is "atr", and a
+    percent input when it is "percent". `target` names a multiple of the risked
+    distance when target_kind is "rr", and a percent input when it is
+    "percent".
+    """
+
+    stop_kind: Literal["atr", "percent"]
+    stop: str
+    target_kind: Literal["rr", "percent"]
+    target: str
+
+
+@dataclass(frozen=True)
+class PineExits:
+    """The exit block, lowered. Every member is empty when the spec omits it.
+
+    Same split as PineRisk: trailing_kind is a literal, and every other member
+    is a Pine identifier.
+    """
+
+    signal: str = ""
+    trailing_kind: Literal["", "atr", "percent"] = ""
+    trailing: str = ""
+    time_stop_bars: str = ""
+    breakeven_rr: str = ""
+
+
+@dataclass(frozen=True)
 class PineProgram:
     """One spec, lowered. Target-neutral by contract; see the module docstring."""
 
@@ -141,14 +176,16 @@ class PineProgram:
     calculations: tuple[str, ...]
     long_decision: str
     short_decision: str
-    risk: Mapping[str, str]
-    exits: Mapping[str, str]
+    risk: PineRisk
+    exits: PineExits
+    # How far back a non-constant offset reaches, 0 when every offset the
+    # program emits is a constant. TradingView infers a series' historical
+    # buffer from the offsets it can see, and answers "Pine cannot determine
+    # the referencing length of series" for one it cannot, so a renderer owes
+    # a max_bars_back declaration whenever this is set.
+    max_bars_back: int
     warnings: tuple[str, ...]
     assumptions: tuple[str, ...]
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "risk", MappingProxyType(dict(self.risk)))
-        object.__setattr__(self, "exits", MappingProxyType(dict(self.exits)))
 
 
 @dataclass(frozen=True)
