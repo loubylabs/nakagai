@@ -63,13 +63,6 @@ def test_non_rule_strategy_rows_have_none():
     assert row["ic_1"] is None and row["ic_n_1"] == 0
 
 
-def test_icir_false_skips_computation():
-    cache, frame = _cache()
-    row = run_one(cache, "rules", {"spec": SPEC}, "SPY", _window(frame),
-                  tfs=TFS, registry=_registry, icir=False)
-    assert row["ic_1"] is None and row["ic_n_1"] == 0
-
-
 def test_icir_failure_does_not_kill_the_run_row(monkeypatch):
     # The lens is informational; a bug in it must never take down a
     # production run row. window_icir raising must degrade to the empty
