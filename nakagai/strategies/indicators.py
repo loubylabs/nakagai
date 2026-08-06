@@ -8,7 +8,7 @@ value uses only rows at or before its own timestamp.
 import numpy as np
 import pandas as pd
 
-from nakagai.data.schema import EXCHANGE_TZ
+from nakagai.data.schema import EXCHANGE_TZ, rth_mask
 
 
 def sma(close: pd.Series, n: int) -> pd.Series:
@@ -78,12 +78,39 @@ def zscore(close: pd.Series, n: int = 20) -> pd.Series:
 
 
 def session_vwap(bars: pd.DataFrame) -> pd.Series:
-    """Volume-weighted average price, reset each NY session date."""
+    """Volume-weighted average price of the REGULAR session, reset each NY date.
+
+    Only bars inside [09:30, 16:00) enter the accumulator. The caches are not
+    RTH-only, so cumulating every bar of the date let pre-market volume set the
+    level the 09:30 bar is compared against: a thin, wide-spread tape of a few
+    thousand shares decided where VWAP sat for the first hour of trading, and
+    `close > vwap` therefore answered a question about the pre-market rather
+    than about the session. A pre-market bar of an illiquid name could hold
+    VWAP a full percent away from the first regular print.
+
+    A bar before the bell reads NaN, and it falls out of the same rule rather
+    than being blanked separately: no volume has entered its session yet, so
+    the denominator is zero and the guard below maps that to NaN. That is the
+    reading a gated play needs, because a condition over NaN is False, so
+    nothing can trade a session VWAP that has not begun. After 16:00 the level
+    stops moving and stays readable, which is the same treatment the other
+    session-scoped terms give the post-market.
+
+    rth_mask carries the session-frame branch, so a 1d frame is unaffected: a
+    daily bar is labeled at midnight, outside the regular window under either
+    convention, and a plain wall-clock mask would silently blank a daily spec's
+    VWAP on every bar rather than fail anywhere a reader would look.
+    """
+    rth = rth_mask(bars.index)
     typical = (bars["high"] + bars["low"] + bars["close"]) / 3
-    pv = typical * bars["volume"]
+    # Zeroed rather than masked to NaN: a NaN inside a cumsum poisons every
+    # later bar of the session, where a zero contributes nothing and leaves the
+    # regular bars reading exactly what they would have read alone.
+    pv = (typical * bars["volume"]).where(rth, 0.0)
+    volume = bars["volume"].where(rth, 0.0)
     dates = bars.index.tz_convert(EXCHANGE_TZ).date
-    grouped_pv = pd.Series(pv.values, index=bars.index).groupby(dates).cumsum()
-    grouped_v = bars["volume"].groupby(dates).cumsum()
+    grouped_pv = pv.groupby(dates).cumsum()
+    grouped_v = volume.groupby(dates).cumsum()
     return grouped_pv / grouped_v.replace(0, np.nan)
 
 

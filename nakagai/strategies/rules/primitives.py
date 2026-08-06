@@ -11,15 +11,26 @@ import pandas as pd
 from nakagai.strategies.base import Direction, MarketContext
 from nakagai.strategies.ict.fvg import find_fvgs
 from nakagai.strategies.ict.primitives import _strict_extrema, atr as _ict_atr
-from nakagai.data.schema import EXCHANGE_TZ
+from nakagai.data.schema import (EXCHANGE_TZ, _is_session_frame, rth_mask,
+                                 session_opens)
 
 
-def _ny_dates(bars: pd.DataFrame) -> np.ndarray:
-    return np.asarray(bars.index.tz_convert(EXCHANGE_TZ).date)
+def _session_keys(index: pd.DatetimeIndex) -> np.ndarray:
+    """Which session each bar belongs to, as a groupby key.
 
+    The session's own 09:30 open, as the index's int64 values. One open per New
+    York calendar date, so this is exactly the partition the New York date
+    gives and exactly the one the Pine side's nk_session_key builds; it is the
+    same fact spelled in the units the rest of the file already needs.
 
-def _session_groups(bars: pd.DataFrame):
-    return bars.groupby(_ny_dates(bars))
+    As asi8 rather than as the timestamps themselves, which is not a
+    micro-optimization. Handed datetime64 keys pandas rebuilds a DatetimeIndex
+    for the grouper on every call, and handed the New York `date` objects it
+    hashes an object array in Python. Measured over three years of 15m bars on
+    one machine, gap_pct's three groupbys took 30ms on date keys and 12ms on
+    these, and it runs once per replay per spec and once per scanned symbol.
+    """
+    return session_opens(index).asi8
 
 
 def opening_range_high(ctx: MarketContext, bars: pd.DataFrame, minutes: int = 30) -> pd.Series:
@@ -33,32 +44,85 @@ def opening_range_low(ctx: MarketContext, bars: pd.DataFrame, minutes: int = 30)
 def _opening_range(bars: pd.DataFrame, minutes: int, col: str, how: str) -> pd.Series:
     """The session's opening-range level, NaN until the range has fully elapsed.
 
+    The window is [09:30, 09:30 + minutes) of each bar's OWN session, taken
+    from data/schema.session_opens rather than from whichever bar happens to
+    open the calendar date. Those are not the same thing and the difference is
+    the whole defect: the caches are not RTH-only, so the first bar of a date
+    is ordinarily an 08:00 or 08:30 pre-market print, and measuring from there
+    aggregated a thin, barely-traded pre-market band and called it the opening
+    range. Every breakout of it fired on a level no opening-range play means,
+    on bars that had already printed before the bell.
+
+    Only bars inside the window contribute, which is what makes a genuinely
+    late open answer NaN rather than answer something. A name that first trades
+    at 10:30 has no [09:30, 10:00) range, and saying so lets the condition read
+    False; measuring from 10:30 instead would hand a breakout play a level
+    built out of a different half-hour than the one its author wrote down. The
+    old code did exactly that, on purpose, and the reasoning was sound for a
+    cache that started at the bell and wrong for the cache that exists.
+
     Fully vectorized, and it has to stay that way. This runs once per replayed
     bar, so the per-session Python loop it replaced made a window replay
     O(sessions x bars) and grew heavier every month as history accumulated. At
     three years of 15m bars that loop cost ~90ms per call against ~2.6ms here,
     which is what put permutation testing out of reach: a single 638-bar window
-    spent minutes inside this function alone. tests/test_primitives.py guards
-    both the shape of the answer and the cost.
+    spent minutes inside this function alone. Anchoring on the bell costs
+    nothing: session_opens is pure index arithmetic and its answer doubles as
+    the session grouping key, so it replaces both the object array of New York
+    dates and the groupby-transform that used to find each session's first bar.
+    Timed side by side on one machine it comes out slightly ahead of the
+    calendar-date version it replaces. tests/test_primitives.py guards both the
+    shape of the answer and the cost.
     """
     if not len(bars.index):
         return pd.Series(np.nan, index=bars.index, dtype="float64")
-    days = _ny_dates(bars)
     ts = pd.Series(bars.index, index=bars.index)
-    # Each session's range is measured from ITS OWN first bar, not from a wall
-    # clock: a late open or a half day has to measure from where it actually
-    # started, which is why this is a groupby-first rather than a fixed time.
-    edge = ts.groupby(days).transform("first") + pd.Timedelta(minutes=minutes)
-    level = bars[col].where(ts < edge).groupby(days).transform(how)
+    opens = session_opens(bars.index)
+    start = pd.Series(opens, index=bars.index)
+    edge = start + pd.Timedelta(minutes=minutes)
+    # `opens.asi8` is _session_keys, spelled out because this function already
+    # holds `opens` for the window bounds and asking for them twice would be
+    # the expensive half of the call. See _session_keys for why the key is
+    # int64 rather than a timestamp or a New York date.
+    level = bars[col].where((ts >= start) & (ts < edge)).groupby(
+        opens.asi8).transform(how)
     # No lookahead: the level is invisible until its own window has elapsed, so
-    # a session that closes inside the range never gets one.
+    # a session that closes inside the range never gets one. Pre-market bars
+    # fall under the same clause, since a bar before the bell is before the
+    # edge too, so the range cannot be read before it exists.
     return level.where(ts >= edge).rename(None)
 
 
 def _prev_session(bars: pd.DataFrame, col: str, agg) -> pd.Series:
-    per_day = _session_groups(bars)[col].agg(agg)
-    prev = per_day.shift(1)
-    return pd.Series(prev.loc[_ny_dates(bars)].to_numpy(), index=bars.index)
+    """The previous session's REGULAR-HOURS aggregate, on every bar of this one.
+
+    Only bars inside [09:30, 16:00) reach the aggregate. The caches are not
+    RTH-only, so the calendar-date aggregate this replaces drew its extremes
+    from the pre-market and the post-market as well, where a few hundred shares
+    set a price nobody could have traded in size, and its "close" was the last
+    post-market print at 19:45 rather than the 15:45 bar that every "yesterday's
+    close" in the catalog means. A level the whole catalog leans on as support
+    or resistance was a level nothing had defended.
+
+    Masked to NaN and left to the aggregate to skip, rather than filtered out
+    of the frame first. `max`, `min` and `last` all skip NaN, so one masked
+    column answers all three, and a session with no regular bars at all comes
+    back NaN on every one of them. Filtering would drop such a session from the
+    grouping instead, and `shift(1)` would then hand the next session the last
+    session that HAPPENED to trade: a reading from two or five days ago wearing
+    the name "previous session", and nothing in the answer to say so. NaN is
+    the honest answer and a condition over it reads False.
+
+    rth_mask carries the session-frame branch, which is what keeps a 1d spec
+    working. A daily bar is labeled at midnight under either convention, UTC or
+    Eastern, and both sit outside [09:30, 16:00), so a plain wall-clock mask
+    would blank every session of a daily frame rather than raise anywhere.
+    There the mask is all True and one row is its own session's aggregate.
+    """
+    keys = _session_keys(bars.index)
+    inside = bars[col].where(rth_mask(bars.index))
+    prev = inside.groupby(keys).agg(agg).shift(1)
+    return pd.Series(prev.loc[keys].to_numpy(), index=bars.index)
 
 
 def prev_session_high(ctx: MarketContext, bars: pd.DataFrame) -> pd.Series:
@@ -74,10 +138,42 @@ def prev_session_close(ctx: MarketContext, bars: pd.DataFrame) -> pd.Series:
 
 
 def gap_pct(ctx: MarketContext, bars: pd.DataFrame) -> pd.Series:
-    """Today's session open vs the prior session close, in percent."""
-    opens = _session_groups(bars)["open"].transform("first")
+    """This session's REGULAR open against the prior session's regular close.
+
+    Both sides used to read the wrong print, and they compounded. The open was
+    the first bar of the New York date, which on a cache that is not RTH-only
+    is an 08:00 or 08:30 pre-market trade; the close came from
+    prev_session_close, which was the last post-market print of the day before.
+    So an overnight gap was measured from 19:45 to 08:00, a span that already
+    contains most of the move the term is meant to name, and `gap_pct > 2` read
+    a fraction of the gap a chart shows. It is now 09:30 against 15:45, which
+    is the number a gap play means. The close half arrives through the
+    corrected prev_session_close rather than being applied a second time here,
+    so there is one definition of a session close and not two.
+
+    NaN until the session's own first regular bar has printed, and that is the
+    causal half rather than a tidy-up. `transform("first")` broadcasts one
+    value over the WHOLE group, backwards included, so without the `started`
+    mask an 08:00 bar would read the 09:30 open an hour and a half before it
+    existed. That is lookahead on exactly the bars a gap play is most tempted
+    to trade, and it would fire in replay and never live. A condition over NaN
+    reads False, so the pre-market simply cannot act on a gap that has not
+    opened yet.
+
+    No zero guard on the denominator, deliberately: a zero prior close is not a
+    price an equity prints, and the Pine lowering records what the two engines
+    would answer if one ever did.
+    """
+    keys = _session_keys(bars.index)
+    rth = rth_mask(bars.index)
+    # Whether this session's first regular bar has printed yet: a cumulative
+    # any over the mask, which is False through the pre-market, True from the
+    # 09:30 bar onward, and True on every bar of a session frame, where the one
+    # row IS its own regular session.
+    started = rth.groupby(keys).cummax()
+    opens = bars["open"].where(rth).groupby(keys).transform("first")
     prev_close = prev_session_close(ctx, bars)
-    return 100 * (opens - prev_close) / prev_close
+    return (100 * (opens.where(started) - prev_close) / prev_close).rename(None)
 
 
 def swing_high(ctx: MarketContext, bars: pd.DataFrame, k: int = 3) -> pd.Series:
@@ -138,32 +234,14 @@ def order_block(ctx: MarketContext, bars: pd.DataFrame,
     return {"top": top, "bottom": bottom, "mid": (top + bottom) / 2}[field]
 
 
-def _is_session_frame(idx: pd.DatetimeIndex) -> bool:
-    """True when the frame's rows are SESSION bars: at most one per UTC date.
-
-    The property, not a label pattern. Both daily conventions the engine meets
-    satisfy it and neither is recognisable from a single timestamp: the cache's
-    own resample buckets on "1D" in UTC (midnight exactly) and Alpaca's 1Day
-    bars are stamped at midnight Eastern (04:00 or 05:00 UTC). What they share
-    is one row per session, which is also exactly what makes the UTC calendar
-    date of the label the session date, the fact engine/context.closed_before
-    already rests on.
-
-    A frame of fewer than two rows carries no evidence of its own cadence, so
-    it reads as intraday: that is the answer for the driving frames the grammar
-    admits everywhere except a 1d spec, and a 1d spec reaching one row has one
-    session of history.
-    """
-    return len(idx) >= 2 and idx.normalize().is_unique
-
-
 def day_of_week(ctx: MarketContext, bars: pd.DataFrame) -> pd.Series:
     """Weekday of each bar's session, 0 = Monday.
 
     Which clock the weekday is read on is the FRAME's to decide, never the
     individual label's. An intraday bar belongs to the New York calendar day it
-    falls in, which is how _ny_dates groups every other session-scoped
-    primitive. A session bar is one whole session in one row, and its label's
+    falls in, which is the session _session_keys groups every other
+    session-scoped primitive on. A session bar is one whole session in one row,
+    and its label's
     UTC calendar date IS that session's date, where converting to New York
     would land on the prior evening and shift every weekday back by one.
 
@@ -181,8 +259,44 @@ def day_of_week(ctx: MarketContext, bars: pd.DataFrame) -> pd.Series:
 
 
 def minutes_into_session(ctx: MarketContext, bars: pd.DataFrame) -> pd.Series:
-    starts = bars.index.to_series().groupby(_ny_dates(bars)).transform("first")
-    return ((bars.index.to_series() - starts).dt.total_seconds() / 60).astype(float)
+    """Minutes elapsed since the 09:30 bell of each bar's own session.
+
+    Measured from data/schema.session_opens and not from the first bar of the
+    calendar date. The caches are not RTH-only, so that first bar is ordinarily
+    an 08:00 or 08:30 pre-market print, and counting from it ran every reading
+    an hour and a half fast: a spec writing `minutes_into_session < N` named one
+    wall-clock time and got another an hour and a half earlier.
+
+    A bar BEFORE the bell answers NaN, and that is the deliberate half. On the
+    right anchor a pre-market bar is NEGATIVE, and a negative silently passes
+    every `< N` gate ever written over this term, so a play meant for the first
+    part of the session would start firing at 08:00, before any of its premises
+    exist. An engine condition reads NaN as False, so NaN fails closed and no
+    gated play can fire pre-market, in a live scan or in replay. One `.where()`
+    here does what a lower bound would have cost in every spec that reads this,
+    and it cannot be forgotten in the next one.
+
+    A bar AFTER the close keeps counting rather than going NaN, and that is not
+    an oversight to tidy later. A session play exits on a `>= N` that is
+    satisfied INSIDE the session, so the exit is already taken by the time a
+    post-market bar arrives; and an entry gate is a `< N` that a value past the
+    close already fails. Blanking the post-market would change neither, and
+    would take away the one reading that says how far past the bell a bar sits.
+
+    On a session frame the answer is 0 on every bar: there one row IS the whole
+    session, so it opens at its own open and no other number is available.
+    vocabulary.py documents that reading and spec.py refuses a 1d DRIVING frame
+    over it (driving_frame_intraday), while session_scoped keeps a foreign `tf`
+    out, so nothing shipped reaches this branch. It routes through
+    data/schema._is_session_frame anyway, which is the same rule rth_mask and
+    day_of_week read, so a frame is read one way house-wide instead of three.
+    """
+    idx = bars.index
+    if _is_session_frame(idx):
+        return pd.Series(0.0, index=idx, dtype="float64")
+    elapsed = pd.Series((idx - session_opens(idx)).total_seconds() / 60.0,
+                        index=idx, dtype="float64")
+    return elapsed.where(elapsed >= 0)
 
 
 def rvol(ctx: MarketContext, bars: pd.DataFrame, sessions: int = 20) -> pd.Series:

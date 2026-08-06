@@ -75,6 +75,80 @@ def test_session_vwap_resets_daily():
     assert v.iloc[-1] == pytest.approx(200.0)  # no bleed from day 1
 
 
+def _extended_hours_bars(day="2026-01-05", pre=50.0, regular=100.0):
+    """One session, 08:00 through 10:00 New York, flat inside each band.
+
+    high, low and close all carry the band's price, so the typical price IS the
+    price and every VWAP below is a number written here rather than derived.
+    Volume is equal on every bar, which is generous to the defect: a real
+    pre-market bar carries a fraction of the regular volume and still moved the
+    level, because for the first bars after the bell it is most of what has
+    accumulated.
+    """
+    from nakagai.data.schema import EXCHANGE_TZ
+    idx = pd.date_range(f"{day} 08:00", f"{day} 10:00", freq="15min",
+                        tz=EXCHANGE_TZ).tz_convert("UTC")
+    ny = idx.tz_convert(EXCHANGE_TZ)
+    price = np.where(ny.hour * 60 + ny.minute < 570, pre, regular)
+    return pd.DataFrame({"open": price, "high": price, "low": price,
+                         "close": price, "volume": 1000.0}, index=idx)
+
+
+def test_session_vwap_leaves_the_pre_market_out_of_the_accumulator():
+    """chrvsd/nakagai#276, on the volume side.
+
+    The caches are not RTH-only, so cumulating every bar of the New York date
+    let a thin, wide-spread pre-market tape decide where VWAP sat for the first
+    hour of trading: with six 08:00-to-09:15 bars at 50 in the accumulator, the
+    09:30 bar read 57.14 rather than 100, and `close > vwap` answered a
+    question about the pre-market rather than about the session. Every regular
+    bar here trades at exactly 100, so the session's VWAP is 100 on every one
+    of them and nothing else is a rounding difference.
+    """
+    bars = _extended_hours_bars()
+    ny = bars.index.tz_convert("America/New_York")
+    regular = np.asarray(ny.hour * 60 + ny.minute) >= 570
+    vwap = ind.session_vwap(bars)
+    assert regular.sum() == 3 and (~regular).sum() == 6
+    assert np.allclose(vwap[regular], 100.0)
+    # The exact wrong answer, named: six pre-market bars at 50 plus one regular
+    # bar at 100, all on equal volume.
+    assert vwap[regular].iloc[0] != pytest.approx((6 * 50.0 + 100.0) / 7)
+
+
+def test_session_vwap_is_nan_before_the_bell_rather_than_the_pre_market_s_own():
+    """A pre-market bar reads NaN, and it falls out of the accumulator being
+    empty rather than being blanked separately: no volume has entered the
+    session yet, so the zero-denominator guard answers NaN. A condition over
+    NaN reads False, which is what keeps a play off a session VWAP that has
+    not begun. Answering the pre-market's own VWAP instead would be a
+    different measurement wearing the session's name."""
+    bars = _extended_hours_bars()
+    ny = bars.index.tz_convert("America/New_York")
+    vwap = ind.session_vwap(bars)
+    assert vwap[np.asarray(ny.hour * 60 + ny.minute) < 570].isna().all()
+
+
+@pytest.mark.parametrize("labels, convention", [
+    (["2026-01-05", "2026-01-06"], "midnight UTC"),
+    (["2026-01-05 05:00", "2026-01-06 05:00"], "midnight Eastern")])
+def test_session_vwap_reads_a_daily_frame_as_one_session_per_row(labels,
+                                                                 convention):
+    """A daily bar is labeled at midnight under both conventions the engine
+    meets, and both sit outside [09:30, 16:00). Without rth_mask's
+    session-frame branch every bar of a daily frame would be masked out and the
+    whole series would come back NaN, silently, on a spec that reads VWAP off
+    its own daily bars. Here one row is its own session, so VWAP is that row's
+    typical price."""
+    idx = pd.DatetimeIndex(labels, tz="UTC")
+    bars = pd.DataFrame({"open": [100.0, 200.0], "high": [102.0, 203.0],
+                         "low": [98.0, 196.0], "close": [100.0, 201.0],
+                         "volume": 1000.0}, index=idx)
+    vwap = ind.session_vwap(bars)
+    assert vwap.iloc[0] == pytest.approx(100.0), convention
+    assert vwap.iloc[1] == pytest.approx(200.0), convention
+
+
 def test_ichimoku_shape_and_displacement():
     closes = np.linspace(100, 130, 80)
     ich = ind.ichimoku(_bars(closes), 5, 10, 20, 5)

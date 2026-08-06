@@ -54,9 +54,6 @@
 //     decided. So a re-entry after one lands a bar later here: the engine can
 //     signal again on the very bar it closed, while this strategy is still
 //     holding the position when that bar's decision is read and skips it.
-//   - A session is the bar's New York calendar day in both engines and both
-//     open it in the pre-market, but a chart's extended session opens at 04:00
-//     while the engine's frame opens on the day's first actual print.
 //
 // Editing any input below creates a TradingView-local variation: its results
 // no longer represent the spec hash above, and Nakagai cannot read that
@@ -87,35 +84,35 @@ nk_session_key() =>
     string tz = "America/New_York"
     year(time, tz) * 10000 + month(time, tz) * 100 + dayofmonth(time, tz)
 
+nk_session_open() =>
+    int into = hour(time, "America/New_York") * 60 + minute(time, "America/New_York") - 570
+    time - into * 60000
+
+nk_minutes_into_session() =>
+    float mins = (time - nk_session_open()) / 60000.0
+    mins >= 0 ? mins : na
+
 nk_new_session() =>
     int key = nk_session_key()
     na(key[1]) or key != key[1]
 
-nk_minutes_into_session() =>
-    var int start = na
-    if nk_new_session()
-        start := time
-    (time - start) / 60000.0
-
 nk_opening_range_high(minutes) =>
-    var int start = na
     var float level = na
     if nk_new_session()
-        start := time
         level := na
+    int start = nk_session_open()
     int edge = start + minutes * 60000
-    if time < edge
+    if time >= start and time < edge
         level := na(level) ? high : math.max(level, high)
     time >= edge ? level : na
 
 nk_opening_range_low(minutes) =>
-    var int start = na
     var float level = na
     if nk_new_session()
-        start := time
         level := na
+    int start = nk_session_open()
     int edge = start + minutes * 60000
-    if time < edge
+    if time >= start and time < edge
         level := na(level) ? low : math.min(level, low)
     time >= edge ? level : na
 

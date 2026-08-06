@@ -8,7 +8,7 @@ driving-timeframe bar.
 
 import pandas as pd
 
-from nakagai.data.schema import EXCHANGE_TZ, SESSION_OPEN
+from nakagai.data.schema import session_open
 from nakagai.strategies.base import Direction, MarketContext, Signal
 
 
@@ -19,19 +19,6 @@ def fresh_bar(ctx: MarketContext, timeframe: str) -> bool:
         return False
     close_ts = bars.index[-1] + ctx.tfs.deltas[timeframe]
     return (ctx.now - close_ts) < ctx.tfs.step
-
-
-def session_open(ts: pd.Timestamp) -> pd.Timestamp:
-    """The regular open of the NY session `ts` falls in, in UTC.
-
-    Built from the exchange-local calendar fields rather than by adding 9h30m
-    to midnight, so it stays the 09:30 WALL time across a DST change instead of
-    drifting an hour on the two Sundays a year the offset moves.
-    """
-    ny = ts.tz_convert(EXCHANGE_TZ)
-    return pd.Timestamp(year=ny.year, month=ny.month, day=ny.day,
-                        hour=SESSION_OPEN[0], minute=SESSION_OPEN[1],
-                        tz=EXCHANGE_TZ).tz_convert("UTC")
 
 
 def first_bar_of_session(ctx: MarketContext) -> bool:
@@ -53,7 +40,11 @@ def first_bar_of_session(ctx: MarketContext) -> bool:
 
     Cheaper than what it replaces, which matters because a replay calls this
     once per bar per daily play: converting the whole index to New York was
-    O(history) per bar, and this is a binary search plus one construction.
+    O(history) per bar, and this is a binary search plus one session-open
+    lookup, which data/schema.session_open memoizes per session. Keep both
+    halves cheap. This gate is what every bar of a session that is NOT the
+    open stops at, so whatever it costs is paid on the bars that do no other
+    work, and it is the one place where a per-bar cost hides best.
     """
     idx = ctx.driving_bars.index
     if not len(idx):

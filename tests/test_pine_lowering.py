@@ -602,6 +602,18 @@ def test_a_session_anchored_term_warns_where_the_two_engines_differ():
     assert _program({"ind": "sma"}).warnings == ()
 
 
+def test_a_warning_is_stated_once_however_many_terms_reach_it():
+    # Two nodes, one sentence. A user reading the header of an artifact that
+    # says the same thing three times learns nothing the first statement did
+    # not tell them, and starts skipping the block where the one warning that
+    # matters is. The dedup lives in the lowerer rather than in any emit
+    # function, so it is pinned here and not beside one of them.
+    spec = {"version": 2, "name": "probe", "timeframe": "15m",
+            "long": {"all": [{"lhs": {"ind": "vwap"}, "op": ">",
+                              "rhs": {"ind": "vwap", "tf": "1h"}}]}}
+    assert len(lower_pine(spec).warnings) == 1
+
+
 def test_an_origin_dependent_cumulation_warns_the_same_way():
     # ta.obv counts from the start of the chart's history and indicators.obv
     # from the first bar the engine loaded, so the two lines share a shape but
