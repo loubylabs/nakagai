@@ -38,10 +38,12 @@ DIV = "nk_div"
 
 # The primitives' helpers. Each is named after the term it answers, so a
 # lowering never reaches for another term's helper and the id a program emits
-# says which primitive put it there. The three without a term of their own are
+# says which primitive put it there. The ones without a term of their own are
 # the shared machinery below them.
 SESSION_KEY = "nk_session_key"
 NEW_SESSION = "nk_new_session"
+SESSION_OPEN = "nk_session_open"
+IN_SESSION = "nk_in_session"
 SESSION_OPEN_BAR = "nk_session_open_bar"
 WINDOW_ATR = "nk_window_atr"
 OPENING_RANGE_HIGH = "nk_opening_range_high"
@@ -59,20 +61,6 @@ BARS_SINCE = "nk_bars_since"
 LEG_RETRACE = "nk_leg_retrace"
 FVG_NEAREST = "nk_fvg_nearest"
 ORDER_BLOCK = "nk_order_block"
-
-# What the chart decides and the engine does not. Both group a session by the
-# bar's New York calendar day, and both start it in the pre-market rather than
-# at 09:30: extended hours are mandatory for an export and the script refuses a
-# chart without them. What is left is which pre-market bar comes FIRST.
-# TradingView opens its extended session at 04:00 New York and prints a bar
-# there whether or not one traded; Alpaca returns the day's first actual print,
-# which on a thin name can be an hour later or not exist at all. Everything
-# measured from a session's first bar, or aggregated over its whole span,
-# moves with that.
-SESSION_WINDOW = ("A session is the bar's New York calendar day in both "
-                  "engines and both open it in the pre-market, but a chart's "
-                  "extended session opens at 04:00 while the engine's frame "
-                  "opens on the day's first actual print.")
 
 
 def emit_series_call(fn: str, *args: str):
@@ -227,16 +215,10 @@ def _flag(value: bool) -> str:
     return "true" if value else "false"
 
 
-def emit_primitive(helper: str, *args: str, session: bool = False):
-    """A primitive as one call of its own helper: nk_gap_pct().
-
-    `session` marks the primitives read off the session's own bars, which is
-    the one thing the chart decides and the engine does not; see SESSION_WINDOW.
-    """
+def emit_primitive(helper: str, *args: str):
+    """A primitive as one call of its own helper: nk_gap_pct()."""
 
     def emit(ctx, call):
-        if session:
-            ctx.warn(SESSION_WINDOW)
         parts = ", ".join(ctx.arg(call, a) for a in args)
         return PineExpr(ctx.calc(call, f"{helper}({parts})"))
 
@@ -308,9 +290,10 @@ def _with_mid(ctx, call, parts: dict[str, str]) -> dict[str, str]:
 # both engines, which is what the pandas index labels hold, so every rule below
 # reads the same instant its Python counterpart reads.
 _PRIMITIVE_HELPERS = (
-    # _ny_dates: bars.index.tz_convert(EXCHANGE_TZ).date. The session is a
-    # calendar day in New York, not the exchange's configured trading session,
-    # so the key is built from the date parts rather than from `session.*`.
+    # _session_keys: one group per New York calendar day, which the engine
+    # spells as that day's 09:30 open. The session is a calendar day in New
+    # York, not the exchange's configured trading session, so the key is built
+    # from the date parts rather than from `session.*`.
     PineHelper(SESSION_KEY, f"""{SESSION_KEY}() =>
     string tz = "America/New_York"
     year(time, tz) * 10000 + month(time, tz) * 100 + dayofmonth(time, tz)"""),
@@ -320,6 +303,42 @@ _PRIMITIVE_HELPERS = (
     PineHelper(NEW_SESSION, f"""{NEW_SESSION}() =>
     int key = {SESSION_KEY}()
     na(key[1]) or key != key[1]""", (SESSION_KEY,)),
+    # data/schema.session_opens: the 09:30 New York instant of the bar's OWN
+    # session, which is what everything session-anchored measures from. NOT
+    # the session's first bar, on either side: the engine's caches are not
+    # RTH-only and a chart's extended session opens at 04:00, so the first bar
+    # is a pre-market print in both and it is a different one in each.
+    #
+    # Read off the exchange wall clock, exactly as nk_session_open_bar reads it
+    # below and as data/schema.rth_mask reads it on the engine side. hour() and
+    # minute() have already resolved the New York offset, so 09:30 stays 09:30
+    # through a daylight-saving change rather than drifting an hour, which is
+    # the same reason session_opens puts its offset on naive local time. 570 is
+    # 09:30 New York in minutes.
+    #
+    # The subtraction assumes the bar and its own 09:30 share a UTC offset,
+    # which every bar of a session does: the US transitions happen at 02:00
+    # local, so only a bar between local midnight and 02:00 could straddle one,
+    # and both transition days are Sundays.
+    PineHelper(SESSION_OPEN, f"""{SESSION_OPEN}() =>
+    int into = hour(time, "America/New_York") * 60 + minute(time, "America/New_York") - 570
+    time - into * 60000"""),
+    # data/schema.rth_mask: whether the bar sits inside the REGULAR session,
+    # which is what every session aggregate below is taken over. 570 is 09:30
+    # New York in minutes and 960 is 16:00, and the window is half-open on the
+    # right because a bar is labeled by its OPEN: the 15:45 bar is the last one
+    # the session contains and a bar labeled 16:00 has already crossed into the
+    # post-market.
+    #
+    # This is where the extended-hours difference between the two engines stops
+    # mattering. A chart's extended session prints from 04:00 and Alpaca
+    # returns the day's first actual trade, so the two disagree about which
+    # pre-market bars exist; neither reaches an aggregate now, so the answer is
+    # the same on both. rth_mask's session-frame branch has no counterpart
+    # here and needs none: an export always charts 15m bars.
+    PineHelper(IN_SESSION, f"""{IN_SESSION}() =>
+    int into = hour(time, "America/New_York") * 60 + minute(time, "America/New_York")
+    into >= 570 and into < 960"""),
     # util.first_bar_of_session: the driving bar a session-aligned play decides
     # on, which is the bar that OPENS a regular session rather than the one
     # that starts a calendar day. The two look equivalent and are not, and the
@@ -338,61 +357,84 @@ _PRIMITIVE_HELPERS = (
     if first
         fired := true
     first""", (NEW_SESSION,)),
-    # _opening_range: the level is the extreme over `ts < edge`, returned only
-    # `where(ts >= edge)`, and the edge is measured from the session's OWN first
-    # bar rather than from a wall clock, so a late open or a half day measures
-    # from where it actually started. A session that closes inside its own
-    # range never gets a level.
+    # _opening_range: the level is the extreme over `[start, edge)` and is
+    # returned only `where(ts >= edge)`, so a session that closes inside its
+    # own range never gets a level and neither does a pre-market bar, which is
+    # before the edge too. The window opens at the BELL rather than at the
+    # session's own first bar: measuring from the first bar aggregated a thin
+    # pre-market band and called it the opening range, which is the defect the
+    # engine's docstring names. A name that first trades at 10:30 therefore has
+    # no [09:30, 10:00) range and answers na, rather than answering a different
+    # half-hour under the same name.
     PineHelper(OPENING_RANGE_HIGH, f"""{OPENING_RANGE_HIGH}(minutes) =>
-    var int start = na
     var float level = na
     if {NEW_SESSION}()
-        start := time
         level := na
+    int start = {SESSION_OPEN}()
     int edge = start + minutes * 60000
-    if time < edge
+    if time >= start and time < edge
         level := na(level) ? high : math.max(level, high)
-    time >= edge ? level : na""", (NEW_SESSION,)),
+    time >= edge ? level : na""", (NEW_SESSION, SESSION_OPEN)),
     PineHelper(OPENING_RANGE_LOW, f"""{OPENING_RANGE_LOW}(minutes) =>
-    var int start = na
     var float level = na
     if {NEW_SESSION}()
-        start := time
         level := na
+    int start = {SESSION_OPEN}()
     int edge = start + minutes * 60000
-    if time < edge
+    if time >= start and time < edge
         level := na(level) ? low : math.min(level, low)
-    time >= edge ? level : na""", (NEW_SESSION,)),
+    time >= edge ? level : na""", (NEW_SESSION, SESSION_OPEN)),
     # _prev_session: per-session aggregate, shifted one session, read back onto
     # every bar of the current one. The roll happens on the session's first
     # bar, so no bar ever sees its own session's aggregate.
+    #
+    # Only REGULAR-hours bars reach the aggregate, which is the engine's
+    # `where(rth_mask(...))` before the groupby. Both engines carry pre-market
+    # and post-market bars, and taking the extremes over the whole span made
+    # "yesterday's high" a thin off-hours print rather than a level the session
+    # defended. The running value is reset to na rather than to this bar's
+    # price for the same reason: a session that prints no regular bar at all
+    # must answer na, not the last off-hours quote it happened to see, which is
+    # exactly what a masked pandas aggregate returns for an all-NaN group.
     PineHelper(PREV_SESSION_HIGH, f"""{PREV_SESSION_HIGH}() =>
     var float current = na
     var float previous = na
     if {NEW_SESSION}()
         previous := current
-        current := high
-    else
-        current := math.max(current, high)
-    previous""", (NEW_SESSION,)),
+        current := na
+    if {IN_SESSION}()
+        current := na(current) ? high : math.max(current, high)
+    previous""", (NEW_SESSION, IN_SESSION)),
     PineHelper(PREV_SESSION_LOW, f"""{PREV_SESSION_LOW}() =>
     var float current = na
     var float previous = na
     if {NEW_SESSION}()
         previous := current
-        current := low
-    else
-        current := math.min(current, low)
-    previous""", (NEW_SESSION,)),
+        current := na
+    if {IN_SESSION}()
+        current := na(current) ? low : math.min(current, low)
+    previous""", (NEW_SESSION, IN_SESSION)),
+    # The close of a session is its last REGULAR bar's close, the 15:45 one,
+    # rather than the last post-market print hours later. Every "yesterday's
+    # close" in the catalog means the former.
     PineHelper(PREV_SESSION_CLOSE, f"""{PREV_SESSION_CLOSE}() =>
     var float current = na
     var float previous = na
     if {NEW_SESSION}()
         previous := current
-    current := close
-    previous""", (NEW_SESSION,)),
-    # gap_pct: 100 * (this session's first open - last session's close) over
-    # that close. No zero guard, because the engine has none either.
+        current := na
+    if {IN_SESSION}()
+        current := close
+    previous""", (NEW_SESSION, IN_SESSION)),
+    # gap_pct: 100 * (this session's first REGULAR open - last session's
+    # regular close) over that close. No zero guard, because the engine has
+    # none either.
+    #
+    # na until the session's own 09:30 bar has printed, which is the engine's
+    # `where(started)`: pandas broadcasts the group's first regular open over
+    # the whole group, backwards included, so both sides need saying that a
+    # pre-market bar cannot read an open that has not happened. Here it falls
+    # out of the carried variable being na until the bar sets it.
     #
     # The two sides DIVERGE on a zero prior close, and that is recorded rather
     # than fixed: pandas answers inf and Pine answers na, so `gap_pct > 2`
@@ -404,10 +446,12 @@ _PRIMITIVE_HELPERS = (
     PineHelper(GAP_PCT, f"""{GAP_PCT}() =>
     var float session_open = na
     if {NEW_SESSION}()
+        session_open := na
+    if {IN_SESSION}() and na(session_open)
         session_open := open
     float previous = {PREV_SESSION_CLOSE}()
     100 * (session_open - previous) / previous""",
-               (NEW_SESSION, PREV_SESSION_CLOSE)),
+               (NEW_SESSION, IN_SESSION, PREV_SESSION_CLOSE)),
     # day_of_week: 0 = Monday, the way pandas numbers a weekday. Pine numbers
     # Sunday 1 through Saturday 7, so the shift is +5 modulo 7.
     #
@@ -422,12 +466,16 @@ _PRIMITIVE_HELPERS = (
     # program rather than assumed silently (see SpecLowerer._assumptions).
     PineHelper(DAY_OF_WEEK, f"""{DAY_OF_WEEK}() =>
     (dayofweek(time, "America/New_York") + 5) % 7"""),
-    # minutes_into_session: elapsed minutes from the session's first bar.
+    # minutes_into_session: elapsed minutes from the 09:30 bell, and `na`
+    # before it. A pre-market bar reads NEGATIVE against the bell, and a
+    # negative passes every `< N` gate a session play writes, so the engine
+    # blanks it and so does this: a condition over na is False on both sides,
+    # which is what keeps a gated play off the pre-market. Past the close it
+    # keeps counting, which the engine's docstring explains and no shipped
+    # play reads differently.
     PineHelper(MINUTES_INTO_SESSION, f"""{MINUTES_INTO_SESSION}() =>
-    var int start = na
-    if {NEW_SESSION}()
-        start := time
-    (time - start) / 60000.0""", (NEW_SESSION,)),
+    float mins = (time - {SESSION_OPEN}()) / 60000.0
+    mins >= 0 ? mins : na""", (SESSION_OPEN,)),
     # rvol: this bar's volume over the MEDIAN volume of the same clock time
     # across the trailing `sessions` sessions, the current one excluded. Three
     # choices the engine documents and this mirrors exactly. The bucket is the

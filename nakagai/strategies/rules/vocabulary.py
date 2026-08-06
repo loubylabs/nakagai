@@ -257,11 +257,13 @@ def core_vocabulary() -> Vocabulary:
     # session minutes, a bar's place in the session's volume shape, the bar's
     # calendar weekday) rather than plain OHLCV structure. Feeding them a `tf`
     # swaps in a different frame's bars, which silently degenerates:
-    # opening_range_* on "1d" bars (one bar per session) never sees its window
-    # elapse and is NaN forever, and on "1h" bars a minutes=30 window is
-    # measured in whole-hour steps; minutes_into_session on "1d" bars is 0
-    # everywhere (one bar per session group); rvol on "1d" bars has one bar per
-    # session, so its same-clock-time bucket is the whole series and the
+    # opening_range_* on "1d" bars (one bar per session) has no bar inside its
+    # window at all and is NaN forever, and on "1h" bars the window runs from
+    # the 09:30 bell while the labels run from the top of the hour, so a
+    # minutes=30 window holds nothing and a wider one holds a ragged part of
+    # what the spec asked for; minutes_into_session on "1d" bars is 0
+    # everywhere (one row is the whole session); rvol on "1d" bars has one bar
+    # per session, so its same-clock-time bucket is the whole series and the
     # primitive quietly becomes a plain trailing-median volume ratio, a
     # different measurement wearing the same name, while on "1h" bars the
     # buckets are whole hours, so a 15m spec's 09:30 bar is answered from a
@@ -273,38 +275,36 @@ def core_vocabulary() -> Vocabulary:
     #
     # driving_frame_intraday is the SECOND rule and a second set: what a
     # session-aligned driving frame cannot answer at all, because there one bar
-    # IS the whole session. The opening-range window never elapses (NaN
-    # forever), minutes_into_session is 0 on every bar, and rvol's
-    # same-clock-time bucket becomes the entire series. session_scoped is the
-    # right set for the foreign-`tf` rule and the WRONG set for this one, which
-    # is why the two flags do not track each other; see day_of_week and rvol.
+    # IS the whole session. The opening-range window is minutes wide and that
+    # one bar cannot sit inside it (NaN forever), minutes_into_session is 0 on
+    # every bar, and rvol's same-clock-time bucket becomes the entire series.
+    # session_scoped is the right set for the foreign-`tf` rule and the WRONG
+    # set for this one, which is why the two flags do not track each other; see
+    # day_of_week and rvol.
     primitives = (
         _primitive("opening_range_high", {"minutes": (5, 120)}, {"minutes": 30},
                    prim.opening_range_high,
                    PineLowering(pine.emit_primitive(pine.OPENING_RANGE_HIGH,
-                                                    "minutes", session=True),
+                                                    "minutes"),
                                 helpers=(pine.OPENING_RANGE_HIGH,)),
                    session_scoped=True, driving_frame_intraday=True),
         _primitive("opening_range_low", {"minutes": (5, 120)}, {"minutes": 30},
                    prim.opening_range_low,
                    PineLowering(pine.emit_primitive(pine.OPENING_RANGE_LOW,
-                                                    "minutes", session=True),
+                                                    "minutes"),
                                 helpers=(pine.OPENING_RANGE_LOW,)),
                    session_scoped=True, driving_frame_intraday=True),
         _primitive("prev_session_high", {}, {}, prim.prev_session_high,
-                   PineLowering(pine.emit_primitive(pine.PREV_SESSION_HIGH,
-                                                    session=True),
+                   PineLowering(pine.emit_primitive(pine.PREV_SESSION_HIGH),
                                 helpers=(pine.PREV_SESSION_HIGH,))),
         _primitive("prev_session_low", {}, {}, prim.prev_session_low,
-                   PineLowering(pine.emit_primitive(pine.PREV_SESSION_LOW,
-                                                    session=True),
+                   PineLowering(pine.emit_primitive(pine.PREV_SESSION_LOW),
                                 helpers=(pine.PREV_SESSION_LOW,))),
         _primitive("prev_session_close", {}, {}, prim.prev_session_close,
-                   PineLowering(pine.emit_primitive(pine.PREV_SESSION_CLOSE,
-                                                    session=True),
+                   PineLowering(pine.emit_primitive(pine.PREV_SESSION_CLOSE),
                                 helpers=(pine.PREV_SESSION_CLOSE,))),
         _primitive("gap_pct", {}, {}, prim.gap_pct,
-                   PineLowering(pine.emit_primitive(pine.GAP_PCT, session=True),
+                   PineLowering(pine.emit_primitive(pine.GAP_PCT),
                                 helpers=(pine.GAP_PCT,))),
         _primitive("swing_high", {"k": (1, 10)}, {"k": 3}, prim.swing_high,
                    PineLowering(pine.emit_swing(pine.SWING_HIGH),
@@ -326,8 +326,7 @@ def core_vocabulary() -> Vocabulary:
                                 helpers=(pine.DAY_OF_WEEK,)),
                    session_scoped=True),
         _primitive("minutes_into_session", {}, {}, prim.minutes_into_session,
-                   PineLowering(pine.emit_primitive(pine.MINUTES_INTO_SESSION,
-                                                    session=True),
+                   PineLowering(pine.emit_primitive(pine.MINUTES_INTO_SESSION),
                                 helpers=(pine.MINUTES_INTO_SESSION,)),
                    session_scoped=True, driving_frame_intraday=True),
         # driving_frame_intraday, and that is a decision rather than an

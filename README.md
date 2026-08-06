@@ -212,6 +212,22 @@ The hosted product at nakag.ai is built on top of this core.
 
 ### 0.2.0
 
+**Behavior change: every session-scoped term is anchored on the 09:30 bell and
+scoped to regular hours.** Backtest output moves for any play reading
+`opening_range_high`, `opening_range_low`, `minutes_into_session`,
+`prev_session_high`, `prev_session_low`, `prev_session_close`, `gap_pct` or
+`vwap`; re-run anything that depends on them. The bar caches are not
+regular-hours-only, and these all grouped a New York calendar date and treated
+its first row as the session's start, which is ordinarily an 08:00 pre-market
+print. So the opening range was a thin band nobody trades, `minutes_into_session`
+ran an hour and a half fast, the previous session's high and low were off-hours
+extremes and its "close" was the last post-market print, a gap was measured from
+19:45 to 08:00, and session VWAP was set by pre-market volume. A session now
+runs `[09:30, 16:00)` on the exchange wall clock, from
+`nakagai/data/schema.py`, and a bar before the bell reads NaN rather than a
+value a condition would act on. A daily frame is unaffected: one row is its own
+whole session.
+
 **Behavior change: `day_of_week` reads the weekday off the FRAME, not off a
 label's clock.** Backtest output moves for any play using `day_of_week` on an
 intraday frame; re-run anything that depends on it. The old predicate decided

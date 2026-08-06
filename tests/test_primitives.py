@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+import pytest
 
 from nakagai.strategies.base import MarketContext
 
@@ -36,14 +37,21 @@ def _reference_opening_range(bars, minutes, col, how):
     The shipped primitive is vectorized for speed; this stays as the thing it
     must agree with, so the rewrite is checked against something readable
     rather than against itself.
+
+    Anchored on data/schema.session_open, the same bell the primitive reads.
+    This loop used to start each window at `day.index[0]`, and that reading was
+    the defect rather than a property: the caches are not RTH-only, so the
+    first bar of a date is ordinarily an 08:00 pre-market print, and a
+    reference that measured from it would agree with the bug forever.
     """
-    from nakagai.data.schema import EXCHANGE_TZ
+    from nakagai.data.schema import EXCHANGE_TZ, session_open
     out = pd.Series(np.nan, index=bars.index)
     days = np.asarray(bars.index.tz_convert(EXCHANGE_TZ).date)
     for _, day in bars.groupby(days):
-        start = day.index[0]
-        window = day[day.index < start + pd.Timedelta(minutes=minutes)]
-        done = day.index >= start + pd.Timedelta(minutes=minutes)
+        start = session_open(day.index[0])
+        edge = start + pd.Timedelta(minutes=minutes)
+        window = day[(day.index >= start) & (day.index < edge)]
+        done = day.index >= edge
         if done.any():
             out.loc[day.index[done]] = getattr(window[col], how)()
     return out
@@ -65,13 +73,116 @@ def _ragged_sessions():
 
 def test_opening_range_matches_the_reference_loop_on_ragged_sessions():
     """A session that ends before its opening range completes must stay NaN,
-    and a late open must measure from its own first bar, not from the clock."""
+    and a session that does not trade during the window gets no level at all
+    rather than a level built from some other half-hour."""
     from nakagai.strategies.rules.primitives import _opening_range
     bars = _ragged_sessions()
     for col, how in (("high", "max"), ("low", "min")):
         got = _opening_range(bars, 30, col, how)
         want = _reference_opening_range(bars, 30, col, how)
         pd.testing.assert_series_equal(got, want, check_names=False)
+
+
+def test_a_session_that_closes_inside_its_opening_range_gets_no_level():
+    # The 2026-01-06 span is 09:30 to 09:45 New York: the window never elapses,
+    # so publishing a level would be publishing one built from bars the
+    # condition reading it has not finished seeing.
+    from nakagai.strategies.rules.primitives import _opening_range
+    bars = _ragged_sessions()
+    half_day = bars.index.tz_convert("America/New_York").date == \
+        pd.Timestamp("2026-01-06").date()
+    assert half_day.sum() == 2, "the fixture must still hold the short session"
+    assert _opening_range(bars, 30, "high", "max")[half_day].isna().all()
+
+
+def test_a_session_that_does_not_trade_in_its_window_gets_no_level():
+    # The 2026-01-07 span opens at 10:30 New York, an hour after the bell, so
+    # [09:30, 10:00) holds no bars. NaN is the honest answer and a condition
+    # reads it as False. Measuring from 10:30 instead, which is what the old
+    # anchor did, would hand a breakout play a level built out of a different
+    # half-hour than the one its author wrote down.
+    from nakagai.strategies.rules.primitives import _opening_range
+    bars = _ragged_sessions()
+    late = bars.index.tz_convert("America/New_York").date == \
+        pd.Timestamp("2026-01-07").date()
+    assert late.sum() > 2, "the fixture must still hold the late-opening session"
+    assert _opening_range(bars, 30, "high", "max")[late].isna().all()
+
+
+def _extended_hours_session(day="2026-01-05"):
+    """One session the way a cache actually holds it: 08:00 to 19:45 New York.
+
+    Four price regimes, each a flat band, so every assertion below names a
+    number rather than an argument:
+
+        08:00 - 09:15   pre-market, high 100.1 / low 99.9, a THIN band of the
+                        kind a real 08:00 tape prints
+        09:30 - 09:45   the opening range proper, high 105 / low 95
+        10:00 - 15:45   the rest of the regular session, high 103 / low 97
+        16:00 - 19:45   post-market, high 110 / low 90, deliberately WIDER than
+                        the opening range on both sides
+
+    The pre-market band is what the primitive used to return: measured from
+    the session's first bar, a 30 minute window is 08:00 to 08:30, and the
+    "opening range" came back 100.1 / 99.9. That is a band the first regular
+    bar clears outright, so every opening-range breakout in the catalog fired
+    on the open regardless of what the tape did. The post-market band is the
+    other half of the same question: only bars INSIDE the window may reach the
+    aggregate, whatever the rest of the session does afterwards.
+    """
+    from nakagai.data.schema import EXCHANGE_TZ
+    idx = pd.date_range(f"{day} 08:00", f"{day} 19:45", freq="15min",
+                        tz=EXCHANGE_TZ).tz_convert("UTC")
+    ny = idx.tz_convert(EXCHANGE_TZ)
+    clock = ny.hour * 60 + ny.minute
+    high = np.select([clock < 570, clock < 600, clock < 960],
+                     [100.1, 105.0, 103.0], default=110.0)
+    low = np.select([clock < 570, clock < 600, clock < 960],
+                    [99.9, 95.0, 97.0], default=90.0)
+    mid = (high + low) / 2
+    return pd.DataFrame({"open": mid, "high": high, "low": low, "close": mid,
+                         "volume": 1000.0}, index=idx)
+
+
+def test_the_opening_range_is_the_bell_s_window_and_not_the_pre_market_band():
+    """The regression this whole change exists for (chrvsd/nakagai#276).
+
+    The caches are not RTH-only, so the first bar of a New York date is an
+    08:00 pre-market print. Anchoring the window there measured a band nobody
+    trades and called it the opening range; anchoring on 09:30 measures the
+    half-hour the term names. The two answers are 100.1 and 105, so nothing
+    here can pass by accident.
+    """
+    from nakagai.strategies.rules.primitives import (opening_range_high,
+                                                     opening_range_low)
+    bars = _extended_hours_session()
+    ctx = _ctx(bars)
+    clock = bars.index.tz_convert("America/New_York")
+    clock = clock.hour * 60 + clock.minute
+    high = opening_range_high(ctx, bars, minutes=30)
+    low = opening_range_low(ctx, bars, minutes=30)
+    # From 10:00 the window has elapsed and the level is the bell's half-hour,
+    # on every bar of the session including the post-market ones.
+    assert (high[clock >= 600] == 105.0).all()
+    assert (low[clock >= 600] == 95.0).all()
+    # Named outright, because these are the exact wrong answers: the pre-market
+    # band the old anchor returned, and the post-market extremes that sit
+    # outside the window and must never reach the aggregate.
+    assert 100.1 not in set(high.dropna()) and 99.9 not in set(low.dropna())
+    assert 110.0 not in set(high.dropna()) and 90.0 not in set(low.dropna())
+
+
+def test_the_opening_range_is_invisible_until_its_own_window_has_elapsed():
+    # No lookahead, and the pre-market falls under the same clause: a bar
+    # before the bell is before the edge too, so the level cannot be read
+    # before the bars it is built from have printed.
+    from nakagai.strategies.rules.primitives import opening_range_high
+    bars = _extended_hours_session()
+    clock = bars.index.tz_convert("America/New_York")
+    clock = clock.hour * 60 + clock.minute
+    high = opening_range_high(_ctx(bars), bars, minutes=30)
+    assert high[clock < 600].isna().all()
+    assert high[clock >= 600].notna().all()
 
 
 def test_opening_range_of_an_empty_frame_is_empty():
@@ -92,14 +203,25 @@ def test_opening_range_cost_does_not_grow_with_history():
     that reads an opening range.
 
     Measured on three years of 15m bars (750 sessions): the loop 90ms per call,
-    vectorized 2.6ms. The 25ms bound sits between them with room on both sides,
-    so a slow or loaded machine does not flake and the loop cannot come back.
+    vectorized 2.6ms, and 2.4ms once the window was anchored on the bell. The
+    25ms bound sits between them with room on both sides, so a slow or loaded
+    machine does not flake and the loop cannot come back.
+
+    The sessions are written on the EXCHANGE clock, which they have to be now
+    that the window is [09:30, 09:30 + minutes) of each one. Built on the UTC
+    clock the frame straddles six daylight-saving changes, half its sessions
+    start at 10:30 New York, and their windows hold no bars at all: the same
+    vectorized work either way, so the number would look fine while measuring
+    a frame the primitive can say nothing about.
     """
     import time
+    from nakagai.data.schema import EXCHANGE_TZ
     from nakagai.strategies.rules.primitives import _opening_range
     idx = pd.DatetimeIndex([t for d in pd.bdate_range("2023-07-03", periods=750)
-                            for t in pd.date_range(f"{d.date()} 14:30", f"{d.date()} 20:45",
-                                                   freq="15min", tz="UTC")])
+                            for t in pd.date_range(f"{d.date()} 09:30",
+                                                   f"{d.date()} 15:45",
+                                                   freq="15min", tz=EXCHANGE_TZ)
+                            ]).tz_convert("UTC")
     close = np.linspace(100, 400, len(idx))
     bars = pd.DataFrame({"open": close, "high": close + 0.5, "low": close - 0.5,
                          "close": close, "volume": 1000.0}, index=idx)
@@ -124,6 +246,265 @@ def test_prev_session_close_and_gap_pct():
     assert abs(gap.iloc[-1] - 100 * (day2_open - day1_close) / day1_close) < 1e-9
 
 
+# The extended-hours session as a cache holds it, with every band flat and
+# every number below named in an assertion, so nothing can pass by coincidence.
+#
+#                   high     low    close
+#     08:00-09:15    120      80      118      pre-market
+#     09:30-15:45    110      90      101      the regular session
+#     16:00-19:45    130      70      125      post-market
+#
+# The off-hours bands are WIDER than the regular one on both sides, which is
+# what a thin off-hours tape does and is the whole of chrvsd/nakagai#276: the
+# calendar-date aggregate answers 130 and 70 where the session answers 110 and
+# 90, and calls the 19:45 print the session's close. Two bars carry their own
+# numbers because two primitives read exactly them: the 09:30 bar's OPEN is
+# what a gap is measured from, and the 15:45 bar's CLOSE is what every
+# "yesterday's close" in the catalog means.
+PRE_MARKET_HIGH, PRE_MARKET_LOW, PRE_MARKET_CLOSE = 120.0, 80.0, 118.0
+SESSION_HIGH, SESSION_LOW = 110.0, 90.0
+POST_MARKET_HIGH, POST_MARKET_LOW, POST_MARKET_CLOSE = 130.0, 70.0, 125.0
+
+
+def _extended_session(day: str, bell_open: float, last_close: float,
+                      start: str = "08:00", end: str = "19:45"):
+    """One session on the exchange clock, from `start` to `end` inclusive."""
+    from nakagai.data.schema import EXCHANGE_TZ
+    idx = pd.date_range(f"{day} {start}", f"{day} {end}", freq="15min",
+                        tz=EXCHANGE_TZ).tz_convert("UTC")
+    ny = idx.tz_convert(EXCHANGE_TZ)
+    clock = ny.hour * 60 + ny.minute
+    band = np.select([clock < 570, clock < 960], [0, 1], default=2)
+    close = np.choose(band, [PRE_MARKET_CLOSE, 101.0, POST_MARKET_CLOSE])
+    bars = pd.DataFrame(
+        {"open": close,
+         "high": np.choose(band, [PRE_MARKET_HIGH, SESSION_HIGH, POST_MARKET_HIGH]),
+         "low": np.choose(band, [PRE_MARKET_LOW, SESSION_LOW, POST_MARKET_LOW]),
+         "close": close, "volume": 1000.0}, index=idx)
+    bars.loc[idx[clock == 570], "open"] = bell_open
+    bars.loc[idx[clock == 945], "close"] = last_close
+    return bars
+
+
+# The bell open and the 15:45 close of each session, so the gap between them is
+# a number written here rather than derived from the fixture.
+FIRST_BELL, FIRST_CLOSE = 100.0, 105.0
+SECOND_BELL, SECOND_CLOSE = 107.0, 106.0
+
+
+def _two_extended_sessions(first="2026-01-05", second="2026-01-06"):
+    return pd.concat([_extended_session(first, FIRST_BELL, FIRST_CLOSE),
+                      _extended_session(second, SECOND_BELL, SECOND_CLOSE)])
+
+
+def _clock(bars) -> np.ndarray:
+    ny = bars.index.tz_convert("America/New_York")
+    return np.asarray(ny.hour * 60 + ny.minute)
+
+
+def _second_session(bars, day="2026-01-06") -> np.ndarray:
+    return np.asarray(bars.index.tz_convert("America/New_York").date
+                      == pd.Timestamp(day).date())
+
+
+def test_the_previous_session_levels_are_the_regular_session_s():
+    """The regression this exists for, on the level side (chrvsd/nakagai#276).
+
+    The caches are not RTH-only, so aggregating a New York calendar date took
+    the high and the low from whichever off-hours print was widest, and took
+    "the close" from the last post-market bar hours after the bell. Every
+    catalog play that treats prev_session_high as resistance was therefore
+    reading a level nothing had defended, on a few hundred shares nobody could
+    trade in size, and every one that reads prev_session_close as yesterday's
+    settle was reading a 19:45 quote.
+
+    Named outright, because they are the exact wrong answers rather than
+    merely different ones: 130 and 70 are the post-market extremes and 125 is
+    the post-market close.
+    """
+    from nakagai.strategies.rules.primitives import (prev_session_close,
+                                                     prev_session_high,
+                                                     prev_session_low)
+    bars = _two_extended_sessions()
+    today = _second_session(bars)
+    high, low = prev_session_high(None, bars), prev_session_low(None, bars)
+    close = prev_session_close(None, bars)
+    assert (high[today] == SESSION_HIGH).all()
+    assert (low[today] == SESSION_LOW).all()
+    assert (close[today] == FIRST_CLOSE).all()
+    for wrong in (POST_MARKET_HIGH, PRE_MARKET_HIGH):
+        assert wrong not in set(high.dropna())
+    for wrong in (POST_MARKET_LOW, PRE_MARKET_LOW):
+        assert wrong not in set(low.dropna())
+    for wrong in (POST_MARKET_CLOSE, PRE_MARKET_CLOSE):
+        assert wrong not in set(close.dropna())
+    # The first session has no session before it, on every one of its bars.
+    assert high[~today].isna().all() and close[~today].isna().all()
+
+
+def test_the_gap_is_the_bell_s_open_against_the_previous_regular_close():
+    """The same regression on the gap, where both sides were wrong at once.
+
+    The open was the first bar of the New York date, an 08:00 pre-market print
+    at 118, and the close was the previous date's last post-market print at
+    125, so the "overnight gap" was measured across a span that already
+    contained the move it was meant to name. Both wrong readings are present in
+    this fixture and each would change the answer on its own, so agreeing with
+    the right number cannot happen by halves.
+    """
+    from nakagai.strategies.rules.primitives import gap_pct
+    bars = _two_extended_sessions()
+    today = _second_session(bars)
+    gap = gap_pct(None, bars)
+    want = 100 * (SECOND_BELL - FIRST_CLOSE) / FIRST_CLOSE
+    at_or_after_the_bell = today & (_clock(bars) >= 570)
+    assert np.allclose(gap[at_or_after_the_bell], want)
+    # The three readings each wrong half produces, named so that agreeing with
+    # `want` cannot be an arithmetic coincidence: both sides wrong, the close
+    # alone wrong, the open alone wrong.
+    for wrong in (100 * (PRE_MARKET_CLOSE - POST_MARKET_CLOSE) / POST_MARKET_CLOSE,
+                  100 * (SECOND_BELL - POST_MARKET_CLOSE) / POST_MARKET_CLOSE,
+                  100 * (PRE_MARKET_CLOSE - FIRST_CLOSE) / FIRST_CLOSE):
+        assert not np.isclose(want, wrong)
+        assert not np.isclose(gap.dropna(), wrong).any()
+
+
+def test_the_gap_is_nan_before_the_session_it_measures_has_opened():
+    """No lookahead, and it is the pre-market bars that need saying so.
+
+    pandas broadcasts a group's first regular open over the WHOLE group,
+    backwards included, so without the `started` mask an 08:00 bar would read
+    the 09:30 open an hour and a half before it printed. That is lookahead on
+    exactly the bars an overnight-gap play is most tempted to trade: it would
+    fire in replay and never live. A condition over NaN reads False.
+    """
+    from nakagai.strategies.rules.primitives import gap_pct
+    bars = _two_extended_sessions()
+    gap = gap_pct(None, bars)
+    before_the_bell = _second_session(bars) & (_clock(bars) < 570)
+    assert before_the_bell.sum() == 6, "08:00 through 09:15 is six 15m bars"
+    assert gap[before_the_bell].isna().all()
+    # Past 16:00 it stays readable, the same way the other session-scoped
+    # terms treat the post-market: the gap is a fact about the session and it
+    # does not stop being true when the bell rings.
+    assert gap[_second_session(bars) & (_clock(bars) >= 960)].notna().all()
+
+
+@pytest.mark.parametrize("first, second, label",
+                         [("2026-03-06", "2026-03-09", "EST into EDT"),
+                          ("2026-10-30", "2026-11-02", "EDT into EST")])
+def test_the_session_bounds_hold_across_a_clock_change(first, second, label):
+    """09:30 and 16:00 New York, whatever UTC instants those are that week.
+
+    Both transitions, because they move the offset in opposite directions and
+    a sign error passes one of them. The fixture is written on the exchange
+    clock and converted, which is the direction the fact runs: the 09:30 bar is
+    14:30 UTC on the Friday and 13:30 UTC on the Monday, so a mask built on the
+    UTC label would take the 08:30 pre-market bar into one session's aggregate
+    and drop the 15:30 bar out of the other's.
+    """
+    from nakagai.strategies.rules.primitives import (gap_pct, prev_session_close,
+                                                     prev_session_high,
+                                                     prev_session_low)
+    bars = _two_extended_sessions(first, second)
+    today = _second_session(bars, second)
+    assert (prev_session_high(None, bars)[today] == SESSION_HIGH).all(), label
+    assert (prev_session_low(None, bars)[today] == SESSION_LOW).all(), label
+    assert (prev_session_close(None, bars)[today] == FIRST_CLOSE).all(), label
+    at_the_bell = today & (_clock(bars) == 570)
+    assert at_the_bell.sum() == 1, label
+    assert gap_pct(None, bars)[at_the_bell].iloc[0] == pytest.approx(
+        100 * (SECOND_BELL - FIRST_CLOSE) / FIRST_CLOSE), label
+
+
+def test_a_session_that_never_opens_answers_nan_rather_than_reaching_further_back():
+    """A session of pure pre-market is a session with no levels, not last
+    week's levels wearing this week's name.
+
+    This is what decides between masking the bars and filtering them out.
+    Filtering drops the session from the grouping, and `shift(1)` then hands
+    the NEXT session the last session that HAPPENED to trade, which can be two
+    or five days back with nothing in the answer to say so. Masking leaves the
+    group in place with an all-NaN column, and max, min and last all answer
+    NaN over it, which a condition reads as False.
+    """
+    from nakagai.strategies.rules.primitives import (gap_pct, prev_session_close,
+                                                     prev_session_high)
+    bars = pd.concat([_extended_session("2026-01-05", FIRST_BELL, FIRST_CLOSE),
+                      _extended_session("2026-01-06", 0.0, 0.0,
+                                        start="08:00", end="09:15"),
+                      _extended_session("2026-01-07", SECOND_BELL, SECOND_CLOSE)])
+    dark = _second_session(bars, "2026-01-06")
+    assert dark.sum() == 6, "the middle session must still be pre-market only"
+    after = _second_session(bars, "2026-01-07")
+    # The session AFTER the dark one reads NaN rather than the 5th's levels.
+    assert prev_session_high(None, bars)[after].isna().all()
+    assert prev_session_close(None, bars)[after].isna().all()
+    assert gap_pct(None, bars)[after].isna().all()
+    # The dark session itself has no open of its own, so no gap either, and it
+    # still reads the levels of the session that did trade before it.
+    assert gap_pct(None, bars)[dark].isna().all()
+    assert (prev_session_high(None, bars)[dark] == SESSION_HIGH).all()
+
+
+def test_the_session_aggregates_skip_masked_bars_and_answer_nan_for_all_of_them():
+    """What _prev_session rests on, asserted against pandas rather than assumed.
+
+    The off-hours bars are masked to NaN and the aggregate is left to skip
+    them, which is only a fix while `agg("last")` dispatches to the
+    NaN-skipping cython `last`. Were it ever to answer the group's last
+    POSITION instead, prev_session_close would go straight back to reporting
+    the 19:45 print and no test of a level would notice, because max and min
+    would still be right. The all-NaN group is the other half: it has to answer
+    NaN rather than raise or return a group that is missing.
+    """
+    masked = pd.Series([np.nan, 7.0, 3.0, np.nan, np.nan, np.nan])
+    per_session = masked.groupby([0, 0, 0, 0, 1, 1])
+    assert per_session.agg("last").iloc[0] == 3.0
+    assert per_session.agg("max").iloc[0] == 7.0
+    assert per_session.agg("min").iloc[0] == 3.0
+    for how in ("last", "max", "min"):
+        assert pd.isna(per_session.agg(how).iloc[1]), how
+
+
+# Both daily conventions the engine meets. Neither label sits inside
+# [09:30, 16:00), so a session-scoped mask without data/schema.rth_mask's
+# session-frame branch blanks every one of these rather than failing anywhere a
+# reader would look.
+DAILY_BARS = {"open": [100.0, 110.0, 120.0, 130.0],
+              "high": [105.0, 115.0, 125.0, 135.0],
+              "low": [95.0, 105.0, 115.0, 125.0],
+              "close": [102.0, 112.0, 122.0, 132.0], "volume": 1000.0}
+
+
+@pytest.mark.parametrize("labels, convention", [
+    (["2026-01-05", "2026-01-06", "2026-01-07", "2026-01-08"], "midnight UTC"),
+    (["2026-01-05 05:00", "2026-01-06 05:00", "2026-01-07 05:00",
+      "2026-01-08 05:00"], "midnight Eastern")])
+def test_the_session_levels_read_a_daily_frame_as_one_session_per_row(
+        labels, convention):
+    """The trap this whole design turns on.
+
+    A daily bar is labeled at midnight under both conventions the engine meets,
+    the cache's own UTC resample and Alpaca's Eastern stamp, and both sit
+    outside the regular window. A wall-clock mask alone would answer all False
+    on either and silently blank every session-scoped reading of every daily
+    spec: no exception, no empty frame, just NaN where a level used to be.
+    turnaround_tuesday is a shipped 1d catalog play, and prev_session_* and
+    gap_pct are exactly what a daily play reads.
+    """
+    from nakagai.strategies.rules.primitives import (gap_pct, prev_session_close,
+                                                     prev_session_high,
+                                                     prev_session_low)
+    bars = pd.DataFrame(DAILY_BARS, index=pd.DatetimeIndex(labels, tz="UTC"))
+    assert list(prev_session_high(None, bars))[1:] == [105.0, 115.0, 125.0], convention
+    assert list(prev_session_low(None, bars))[1:] == [95.0, 105.0, 115.0], convention
+    assert list(prev_session_close(None, bars))[1:] == [102.0, 112.0, 122.0], convention
+    gap = gap_pct(None, bars)
+    assert pd.isna(gap.iloc[0]), convention
+    assert gap.iloc[1] == pytest.approx(100 * (110.0 - 102.0) / 102.0), convention
+
+
 def test_swing_high_returns_last_confirmed_swing_level():
     from nakagai.strategies.rules.primitives import swing_high
     bars = _session_bars()
@@ -140,6 +521,82 @@ def test_time_primitives():
     assert dow.iloc[0] == 0 and dow.iloc[-1] == 1      # Mon, Tue
     mins = minutes_into_session(ctx, bars)
     assert mins.iloc[0] == 0.0 and mins.iloc[2] == 30.0
+
+
+def _minutes_by_clock(bars):
+    """minutes_into_session keyed by New York wall clock, for legible asserts."""
+    from nakagai.strategies.rules.primitives import minutes_into_session
+    mins = minutes_into_session(_ctx(bars), bars)
+    ny = bars.index.tz_convert("America/New_York")
+    return dict(zip([f"{t.hour:02d}:{t.minute:02d}" for t in ny], mins))
+
+
+def test_minutes_into_session_is_nan_before_the_bell_and_zero_at_it():
+    """The pre-market NaN, which is deliberate and load-bearing.
+
+    On the right anchor a pre-market bar is NEGATIVE, and a negative passes
+    every `< N` gate the catalog writes: first_hour_reversal gates on
+    `minutes_into_session < 240` and would start firing at 08:00, an hour and a
+    half before any of its premises exist. A condition over NaN reads False, so
+    NaN fails closed. Fixing it here costs one `.where()`; fixing it in the
+    specs would cost a lower bound in thirteen files and be forgotten in the
+    fourteenth.
+    """
+    mins = _minutes_by_clock(_extended_hours_session())
+    assert np.isnan(mins["08:00"]) and np.isnan(mins["09:15"])
+    assert mins["09:30"] == 0.0
+    assert mins["10:00"] == 30.0
+    assert mins["15:45"] == 375.0
+
+
+def test_minutes_into_session_keeps_counting_after_the_close():
+    """Past 16:00 it goes on counting rather than going NaN.
+
+    That is the reading the catalog is written against, not an oversight to
+    tidy later. Every affected play exits on `minutes_into_session >= 375`,
+    which is satisfied at 15:45 INSIDE the session, so blanking the
+    post-market would change no exit; and every entry gate is a `< N` that a
+    post-close value already fails.
+    """
+    mins = _minutes_by_clock(_extended_hours_session())
+    assert mins["16:00"] == 390.0
+    assert mins["19:45"] == 615.0
+    assert mins["16:00"] >= 375.0        # the exit every session play carries
+
+
+def test_minutes_into_session_on_a_session_frame_is_zero_on_every_bar():
+    # One row IS the whole session there, so it opens at its own open and no
+    # other number is available. vocabulary.py documents that reading and
+    # spec.py refuses a 1d driving frame over it, which is what keeps a play
+    # from being written against a constant.
+    from nakagai.strategies.rules.primitives import minutes_into_session
+    idx = pd.date_range("2026-01-05", periods=5, freq="B", tz="UTC")
+    assert (minutes_into_session(None, _flat(idx)) == 0.0).all()
+
+
+@pytest.mark.parametrize("day, offset", [("2026-03-06", "EST, before"),
+                                         ("2026-03-09", "EDT, after"),
+                                         ("2026-10-30", "EDT, before"),
+                                         ("2026-11-02", "EST, after")])
+def test_the_bell_is_the_same_bell_on_both_sides_of_a_clock_change(day, offset):
+    """09:30 New York, whatever UTC instant that is that week.
+
+    The trap the anchor has to survive: the 09:30 bar is 14:30 UTC in winter
+    and 13:30 UTC in summer, so anything that reaches the bell by adding a
+    fixed offset to a UTC midnight lands an hour out for half the year, and a
+    session play would gate on 10:30 or 08:30 without saying so. Both March and
+    November are here because the two transitions move the offset in opposite
+    directions and a sign error passes one of them.
+    """
+    from nakagai.strategies.rules.primitives import opening_range_high
+    bars = _extended_hours_session(day)
+    mins = _minutes_by_clock(bars)
+    assert np.isnan(mins["09:15"]), offset
+    assert mins["09:30"] == 0.0 and mins["15:45"] == 375.0, offset
+    high = opening_range_high(_ctx(bars), bars, minutes=30)
+    ny = bars.index.tz_convert("America/New_York")
+    at_ten = (ny.hour * 60 + ny.minute) >= 600
+    assert (high[at_ten] == 105.0).all(), offset
 
 
 def test_bars_since_counts_bars_since_condition_true():
@@ -199,22 +656,6 @@ def test_an_after_hours_bar_keeps_its_own_session_s_weekday():
                             "2026-01-06 14:30"],  # NY Tue 09:30
                            tz="UTC")
     assert list(day_of_week(None, _flat(idx))) == [0.0, 0.0, 0.0, 1.0]
-
-
-def test_a_frame_is_read_as_daily_only_when_it_holds_one_bar_per_session():
-    from nakagai.strategies.rules.primitives import _is_session_frame
-    daily = pd.date_range("2026-01-05", periods=5, freq="B", tz="UTC")
-    assert _is_session_frame(daily)
-    intraday = pd.date_range("2026-01-05 14:30", periods=5, freq="15min",
-                             tz="UTC")
-    assert not _is_session_frame(intraday)
-    # An intraday frame whose rows happen to sit on different dates is still
-    # one bar per date, and that is the honest reading: nothing in the frame
-    # says otherwise.
-    assert _is_session_frame(pd.DatetimeIndex(
-        ["2026-01-05 14:30", "2026-01-06 15:30"], tz="UTC"))
-    # Too short to carry evidence of its own cadence.
-    assert not _is_session_frame(daily[:1])
 
 
 def _ny(day: str, clock: str) -> pd.Timestamp:

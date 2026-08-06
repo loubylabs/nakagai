@@ -346,8 +346,17 @@ def test_a_tf_qualified_primitive_evaluates_on_its_native_frame():
     it against the driving frame and relabeling would give a 15m answer wearing
     an hourly name. The Jan 5 session's hourly high is 202.0, and every Jan 6
     driving row carries it once the hourly bars that establish it have closed.
+
+    The Jan 5 bars are 15:00 and 16:00 UTC, which is 10:00 and 11:00 New York,
+    and the hours are load-bearing rather than arbitrary. They used to be 13:00
+    and 14:00, an 08:00 and an 09:00 pre-market print, so the 202.0 this
+    asserts was a pre-market high wearing the name "the previous session's
+    high": the fixture agreed with chrvsd/nakagai#276 rather than measuring
+    anything. The Jan 6 bars stay in the pre-market on purpose, because a bar
+    reads the previous session's level whatever time of day it prints; it is
+    the AGGREGATE that is scoped to regular hours, not the reading.
     """
-    b1h = pd.concat([_hand_bars([199.5, 201.5], "2026-01-05 13:00", "1h"),
+    b1h = pd.concat([_hand_bars([199.5, 201.5], "2026-01-05 15:00", "1h"),
                      _hand_bars([190.0, 191.0], "2026-01-06 13:00", "1h")])
     frames = {"15m": _hand_bars([100.0] * 8, "2026-01-06 14:30", "15min"),
               "1h": b1h,

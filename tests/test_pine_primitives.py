@@ -230,16 +230,19 @@ def test_the_state_and_direction_pair_chooses_the_gaps_the_scan_keeps():
 
 
 def test_the_opening_range_is_invisible_until_its_own_window_elapses():
-    # _opening_range: the level accumulates over `ts < edge` and is returned
-    # only `where(ts >= edge)`, so a session that closes inside the range never
-    # gets one. Both halves have to be in the helper, or the level reads a bar
-    # early and every opening-range breakout fires on the range's own bars.
+    # _opening_range: the level accumulates over `[start, edge)` and is
+    # returned only `where(ts >= edge)`, so a session that closes inside the
+    # range never gets one. Both halves have to be in the helper, or the level
+    # reads a bar early and every opening-range breakout fires on the range's
+    # own bars.
     source = _source("nk_opening_range_high")
-    assert "if time < edge" in source
+    assert "if time >= start and time < edge" in source
     assert "time >= edge ? level : na" in source
-    # The edge is measured from the session's OWN first bar, not from a wall
-    # clock: a late open or a half day has to measure from where it started.
-    assert "start := time" in source
+    # The window opens at the BELL, from nk_session_open, not at the session's
+    # own first bar. Neither engine's first bar is the open: the caches are not
+    # RTH-only and a chart's extended session starts at 04:00, so measuring
+    # from it aggregated a pre-market band and called it the opening range.
+    assert "int start = nk_session_open()" in source
     assert "edge = start + minutes * 60000" in source
 
 
@@ -266,10 +269,39 @@ def test_the_previous_session_levels_roll_only_when_the_session_changes():
     assert close.rstrip().endswith("previous")
 
 
+def test_the_previous_session_levels_aggregate_regular_hours_only():
+    # _prev_session masks with data/schema.rth_mask before the groupby, so the
+    # extremes are the session's and not the widest off-hours print of its
+    # date. Both engines carry pre-market and post-market bars, so an
+    # unfiltered aggregate made "yesterday's high" a thin quote nothing
+    # defended, and "yesterday's close" the 19:45 print rather than the 15:45
+    # one every catalog play means by it.
+    for helper_id in ("nk_prev_session_high", "nk_prev_session_low",
+                      "nk_prev_session_close"):
+        source = _source(helper_id)
+        assert "if nk_in_session()" in source
+        # Reset to na rather than to this bar's price: a session with no
+        # regular bar at all answers na, which is what a masked pandas
+        # aggregate returns for an all-NaN group. Seeding from the first bar of
+        # the date would seed from a pre-market print instead.
+        assert "        current := na" in source
+
+
+def test_the_regular_session_is_the_wall_clock_window_the_engine_masks_on():
+    # data/schema.rth_mask: [09:30, 16:00) of the bar's own New York session,
+    # half-open on the right because a bar is labeled by its OPEN. 570 and 960
+    # are those two times in minutes, read off hour() and minute() in New York
+    # so the window survives a daylight-saving change.
+    source = _source("nk_in_session")
+    assert ('hour(time, "America/New_York") * 60 + '
+            'minute(time, "America/New_York")' in source)
+    assert "into >= 570 and into < 960" in source
+
+
 def test_a_session_is_the_bar_s_new_york_calendar_day():
-    # _ny_dates: bars.index.tz_convert(EXCHANGE_TZ).date, and EXCHANGE_TZ is
-    # America/New_York. A session key built on any other clock groups the bars
-    # differently and moves every session-scoped primitive at once.
+    # _session_keys: one group per New York calendar day, spelled engine-side
+    # as that day's 09:30 open. A session key built on any other clock groups
+    # the bars differently and moves every session-scoped primitive at once.
     key = _source("nk_session_key")
     assert 'tz = "America/New_York"' in key
     assert "year(time, tz) * 10000 + month(time, tz) * 100 + dayofmonth(time, tz)" \
@@ -279,19 +311,43 @@ def test_a_session_is_the_bar_s_new_york_calendar_day():
     assert "na(key[1]) or key != key[1]" in _source("nk_new_session")
 
 
+def test_the_session_open_is_the_bell_on_the_new_york_wall_clock():
+    # data/schema.session_opens, which every session-anchored helper measures
+    # from. 570 is 09:30 New York in minutes, and reading it off hour() and
+    # minute() in that zone is what keeps the bell at 09:30 through a
+    # daylight-saving change instead of drifting an hour, the same reasoning
+    # session_opens writes down for its own naive-local construction.
+    source = _source("nk_session_open")
+    assert ('hour(time, "America/New_York") * 60 + '
+            'minute(time, "America/New_York") - 570' in source)
+    assert "time - into * 60000" in source
+
+
 def test_the_gap_is_this_session_s_open_against_the_last_session_s_close():
     # gap_pct: 100 * (session open - prev session close) / prev session close.
     source = _source("nk_gap_pct")
     assert "session_open := open" in source
     assert "nk_prev_session_close()" in source
     assert "100 * (session_open - previous) / previous" in source
+    # The open is the session's first REGULAR bar's, and it is na until that
+    # bar has printed. Both halves are the fix for chrvsd/nakagai#276: the
+    # first bar of the New York date is a pre-market print on a cache that is
+    # not RTH-only, and pandas' transform broadcasts the group's first regular
+    # open backwards over the pre-market, so the engine blanks those bars and
+    # this must answer na on them for the same reason.
+    assert "if nk_in_session() and na(session_open)" in source
+    assert "        session_open := na" in source
 
 
-def test_minutes_into_session_counts_from_the_session_s_first_bar():
-    # minutes_into_session: (bar - group first).total_seconds() / 60.
+def test_minutes_into_session_counts_from_the_bell_and_is_na_before_it():
+    # minutes_into_session: (bar - session_opens).total_seconds() / 60, blanked
+    # where that is negative. The blanking is half the primitive: a pre-market
+    # bar reads negative against the bell and a negative passes every `< N`
+    # gate a session play writes, so an unblanked chart would mark entries an
+    # hour and a half before the engine's earliest.
     source = _source("nk_minutes_into_session")
-    assert "start := time" in source
-    assert "(time - start) / 60000.0" in source
+    assert "(time - nk_session_open()) / 60000.0" in source
+    assert "mins >= 0 ? mins : na" in source
 
 
 def test_the_weekday_is_zero_on_monday_the_way_pandas_numbers_it():
@@ -454,41 +510,28 @@ def test_a_primitive_with_a_fixed_reach_declares_no_history():
     assert _program({"prim": "prev_session_high"}).max_bars_back == 0
 
 
-# Not "extended hours might be off": they are mandatory and the script refuses
-# a chart without them. The residual difference is which pre-market bar is
-# first, TradingView's fixed 04:00 print against the day's first actual one.
-SESSION_WARNING = (
-    "A session is the bar's New York calendar day in both engines and both "
-    "open it in the pre-market, but a chart's extended session opens at 04:00 "
-    "while the engine's frame opens on the day's first actual print.")
+@pytest.mark.parametrize("name", sorted(core_vocabulary().primitives))
+def test_no_primitive_warns_about_where_its_session_begins(name):
+    """Every primitive, not a sample: the vocabulary itself is the list.
 
+    Seven of these used to carry a warning saying that a chart's extended
+    session opens at 04:00 while the engine's frame opens on the day's first
+    actual print, so anything measured from a session's first bar or
+    aggregated over its whole span differed between the two. That was true
+    while the engine anchored on the first bar of the New York date. It no
+    longer is: every session-scoped primitive is now anchored on the 09:30
+    bell or aggregated over [09:30, 16:00) on both sides, so which pre-market
+    bars a chart happens to print reaches nothing.
 
-WARNS = ["opening_range_high", "opening_range_low", "prev_session_high",
-         "prev_session_low", "prev_session_close", "gap_pct",
-         "minutes_into_session"]
-QUIET = ["day_of_week", "rvol", "swing_high", "swing_low", "leg_retrace",
-         "bars_since", "fvg_nearest", "order_block"]
-
-
-@pytest.mark.parametrize("name", WARNS)
-def test_a_session_anchored_primitive_warns_where_the_chart_decides_the_session(
-        name):
-    assert SESSION_WARNING in _program({"prim": name}).warnings
-
-
-@pytest.mark.parametrize("name", QUIET)
-def test_a_primitive_that_does_not_read_the_session_shape_stays_quiet(name):
+    The warning is gone rather than reworded, and this asserts the absence for
+    the whole vocabulary so a new primitive cannot quietly reintroduce a
+    fidelity gap that nobody wrote down. A term that genuinely diverges gets
+    its own sentence naming what differs, the way emit_vwap and emit_obv do.
+    """
     node = {"prim": name}
     if name == "bars_since":
         node["cond"] = CLOSE_OVER_OPEN
     assert _program(node).warnings == ()
-
-
-def test_every_primitive_is_classified_as_warning_or_quiet():
-    # The two lists above are a partition, not a sample. A primitive in
-    # neither is one whose fidelity nothing states either way, which is how
-    # bars_since sat unpinned: correct, and correct by nobody's decision.
-    assert sorted(WARNS + QUIET) == sorted(core_vocabulary().primitives)
 
 
 DAILY_STAMP = ("A daily bar's timestamp is its session's start in New York, "
@@ -513,15 +556,6 @@ def test_an_intraday_chart_does_not_carry_the_daily_bar_assumption():
     assert DAILY_STAMP not in _program({"prim": "day_of_week"}).assumptions
     assert DAILY_STAMP not in _program({"prim": "prev_session_high"}, ">", 0,
                                        "1d").assumptions
-
-
-def test_the_session_warning_is_stated_once_however_many_terms_reach_it():
-    spec = {"version": 2, "name": "probe", "timeframe": "15m",
-            "long": {"all": [
-                {"lhs": {"prim": "gap_pct"}, "op": ">", "rhs": 0},
-                {"lhs": {"prim": "prev_session_high"}, "op": ">", "rhs": 0},
-            ]}}
-    assert lower_pine(spec).warnings == (SESSION_WARNING,)
 
 
 def test_a_cross_against_an_end_anchored_level_compares_both_bars_to_it():

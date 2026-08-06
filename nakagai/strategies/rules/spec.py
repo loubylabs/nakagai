@@ -117,10 +117,12 @@ def _prims_in(node, names) -> set[str]:
 # per primitive because the NL compiler retries against this text, and "needs
 # intraday bars" alone gives it nothing to reason with.
 _ONE_BAR_SESSION = {
-    "opening_range_high": "the opening-range window never elapses, so the "
-                          "level is NaN on every bar",
-    "opening_range_low": "the opening-range window never elapses, so the "
-                         "level is NaN on every bar",
+    "opening_range_high": "the opening-range window is the first few minutes "
+                          "after the 09:30 bell and a whole-session bar cannot "
+                          "sit inside it, so the level is NaN on every bar",
+    "opening_range_low": "the opening-range window is the first few minutes "
+                         "after the 09:30 bell and a whole-session bar cannot "
+                         "sit inside it, so the level is NaN on every bar",
     "minutes_into_session": "every bar sits 0 minutes into its own session",
     "rvol": "every bar shares one clock time, so the same-clock-time baseline "
             "becomes the whole series and this reads as a plain "

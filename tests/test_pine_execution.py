@@ -129,6 +129,74 @@ def test_the_opening_range_becomes_readable_on_the_bar_the_engine_says(minutes):
                  prim.opening_range_low(None, BARS, minutes=minutes))
 
 
+def _ragged() -> pd.DataFrame:
+    """Sessions the uniform frame above cannot hold, at 15m so the window bites.
+
+    An ordinary extended-hours session, one that does not open until hours
+    after the bell, one that closes inside its own opening range, and the
+    Monday after a daylight-saving change. Each of the last three is a case
+    where the opening range is NOT the session's first half-hour of trading,
+    which is exactly what the bell anchor decides and what the calendar-date
+    anchor got wrong.
+
+    The reset in each helper is load-bearing here and nowhere in the uniform
+    frame: on a session whose window holds no bars at all, a helper that failed
+    to blank its carried level would publish the PREVIOUS session's range under
+    this session's name, and every bar of the uniform frame has a bar in its
+    window, so nothing there could tell.
+    """
+    spans = [("2026-01-05", "08:00", "18:00"),   # pre-market through post
+             # After the widest window this file asks for, so the session has
+             # no opening range at any of them rather than only at the short
+             # ones, where a stale carried level would still look plausible.
+             ("2026-01-06", "12:00", "15:45"),   # opens well after the bell
+             ("2026-01-07", "08:00", "09:45"),   # closes inside a 30m range
+             ("2026-03-09", "08:00", "18:00")]   # the Monday the clocks moved
+    index = pd.DatetimeIndex([
+        stamp for day, start, end in spans
+        for stamp in pd.date_range(f"{day} {start}", f"{day} {end}",
+                                   freq="15min", tz="America/New_York")
+    ]).tz_convert("UTC")
+    rng = np.random.default_rng(3)
+    close = 100 + np.cumsum(rng.normal(0, 0.5, len(index)))
+    return pd.DataFrame(
+        {"open": close, "high": close + np.abs(rng.normal(0, 0.3, len(index))),
+         "low": close - np.abs(rng.normal(0, 0.3, len(index))), "close": close,
+         "volume": np.full(len(index), 1000.0)}, index=index)
+
+
+RAGGED = _ragged()
+
+
+@pytest.mark.parametrize("minutes", [30, 60, 120])
+def test_the_opening_range_agrees_on_sessions_that_do_not_have_one(minutes):
+    for entry, engine_fn in (("nk_opening_range_high", prim.opening_range_high),
+                             ("nk_opening_range_low", prim.opening_range_low)):
+        pine = as_series(run_helper(SOURCES, entry, RAGGED, (minutes,)), RAGGED)
+        _assert_same(pine, engine_fn(None, RAGGED, minutes=minutes))
+    # Agreement alone would be satisfied by both engines being wrong the same
+    # way, so the session with no bars in its window is named: it must have no
+    # level, rather than the previous session's carried over.
+    ny = RAGGED.index.tz_convert("America/New_York")
+    late = ny.date == pd.Timestamp("2026-01-06").date()
+    assert late.sum() > 4, "the frame must still hold the late-opening session"
+    assert prim.opening_range_high(None, RAGGED,
+                                   minutes=minutes)[late].isna().all()
+
+
+def test_minutes_into_session_agrees_across_a_daylight_saving_change():
+    # The 09:30 bar is 14:30 UTC in the first three sessions and 13:30 UTC in
+    # the last one. Either engine reaching the bell by arithmetic on a UTC
+    # label lands an hour out for one of them and the two stop agreeing.
+    _assert_same(as_series(run_helper(SOURCES, "nk_minutes_into_session",
+                                      RAGGED), RAGGED),
+                 prim.minutes_into_session(None, RAGGED))
+    ny = RAGGED.index.tz_convert("America/New_York")
+    at_bell = (ny.hour == 9) & (ny.minute == 30)
+    assert at_bell.sum() == 3, "three of the four sessions print a 09:30 bar"
+    assert (prim.minutes_into_session(None, RAGGED)[at_bell] == 0.0).all()
+
+
 def test_the_previous_session_levels_are_the_engine_s_on_every_bar():
     # The roll and the running aggregate are two lines whose ORDER is the whole
     # rule: swapped, every bar reads its own session's running high, which is a
@@ -255,10 +323,19 @@ MUTATIONS = [
      lambda: (_pine("nk_swing_high", 3), prim.swing_high(None, BARS, k=3))),
     ("the session rolls after the running high is reset",
      "nk_prev_session_high",
-     "        previous := current\n        current := high",
-     "        current := high\n        previous := current",
+     "        previous := current\n        current := na",
+     "        current := na\n        previous := current",
      lambda: (_pine("nk_prev_session_high"),
               prim.prev_session_high(None, BARS))),
+    ("the previous session's high is taken over its whole extended span",
+     "nk_prev_session_high", "    if nk_in_session()\n", "    if true\n",
+     lambda: (_pine("nk_prev_session_high"),
+              prim.prev_session_high(None, BARS))),
+    ("the gap is measured from the session's first bar rather than its open",
+     "nk_gap_pct",
+     "    if nk_in_session() and na(session_open)\n        session_open := open",
+     "    if na(session_open)\n        session_open := open",
+     lambda: (_pine("nk_gap_pct"), prim.gap_pct(None, BARS))),
 ]
 
 
