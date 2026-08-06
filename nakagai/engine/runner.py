@@ -62,8 +62,7 @@ def run_one(cache_root, strategy_name: str, params: dict, symbol: str,
             config: str = "", batch_id: str = "",
             tfs: TimeframeSet = DEFAULT_TIMEFRAMES,
             registry: Registry | None = None,
-            vocabulary_factory: VocabularyFactory | None = None,
-            icir: bool = True) -> dict:
+            vocabulary_factory: VocabularyFactory | None = None) -> dict:
     # cache_root is a path string, or an already-loaded BarCache-shaped object.
     # Both pickle, so either crosses into a pool worker. run_grid hands over
     # MemoryBars to skip repeated parquet reads; single-run callers still pass
@@ -119,11 +118,9 @@ def run_one(cache_root, strategy_name: str, params: dict, symbol: str,
     bh = buy_and_hold_return(cache.load(symbol, tfs.driving), window.test_start, window.test_end)
     run_id = uuid.uuid4().hex
     # ICIR lens: per-window rank-IC of the spec's margin vs forward returns.
-    # Rule specs only. `icir=False` opts a caller out, for bulk runs where the
-    # lens is not worth its cost; the permutation harness that was its original
-    # caller is gone, so today only tests exercise that path.
+    # Rule specs only, and it abstains to empty fields for anything else.
     ic_fields = empty_ic_fields()
-    if icir and isinstance(strategy, RuleStrategy) and strategy.spec:
+    if isinstance(strategy, RuleStrategy) and strategy.spec:
         try:
             ic_fields = window_icir(strategy.spec, cache, symbol, window, tfs=tfs,
                                     vocabulary=strategy.vocabulary)

@@ -117,11 +117,6 @@ class Engine:
         self.fees = fees if fees is not None else FeeModel()
         self.tfs = tfs
 
-    def slippage_for(self, price: float) -> float:
-        """Per-share slippage at this price. Exposed so callers and tests can
-        ask the engine what it will charge without reaching into the model."""
-        return self.slippage.per_share(price)
-
     def run(self) -> BacktestResult:
         vocabulary = getattr(self.strategy, "vocabulary", core_vocabulary())
         view = PreloadedBars(self.cache, self.symbol, self.tfs,

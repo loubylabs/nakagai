@@ -19,8 +19,9 @@ T+1 cash settlement), the RuleSpec strategy DSL, and a screener compiler.
   `nlbuilder` extra with `nlbuilder/`, which installs `anthropic`.
 - `nlbuilder/`: English-to-RuleSpec compilation via the Claude API, behind the
   optional `nlbuilder` extra (installs `anthropic`).
-- `stats.py`: pooled profit factor over a trade ledger, and the `PF_CLAMP` it
-  reports when a ledger has no losing trades.
+- `stats.py`: poolable return moments and the deflated-Sharpe family (PSR, DSR,
+  minimum track record length, effective trial count), which is how a candidate
+  is priced for how many candidates were tried.
 - `icir.py`: rank-IC / IR of rule-spec margins vs forward returns (the informational ICIR lens).
 - `filelock.py`: cross-process advisory file locking for concurrent read-modify-write
   on shared result files.
@@ -147,6 +148,31 @@ the hosted platform: API, web UI, and the mandate and approvals judgment layer.
 The hosted product at nakag.ai is built on top of this core.
 
 ## Release notes
+
+### 0.4.0
+
+**Breaking: `nakagai.stats.pf_from_trades` and `PF_CLAMP` are removed.** They
+computed a pooled profit factor over a trade ledger. The lab was their only
+caller, and with the lab gone in 0.3.0 nothing reached them: not core, not the
+hosted platform, which derives profit factor from its own gross sums. The
+module no longer imports pandas.
+
+**Breaking: `run_one` loses its `icir` keyword.** It opted a caller out of the
+ICIR lens, and it had exactly two callers, the permutation harness and the
+frontier open-window snapshots. Both were retired, so the flag has been dead
+in production for some time and only a test still set it. The lens itself is
+untouched and still runs for rule specs, still abstains to empty fields for
+everything else, and still degrades to empty rather than killing a run row.
+
+**Breaking: `Engine.slippage_for` is removed.** A one-line accessor over
+`SlippageModel.per_share`, added so callers could ask the engine what it would
+charge without reaching into the model. No caller ever did. Its only reference
+was a test asserting the method exists, which is a test that cannot fail for
+any reason worth catching, so it went too.
+
+This release is also the first to carry everything merged since 0.3.0, which
+shipped without a version bump: the deflated-Sharpe family, the injected
+vocabulary reaching composites, and the session-open fix.
 
 ### 0.3.0
 

@@ -1,16 +1,12 @@
-"""Statistical math for backtest results: profit factor, pooled moments,
-and the deflated-Sharpe family (PSR, DSR, minimum track record length,
-effective trial count).
+"""Statistical math for backtest results: pooled moments and the
+deflated-Sharpe family (PSR, DSR, minimum track record length, effective
+trial count).
 
 No evidence store, no workspace, no config: everything is parameterized.
 """
 
 import math
 from dataclasses import dataclass
-
-import pandas as pd
-
-PF_CLAMP = 1000.0   # a ledger or resample with no losers: "infinite" PF
 
 
 def _norm_cdf(z: float) -> float:
@@ -85,18 +81,6 @@ def _norm_ppf(p: float) -> float:
         r -= 5.0
         value = _poly(_E, r) / _poly(_F, r)
     return -value if q < 0 else value
-
-
-def pf_from_trades(trades: pd.DataFrame | None) -> float | None:
-    """Pooled profit factor over a trade ledger; None when it has no trades."""
-    if trades is None or len(trades) == 0:
-        return None
-    pnl = trades["pnl"].to_numpy(dtype=float)
-    wins = float(pnl[pnl > 0].sum())
-    losses = float(abs(pnl[pnl <= 0].sum()))
-    if losses == 0:
-        return PF_CLAMP if wins > 0 else 0.0
-    return wins / losses
 
 
 @dataclass(frozen=True)
