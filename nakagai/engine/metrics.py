@@ -76,13 +76,14 @@ def _daily_returns(curve: pd.Series) -> pd.Series:
 
 
 def _daily_stats(daily: pd.Series) -> dict:
-    """Sufficient statistics for recomputing Sharpe and Sortino over POOLED
-    windows rather than averaging per-window ratios.
+    """Sufficient statistics for recomputing Sharpe, Sortino, and the
+    deflated-Sharpe family (skew, kurtosis, PSR, DSR) over POOLED windows
+    rather than averaging per-window ratios.
 
     This is the answer to the small-sample problem, decided 2026-08-02. The
     house protocol's test window yields ~20 returns, which is why every
     per-window sharpe is None; thirteen such windows pooled yield ~260, which
-    is a statistic. Ratios cannot be averaged back into that, but these four
+    is a statistic. Ratios cannot be averaged back into that, but these six
     sums add, exactly as gross_profit and gross_loss already do for profit
     factor (see _trade_stats).
 
@@ -96,6 +97,7 @@ def _daily_stats(daily: pd.Series) -> dict:
         downside_dev  = sqrt(daily_sum_sq_down / daily_n)
         sharpe        = mean / sqrt(variance)   * sqrt(252)
         sortino       = mean / downside_dev     * sqrt(252)
+        skew, kurtosis = nakagai.stats.pooled_moments(...)   # bias-corrected
 
     daily_sum_sq_down uses a minimum acceptable return of zero and divides by
     the FULL count, not the count of losing days. That is the standard Sortino
@@ -107,6 +109,13 @@ def _daily_stats(daily: pd.Series) -> dict:
         "daily_sum": float(daily.sum()),
         "daily_sum_sq": float((daily ** 2).sum()),
         "daily_sum_sq_down": float((down ** 2).sum()),
+        # Third and fourth raw power sums, on the same poolable footing as the
+        # three above and for the same reason. The deflated Sharpe ratio needs
+        # the skew and the kurtosis of the return distribution, and neither is
+        # recoverable from the first two moments. nakagai.stats.pooled_moments
+        # is the one place they are derived back out.
+        "daily_sum_cube": float((daily ** 3).sum()),
+        "daily_sum_fourth": float((daily ** 4).sum()),
     }
 
 

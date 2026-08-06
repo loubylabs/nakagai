@@ -60,6 +60,7 @@ def test_summarize_key_set():
         "sortino", "ulcer_index", "cagr", "calmar",
         "exposure_pct", "avg_holding_hours",
         "daily_n", "daily_sum", "daily_sum_sq", "daily_sum_sq_down",
+        "daily_sum_cube", "daily_sum_fourth",
     } | {f"{p}{k}" for p in ("long_", "short_")
          for k in ("n_trades", "win_rate", "profit_factor", "expectancy_r",
                    "gross_profit", "gross_loss")}
