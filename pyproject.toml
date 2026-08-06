@@ -1,6 +1,6 @@
 [project]
 name = "nakagai"
-version = "0.2.0"
+version = "0.3.0"
 description = "Deterministic core for rule-driven trading agents: bar cache, walk-forward engine, RuleSpec strategy DSL, screener"
 readme = "README.md"
 license = "MIT"
@@ -53,14 +53,13 @@ exclude = [".github"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-# The lab tests share fixtures through `from tests.lab_helpers import ...`, so
-# the repo root has to be importable. Say so here rather than inheriting it:
-# an editable install drops the root onto sys.path as a side effect, which is
-# why this suite passes in this repo's own CI and fails the moment it is run
-# against a BUILT nakagai wheel. That is not hypothetical. It is exactly what
-# chrvsd/nakagai's "core integration at the pinned rev" job does, and three lab
-# modules failed to collect there the first time a platform pin included them.
+# Several tests share fixtures through `from tests.<module> import ...`
+# (`whole_frame_oracle`, `pine_interpreter`, and two test modules imported for
+# their golden sets), so the repo root has to be importable. Say so here rather
+# than inheriting it: an editable install drops the root onto sys.path as a
+# side effect, which is why this suite passes in this repo's own CI and fails
+# the moment it is run against a BUILT nakagai wheel. That is not hypothetical.
+# It is exactly what chrvsd/nakagai's "core integration at the pinned rev" job
+# does, and modules that relied on the side effect failed to collect there the
+# first time a platform pin included them.
 pythonpath = ["."]
-markers = [
-    "slow: statistical tests that replay hundreds of backtests. Excluded from a default run with -m 'not slow'; CI runs them.",
-]

@@ -73,7 +73,7 @@ def visible_counts(src_index: pd.DatetimeIndex, dst_close_times: pd.DatetimeInde
     if not len(src_index):
         return np.zeros(len(dst_close_times), dtype=np.int64)
     if timeframe in tfs.session_aligned:
-        # A proved pair replays this map thousands of times (permutations x
+        # A sweep replays this map thousands of times (specs x symbols x
         # windows), so a Python-level loop building one pd.Timestamp per
         # destination row here is not a stylistic nicety, it is millions of
         # constructions per pair. tz_convert + normalize + relocalize computes

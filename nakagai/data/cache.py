@@ -17,8 +17,8 @@ __all__ = ["BarCache", "MemoryBars", "empty_bars"]
 class MemoryBars:
     """BarCache-shaped, dict-backed frames, keyed by (symbol, timeframe).
 
-    The permutation harness backtests hundreds of permuted copies per pair;
-    round-tripping each copy through temp parquet was pure overhead. load()
+    A sweep backtests one symbol's bars against many specs; round-tripping the
+    same frames through temp parquet once per run is pure overhead. load()
     mirrors BarCache.load's missing-file contract (empty schema frame)."""
 
     def __init__(self, frames: dict):

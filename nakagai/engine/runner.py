@@ -65,9 +65,9 @@ def run_one(cache_root, strategy_name: str, params: dict, symbol: str,
             vocabulary_factory: VocabularyFactory | None = None,
             icir: bool = True) -> dict:
     # cache_root is a path string, or an already-loaded BarCache-shaped object.
-    # Both pickle, so either crosses into a pool worker. run_grid and the
-    # permutation harness hand over MemoryBars to skip repeated parquet reads;
-    # single-run callers still pass a path.
+    # Both pickle, so either crosses into a pool worker. run_grid hands over
+    # MemoryBars to skip repeated parquet reads; single-run callers still pass
+    # a path.
     cache = cache_root if hasattr(cache_root, "load") else BarCache(Path(cache_root))
     if registry is None:
         raise ValueError(
@@ -108,8 +108,9 @@ def run_one(cache_root, strategy_name: str, params: dict, symbol: str,
     bh = buy_and_hold_return(cache.load(symbol, tfs.driving), window.test_start, window.test_end)
     run_id = uuid.uuid4().hex
     # ICIR lens: per-window rank-IC of the spec's margin vs forward returns.
-    # Rule specs only; permutation replays pass icir=False (an IC of shuffled
-    # bars is meaningless and the nulls run thousands of times).
+    # Rule specs only. `icir=False` opts a caller out, for bulk runs where the
+    # lens is not worth its cost; the permutation harness that was its original
+    # caller is gone, so today only tests exercise that path.
     ic_fields = empty_ic_fields()
     if icir and isinstance(strategy, RuleStrategy) and strategy.spec:
         try:

@@ -2,8 +2,7 @@
 
 The deterministic, LLM-free core for rule-driven trading agents: a point-in-time
 bar cache, a statistically honest walk-forward backtester (look-ahead prevention,
-T+1 cash settlement, bar-permutation Monte Carlo), the RuleSpec strategy DSL, and
-a screener compiler.
+T+1 cash settlement), the RuleSpec strategy DSL, and a screener compiler.
 
 ## What is here
 
@@ -11,7 +10,7 @@ a screener compiler.
   and its Alpaca implementation (single-symbol and batched multi-symbol), and a
   sync routine that keeps the cache current.
 - `engine/`: the walk-forward backtester itself, point-in-time `MarketContext`
-  assembly, T+1 cash settlement, run metrics, and the bar-permutation Monte Carlo null.
+  assembly, T+1 cash settlement, and run metrics.
 - `strategies/`: rule-based (`rules/`), boolean-composed (`composite/`), and
   ICT-flavored (`ict/`) strategies, plus a catalog loader that turns JSON specs into
   strategy classes.
@@ -20,8 +19,8 @@ a screener compiler.
   `nlbuilder` extra with `nlbuilder/`, which installs `anthropic`.
 - `nlbuilder/`: English-to-RuleSpec compilation via the Claude API, behind the
   optional `nlbuilder` extra (installs `anthropic`).
-- `stats.py`: permutation p-values, bootstrap confidence intervals, and the
-  decision-exact null harness for backtest results.
+- `stats.py`: pooled profit factor over a trade ledger, and the `PF_CLAMP` it
+  reports when a ledger has no losing trades.
 - `icir.py`: rank-IC / IR of rule-spec margins vs forward returns (the informational ICIR lens).
 - `filelock.py`: cross-process advisory file locking for concurrent read-modify-write
   on shared result files.
@@ -140,67 +139,6 @@ Two more examples ship in `nakagai/strategies/catalog/specs/`: `rsi_reversion.js
 core_vocabulary)` turns every JSON file in a directory like this one into a
 `RuleStrategy` subclass.
 
-## The lab
-
-`nakagai/lab/` searches strategy space and scores the winner honestly.
-
-A **trial** is a mutated spec, not a parameter set: v2 specs declare no tunable
-params, so the tunable surface is the spec JSON itself. `literal_trials` moves
-the numeric literals inside one spec; `composite_trials` assembles catalog
-plays into composites. Every mutant is validated before it is returned.
-
-A **study** runs a frozen trial set. N is fixed when the study is built and
-cannot grow, because the null below is computed for exactly that N.
-
-The **null** is what makes a survivor mean anything. Running four hundred
-trials and keeping the best one finds noise with a good story; the fix is to
-replay the entire search on permuted bars and take the best across all trials,
-which gives the exact distribution of "best of N when there is nothing there".
-
-`cache` must be built over the same bars as `frames`, i.e. `cache =
-MemoryBars(frames)`; otherwise the observed statistic and the null are scored
-on different histories and the resulting p-value means nothing.
-
-```python
-from nakagai.data.cache import MemoryBars
-from nakagai.lab import (StudySpec, best_of_n_null, literal_trials,
-                         run_study, study_verdict)
-
-trials = literal_trials(base_spec, n=60, seed=7)
-study = StudySpec(trials=tuple(trials), symbols=("SPY",),
-                  windows=tuple(windows), seed=7)
-
-cache = MemoryBars(frames)
-observed = run_study(cache, study, registry)
-nulls = best_of_n_null(frames, study, registry, n_permutations=200)
-verdict = study_verdict(observed.best.pf, nulls,
-                        n_trades=observed.best.n_trades)
-# {"p_value": 0.015, "survived": True, ...}
-```
-
-`n_trades` is the WINNING trial's ledger, not the sum across the trial set.
-The verdict is a statement about one trial's PF, so the trade floor has to
-apply to that same trial: eight trials making five trades each sum to forty
-and sail past a floor of twenty, while the winner's own record is five trades
-and is noise.
-
-The permutation count sets p-value resolution: 200 permutations resolve to
-0.005. It is also the entire compute cost, scaling as
-`trials x symbols x windows x permutations`.
-
-`tests/test_lab_calibration.py` is the module's real specification. It runs the
-whole pipeline on bars with no exploitable structure and asserts the p-values
-come out uniform, then runs it on bars with a real effect and asserts it is
-found. Run it with `uv run pytest -m slow`. The gate was measured at 24
-replicates, 4 trials by 16 permutations: it took about 24 minutes and the mean
-p-value on pure noise came out 0.5074 against an expectation of 9/17
-(approximately 0.5294) at this permutation count, while the positive control
-detected the real effect at the permutation resolution floor.
-
-In CI, the gate runs automatically only when a change touches the lab or the
-core modules it depends on (see `.github/workflows/calibration.yml`);
-otherwise it can be triggered by hand via `workflow_dispatch`.
-
 ## What is NOT here
 
 This repo does not include the curated Playbook content (the hand-authored
@@ -209,6 +147,34 @@ the hosted platform: API, web UI, and the mandate and approvals judgment layer.
 The hosted product at nakag.ai is built on top of this core.
 
 ## Release notes
+
+### 0.3.0
+
+**Breaking: `nakagai.lab` is removed.** The module searched strategy space and
+scored the winner against a best-of-N permutation null. It shipped in 0.2.0
+with one consumer, the hosted platform's study subsystem, and that subsystem
+was retired; nothing has imported the lab since. Gone with it: `Site`,
+`Trial`, `composite_trials`, `literal_trials`, `mutable_sites`, `spec_hash`,
+`best_of_n_null`, `study_verdict`, `StudyResult`, `StudySpec`, `TrialResult`,
+`run_study`, `trial_pf`, and the `Calibration` workflow that gated them.
+
+Note that `spec_hash` also exists, unrelated and unaffected, at
+`nakagai.strategies.rules.canon.spec_hash`. Only the lab's is gone.
+
+**Breaking: the bar-permutation Monte Carlo null is removed with it.** Gone:
+`nakagai.engine.permutation` entirely (`permute_bars`, `permutation_seed`) and
+`nakagai.stats.permutation_pvalue`. These were the two halves of one feature,
+generating null price series and scoring an observation against them, and the
+lab was the only thing that ever called either. Permutation testing is no
+longer part of what this core does.
+
+`nakagai.stats` keeps `pf_from_trades` and `PF_CLAMP`, and its module docstring
+no longer describes it as permutation-test math.
+
+The question the lab answered, "is this survivor real or did I just search
+hard enough to find noise", is not being abandoned; it is moving to the
+deflated-Sharpe family, which prices the same overfitting risk from the trial
+count directly rather than by replaying the search on permuted bars.
 
 ### 0.2.0
 
