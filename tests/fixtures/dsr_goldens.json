@@ -57,5 +57,25 @@
   "1.0": 0.8413447460685429,
   "1.96": 0.9750021048517795,
   "3.0": 0.9986501019683699
- }
+ },
+ "mtrl_alpha_0p5_floor": 2.0,
+ "mtrl_alpha_0p7_floor": 2.0,
+ "eff_discriminating_input": [
+  0.781523,
+  -0.334083,
+  0.191718,
+  0.65779,
+  -0.456343,
+  1.123495,
+  0.524914,
+  1.22734,
+  0.317999,
+  2.031018,
+  1.654998,
+  0.976751,
+  1.891712
+ ],
+ "eff_discriminating_n_eff_raw": 5.078781974702414,
+ "eff_discriminating_expected_round": 5,
+ "eff_discriminating_wrong_if_ceil": 6
 }
