@@ -109,4 +109,4 @@ def test_a_composite_carries_the_vocabulary_its_members_were_bound_to():
             "long": {"all": ["a"]}}
     strategy = bound({"spec": spec})
 
-    assert strategy.vocabulary.resolve("indicator", "always_one") is not None
+    assert strategy.vocabulary is house
