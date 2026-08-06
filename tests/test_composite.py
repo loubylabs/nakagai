@@ -95,6 +95,33 @@ def test_config_ref_blocks_are_skipped():
     assert validate_composite_blocks(spec, _MEMBERS) == []
 
 
+def test_default_vocabulary_rejects_a_term_the_caller_never_injected():
+    """No vocabulary passed means core_vocabulary(), so a term that only
+    exists in some other caller's house vocabulary is unknown here."""
+    inner = {"version": 2, "name": "leg", "timeframe": "1h",
+             "long": {"all": [{"lhs": {"ind": "always_one"}, "op": ">", "rhs": 0.0}]},
+             "risk": {"stop": {"kind": "atr", "n": 14, "mult": 2.0},
+                      "target": {"kind": "rr", "rr": 2.0}}}
+    spec = {"blocks": {"a": {"strategy": "rules", "params": {"spec": inner}}}}
+    errs = validate_composite_blocks(spec, _MEMBERS)
+    assert any("always_one" in e for e in errs)
+
+
+def test_a_passed_vocabulary_reaches_the_nested_rules_block():
+    """The caller's vocabulary must not be dropped on the way into the
+    rules block's own spec validation, or a term the caller injected reads
+    as unknown even though it is the one the caller means to use."""
+    house = core_vocabulary().with_terms(
+        Term("always_one", "series", {}, {},
+             lambda s, a: pd.Series(1.0, index=s.index)))
+    inner = {"version": 2, "name": "leg", "timeframe": "1h",
+             "long": {"all": [{"lhs": {"ind": "always_one"}, "op": ">", "rhs": 0.0}]},
+             "risk": {"stop": {"kind": "atr", "n": 14, "mult": 2.0},
+                      "target": {"kind": "rr", "rr": 2.0}}}
+    spec = {"blocks": {"a": {"strategy": "rules", "params": {"spec": inner}}}}
+    assert validate_composite_blocks(spec, _MEMBERS, house) == []
+
+
 def test_a_composite_carries_the_vocabulary_its_members_were_bound_to():
     """engine.py resolves getattr(strategy, "vocabulary", core_vocabulary()).
     Without this attribute a composite silently backtests on core's terms
