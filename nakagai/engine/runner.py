@@ -85,17 +85,28 @@ def run_one(cache_root, strategy_name: str, params: dict, symbol: str,
         factory = vocabulary_factory or strategy_cls.VOCABULARY_FACTORY
         strategy = strategy_cls(params, vocabulary=factory())
     elif vocabulary_factory is not None:
-        # Refuse rather than drop it. A non-rule strategy has no vocabulary to
-        # inject into: Engine falls back to core_vocabulary() for it, by
-        # design, because its context may still host composite RuleSpec
-        # members. Accepting the factory and ignoring it would let a caller
-        # believe a whole grid ran on an injected vocabulary when part of it
-        # ran on core, which is exactly the silent no-op this seam exists to
-        # prevent. Split the grid instead.
+        # Refuse rather than drop it, though not for the old reason. A
+        # composite carries its own vocabulary now (CompositeStrategy.__init__
+        # in nakagai/strategies/composite/strategy.py takes it from its bound
+        # members), so it is no longer true that a non-rule strategy has
+        # nothing to inject into. What is still true: run_one has no way to
+        # reach it here. CompositeStrategy.__init__ takes no vocabulary
+        # argument, and its members were already built from whatever factory
+        # the registry callable bound them to (typically RuleStrategy.bound()
+        # via load_catalog) when the registry was constructed, not from this
+        # call's factory. Accepting the factory here and ignoring it would let
+        # a caller believe their override reached the composite's members when
+        # it never could, which is exactly the silent no-op this seam exists
+        # to prevent. A non-rule, non-composite strategy has no vocabulary
+        # concept at all, so the same refusal covers it for the simpler
+        # reason. Either way: rebuild the registry with members already bound
+        # to the vocabulary you need, or split the grid.
         raise ValueError(
             f"vocabulary_factory was passed for strategy {strategy_name!r}, "
-            "which is not a RuleStrategy and cannot carry an injected "
-            "vocabulary; run non-rule strategies in a separate call")
+            "which is not a RuleStrategy; run_one has no per-call way to "
+            "inject a vocabulary into it, rebuild the registry with the "
+            "vocabulary already bound, or run non-rule strategies in a "
+            "separate call")
     else:
         strategy = strategy_cls(params)
     # `params` are the caller's overrides on top of the spec's defaults, and

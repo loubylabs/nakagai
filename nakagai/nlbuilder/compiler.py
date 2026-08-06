@@ -70,7 +70,7 @@ def _check(kind: str, spec, members: dict | None, vocabulary: Vocabulary):
             return (["composite specs are not available here; "
                      "return a single rules spec instead"], describe_composite_spec)
         errors = (validate_composite_spec(spec, members, allow_refs=False)
-                  or validate_composite_blocks(spec, members))
+                  or validate_composite_blocks(spec, members, vocabulary))
         return errors, describe_composite_spec
     return validate_spec(spec, vocabulary), lambda value: describe_spec(value, vocabulary)
 

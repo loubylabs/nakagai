@@ -14,6 +14,7 @@ from nakagai.strategies.base import Direction, MarketContext, Signal, Strategy
 from nakagai.strategies.composite import spec as cspec
 from nakagai.strategies.risk import stop_target
 from nakagai.strategies.rules.spec import DEFAULT_RISK
+from nakagai.strategies.rules.vocabulary import core_vocabulary
 from nakagai.strategies.util import rr_signal
 
 
@@ -50,6 +51,23 @@ class CompositeStrategy(Strategy):
                 raise ValueError("; ".join(errs))
             self._members = {bid: members[b["strategy"]](b.get("params", {}))
                              for bid, b in self.spec["blocks"].items()}
+        # engine.py resolves a strategy's vocabulary as
+        # getattr(self.strategy, "vocabulary", core_vocabulary()). RuleStrategy
+        # carries one through bound(); a composite did not, so the Engine
+        # built its context on core's terms while a scan built the same
+        # play's context on the house's terms. One play answering two
+        # different questions on two surfaces, and it fails as a wrong number
+        # rather than as an error.
+        #
+        # Taken from the members rather than defaulted here: the members ARE
+        # the specs being evaluated, so their vocabulary is by definition the
+        # one this composite speaks. A composite whose members disagree is
+        # already invalid for other reasons, so the first member's answer is
+        # the composite's.
+        self.vocabulary = next(
+            (m.vocabulary for m in self._members.values()
+             if getattr(m, "vocabulary", None) is not None),
+            core_vocabulary())
         # direction -> block id -> (vote ts, member Signal); one engine run =
         # one symbol replayed in order, so plain instance state is safe.
         self._votes: dict[Direction, dict[str, tuple[pd.Timestamp, Signal]]] = {

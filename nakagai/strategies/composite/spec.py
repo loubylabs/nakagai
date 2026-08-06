@@ -22,6 +22,7 @@ owns its own risk block (members' stops/targets are ignored).
 
 from nakagai.strategies.rules.spec import (
     DEFAULT_RISK, risk_text, validate_risk, validate_spec)
+from nakagai.strategies.rules.vocabulary import Vocabulary, resolve_vocabulary
 
 MAX_BLOCKS = 8
 WINDOW_BARS_BOUNDS = (1, 20)
@@ -93,13 +94,22 @@ def validate_composite_spec(spec, members, allow_refs: bool = True) -> list[str]
     return errs
 
 
-def validate_composite_blocks(spec: dict, members: dict) -> list[str]:
+def validate_composite_blocks(spec: dict, members: dict,
+                              vocabulary: Vocabulary | None = None) -> list[str]:
     """Per-block param validation, the layer validate_composite_spec leaves to
     its caller. Two block kinds carry params worth checking: a "rules" block
     whose params.spec is a full RuleSpec, and a catalog play, which declares no
     PARAMS at all and therefore takes no overrides. Blocks the structural
     validator already rejected (unknown member, non-dict params) are skipped so
-    one mistake is reported once."""
+    one mistake is reported once.
+
+    vocabulary=None defaults to core_vocabulary(): the honest default for a
+    library whose own tests and catalog need a vocabulary to exist. A caller
+    holding its own vocabulary, such as the NL builder validating a spec
+    against the house's injected terms, passes it through so a rules block
+    naming one of those terms validates the same way here as it does when the
+    composite actually runs."""
+    vocabulary = resolve_vocabulary(vocabulary)
     errs: list[str] = []
     for bid, block in (spec.get("blocks") or {}).items():
         if not isinstance(block, dict) or "config" in block:
@@ -115,7 +125,8 @@ def validate_composite_blocks(spec: dict, members: dict) -> list[str]:
                 errs.append(f"blocks.{bid}: rules blocks need params.spec "
                             "(the rule JSON object)")
             else:
-                errs.extend(f"blocks.{bid}: {e}" for e in validate_spec(inner))
+                errs.extend(f"blocks.{bid}: {e}"
+                            for e in validate_spec(inner, vocabulary))
         elif not cls.PARAMS and params:
             errs.append(f"blocks.{bid}: {name} is a built-in spec and takes no "
                         "param overrides; use a rules block for a tuned leg")

@@ -1,8 +1,11 @@
 import json
 
-from nakagai.nlbuilder.compiler import compile_strategy
+import pandas as pd
+
+from nakagai.nlbuilder.compiler import _check, compile_strategy
 from nakagai.nlbuilder.prompt import render_system_prompt
-from nakagai.strategies.rules import RuleStrategy
+from nakagai.strategies.rules import RuleStrategy, core_vocabulary
+from nakagai.strategies.rules.vocabulary import Term
 
 GOOD_SPEC = {"version": 2, "name": "dip", "timeframe": "1h",
              "long": {"all": [{"lhs": {"ind": "rsi", "n": 14}, "op": "crosses_above", "rhs": 30}]},
@@ -275,3 +278,26 @@ def test_members_reach_the_system_prompt():
     client = FakeClient([json.dumps({"kind": "composite", "spec": GOOD_COMPOSITE})])
     compile_strategy("combine", client=client, members=_MEMBERS)
     assert "donchian_breakout" in client.requests[0]["system"][0]["text"]
+
+
+def test_composite_check_does_not_drop_the_caller_vocabulary():
+    """_check holds a vocabulary and hands it to validate_spec on the rules
+    branch, but dropped it on the composite branch: a composite whose rules
+    leg uses an injected term was refused as an unknown indicator here while
+    CompositeStrategy.__init__ validates the identical spec clean. The one
+    surface that composed the strategy must not be the one that calls it
+    invalid."""
+    house = core_vocabulary().with_terms(
+        Term("always_one", "series", {}, {},
+             lambda s, a: pd.Series(1.0, index=s.index)))
+    inner = {"version": 2, "name": "leg", "timeframe": "15m",
+             "long": {"all": [{"lhs": {"ind": "always_one"}, "op": ">", "rhs": 0.0}]},
+             "risk": {"stop": {"kind": "atr", "n": 14, "mult": 2.0},
+                      "target": {"kind": "rr", "rr": 2.0}}}
+    spec = {"name": "c", "blocks": {"a": {"strategy": "rules",
+                                          "params": {"spec": inner}}},
+            "long": {"all": ["a"]}}
+
+    errors, _ = _check("composite", spec, {"rules": RuleStrategy}, house)
+
+    assert errors == []
