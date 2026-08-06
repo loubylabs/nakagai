@@ -76,13 +76,14 @@ def _daily_returns(curve: pd.Series) -> pd.Series:
 
 
 def _daily_stats(daily: pd.Series) -> dict:
-    """Sufficient statistics for recomputing Sharpe and Sortino over POOLED
-    windows rather than averaging per-window ratios.
+    """Sufficient statistics for recomputing Sharpe, Sortino, and the
+    deflated-Sharpe family (skew, kurtosis, PSR, DSR) over POOLED windows
+    rather than averaging per-window ratios.
 
     This is the answer to the small-sample problem, decided 2026-08-02. The
     house protocol's test window yields ~20 returns, which is why every
     per-window sharpe is None; thirteen such windows pooled yield ~260, which
-    is a statistic. Ratios cannot be averaged back into that, but these four
+    is a statistic. Ratios cannot be averaged back into that, but these six
     sums add, exactly as gross_profit and gross_loss already do for profit
     factor (see _trade_stats).
 

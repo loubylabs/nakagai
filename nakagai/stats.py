@@ -1,4 +1,6 @@
-"""Statistical math for backtest results.
+"""Statistical math for backtest results: profit factor, pooled moments,
+and the deflated-Sharpe family (PSR, DSR, minimum track record length,
+effective trial count).
 
 No evidence store, no workspace, no config: everything is parameterized.
 """
@@ -163,9 +165,10 @@ def pooled_moments(n: int, total: float, total_sq: float,
 # Search-aware Sharpe statistics.
 #
 # Vendored from github.com/eslazarev/purged-cross-validation (purgedcv 0.1.3),
-# MIT, Copyright (c) 2026 Evgenii Lazarev. The maths is unchanged; the entry
-# points take PooledMoments instead of a returns array, because the platform
-# holds thirteen windows of sums and never the whole series at once.
+# MIT, Copyright (c) 2026 Evgenii Lazarev. Full licence text in
+# docs/third-party-licenses.md. The maths is unchanged; the entry points take
+# PooledMoments instead of a returns array, because the platform holds
+# thirteen windows of sums and never the whole series at once.
 #
 # Formulae: Bailey & Lopez de Prado, "The Sharpe Ratio Efficient Frontier"
 # (2012) for PSR and the minimum track record length, and "The Deflated Sharpe
@@ -181,10 +184,18 @@ def probabilistic_sharpe_ratio(m: PooledMoments | None,
 
     The answer to a problem this codebase already had: an annualized Sharpe on
     twenty returns is a rounding of noise, which is why `_sharpe` returns None
-    below sixty. This reports a PROBABILITY instead of a point estimate, so it
-    stays meaningful at small n where the ratio does not.
+    below sixty. This reports a PROBABILITY rather than a point estimate, and
+    the formula degrades more gracefully as n shrinks than a raw ratio does.
+    That is a property of the statistic, not a claim about when it gets
+    shown: the platform surface that consumes this still gates display
+    behind its own sixty-observation floor.
     """
     if m is None:
+        return None
+    if not math.isfinite(benchmark):
+        # A non-finite benchmark has no meaningful "probability of beating
+        # it". Let it through and z below comes out nan (or the whole
+        # expression 0.0 for +inf); None here rather than either.
         return None
     denom_sq = (1 - m.skew * m.sharpe
                 + (m.kurtosis - 1) / 4 * m.sharpe ** 2)
@@ -226,7 +237,16 @@ def deflated_sharpe_ratio(m: PooledMoments | None, n_trials: int,
         return None
     if n_trials < 1 or not math.isfinite(var_sharpe) or var_sharpe < 0:
         return None
-    sr_star = math.sqrt(var_sharpe) * _expected_max_z(n_trials)
+    try:
+        sr_star = math.sqrt(var_sharpe) * _expected_max_z(n_trials)
+    except ValueError:
+        # _norm_ppf raises rather than return an infinity. That happens here
+        # for n_trials around 9e15 and up, where 1 - 1/n_trials rounds to
+        # exactly 1.0, and for a NaN n_trials, which compares false against
+        # every bound above and so slips past the `n_trials < 1` guard.
+        # None rather than letting the exception escape a function typed to
+        # return float | None.
+        return None
     return probabilistic_sharpe_ratio(m, sr_star)
 
 
@@ -250,7 +270,18 @@ def min_track_record_length(sharpe: float, target: float, alpha: float,
     denom_sq = 1 - skew * sharpe + (kurtosis - 1) / 4 * sharpe ** 2
     if not (denom_sq > 0) or not math.isfinite(denom_sq):
         return None
-    return 1.0 + math.ceil((z_target ** 2) * denom_sq / gap ** 2)
+    try:
+        # An extremely small gap can underflow gap ** 2 to exactly 0.0 (unlike
+        # numpy, plain Python float division by zero raises rather than
+        # returning inf), and short of that can still leave the quotient
+        # non-finite; math.ceil(inf) then raises OverflowError. None on any
+        # of these rather than a crash from a function typed float | None.
+        n_minus_1 = (z_target ** 2) * denom_sq / gap ** 2
+    except ZeroDivisionError:
+        return None
+    if not math.isfinite(n_minus_1):
+        return None
+    return 1.0 + math.ceil(n_minus_1)
 
 
 def effective_n_trials(trial_sharpes) -> int:
@@ -263,10 +294,25 @@ def effective_n_trials(trial_sharpes) -> int:
     edges. n / (1 + 2 * sum of positive autocorrelations), truncated at the
     first non-positive lag.
 
-    Never above the raw count and never below 1: both are guarded rather than
-    assumed, because either violation would silently corrupt a deflation.
+    Raises ValueError on a non-finite trial Sharpe rather than dropping it.
+    This is the one function here where the error direction flatters the
+    strategy: dropping a trial shrinks the search this function exists to
+    count, which lowers the deflation benchmark and makes the deflated
+    Sharpe reported downstream MORE permissive, not less. Refusing beats
+    filtering for that reason alone; the caller decides what a non-finite
+    trial Sharpe means, this function does not get to decide it does not
+    count.
+
+    Never above n, the count of trial Sharpes the caller actually passed,
+    and never below 1: both are guarded rather than assumed, because either
+    violation would silently corrupt a deflation.
     """
-    values = [float(x) for x in trial_sharpes if math.isfinite(float(x))]
+    values = [float(x) for x in trial_sharpes]
+    if not all(math.isfinite(v) for v in values):
+        raise ValueError(
+            "trial_sharpes contains non-finite values; filter deliberately "
+            "if that is intended, since dropping them here would silently "
+            "shrink the search and inflate the deflated Sharpe.")
     n = len(values)
     if n < 2:
         return 1

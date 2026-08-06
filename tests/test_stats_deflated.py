@@ -10,9 +10,9 @@ import pathlib
 import numpy as np
 import pytest
 
-from nakagai.stats import (deflated_sharpe_ratio, effective_n_trials,
-                           min_track_record_length, pooled_moments,
-                           probabilistic_sharpe_ratio)
+from nakagai.stats import (PooledMoments, deflated_sharpe_ratio,
+                           effective_n_trials, min_track_record_length,
+                           pooled_moments, probabilistic_sharpe_ratio)
 
 GOLDENS = json.loads(
     (pathlib.Path(__file__).parent / "fixtures" / "dsr_goldens.json").read_text())
@@ -99,3 +99,17 @@ def test_effective_n_trials_rounds_rather_than_ceils():
     result = effective_n_trials(GOLDENS["eff_discriminating_input"])
     assert result == GOLDENS["eff_discriminating_expected_round"]
     assert result != GOLDENS["eff_discriminating_wrong_if_ceil"]
+
+
+def test_psr_refuses_outside_the_gaussian_approximations_domain():
+    """Extreme skew pushes denom_sq negative: outside the domain the Gaussian
+    approximation is derived for, so this must return None rather than a
+    plausible-looking number computed from a formula that no longer applies."""
+    extreme = PooledMoments(n=100, mean=0.0, std=1.0, sharpe=1.0,
+                            skew=10.0, kurtosis=3.0)
+    assert probabilistic_sharpe_ratio(extreme) is None
+
+
+def test_mtrl_refuses_outside_the_gaussian_approximations_domain():
+    """Same denom_sq guard, in min_track_record_length's own formula."""
+    assert min_track_record_length(1.0, 0.0, 0.05, 10.0, 3.0) is None
