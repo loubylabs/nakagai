@@ -2,8 +2,7 @@
 
 The deterministic, LLM-free core for rule-driven trading agents: a point-in-time
 bar cache, a statistically honest walk-forward backtester (look-ahead prevention,
-T+1 cash settlement, bar-permutation Monte Carlo), the RuleSpec strategy DSL, and
-a screener compiler.
+T+1 cash settlement), the RuleSpec strategy DSL, and a screener compiler.
 
 ## What is here
 
@@ -11,7 +10,7 @@ a screener compiler.
   and its Alpaca implementation (single-symbol and batched multi-symbol), and a
   sync routine that keeps the cache current.
 - `engine/`: the walk-forward backtester itself, point-in-time `MarketContext`
-  assembly, T+1 cash settlement, run metrics, and the bar-permutation Monte Carlo null.
+  assembly, T+1 cash settlement, and run metrics.
 - `strategies/`: rule-based (`rules/`), boolean-composed (`composite/`), and
   ICT-flavored (`ict/`) strategies, plus a catalog loader that turns JSON specs into
   strategy classes.
@@ -20,8 +19,8 @@ a screener compiler.
   `nlbuilder` extra with `nlbuilder/`, which installs `anthropic`.
 - `nlbuilder/`: English-to-RuleSpec compilation via the Claude API, behind the
   optional `nlbuilder` extra (installs `anthropic`).
-- `stats.py`: permutation p-values, bootstrap confidence intervals, and the
-  decision-exact null harness for backtest results.
+- `stats.py`: pooled profit factor over a trade ledger, and the `PF_CLAMP` it
+  reports when a ledger has no losing trades.
 - `icir.py`: rank-IC / IR of rule-spec margins vs forward returns (the informational ICIR lens).
 - `filelock.py`: cross-process advisory file locking for concurrent read-modify-write
   on shared result files.
@@ -162,12 +161,20 @@ was retired; nothing has imported the lab since. Gone with it: `Site`,
 Note that `spec_hash` also exists, unrelated and unaffected, at
 `nakagai.strategies.rules.canon.spec_hash`. Only the lab's is gone.
 
-The honesty argument the lab embodied is not being retired with it: replaying a
-search on permuted bars is still the right way to price a survivor, and
-`nakagai.stats` keeps `permutation_pvalue` for the single-strategy case. What
-went was the search harness on top, which no longer had anything to search for.
-Rebuilding it on a live consumer will be cheaper than carrying it dark, and it
-accounted for roughly 80% of this repo's test runtime while doing so.
+**Breaking: the bar-permutation Monte Carlo null is removed with it.** Gone:
+`nakagai.engine.permutation` entirely (`permute_bars`, `permutation_seed`) and
+`nakagai.stats.permutation_pvalue`. These were the two halves of one feature,
+generating null price series and scoring an observation against them, and the
+lab was the only thing that ever called either. Permutation testing is no
+longer part of what this core does.
+
+`nakagai.stats` keeps `pf_from_trades` and `PF_CLAMP`, and its module docstring
+no longer describes it as permutation-test math.
+
+The question the lab answered, "is this survivor real or did I just search
+hard enough to find noise", is not being abandoned; it is moving to the
+deflated-Sharpe family, which prices the same overfitting risk from the trial
+count directly rather than by replaying the search on permuted bars.
 
 ### 0.2.0
 
