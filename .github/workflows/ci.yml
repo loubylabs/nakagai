@@ -4,6 +4,12 @@ on:
   push:
     branches: [main]
   pull_request:
+  # A push event can be DROPPED. During the 2026-08-06 Actions outage the merge
+  # of #31 created no run at all: not queued, not pending, simply absent, while
+  # the same minute's merge in another repo did register. Without a manual
+  # trigger there is then nothing to re-run and no way to reach the publish job,
+  # so a release sits on main and never ships, silently and indefinitely.
+  workflow_dispatch:
 
 # Read-only by default. The one job that needs more says so itself.
 permissions:
@@ -42,7 +48,13 @@ jobs:
     # says "the tests passed", and it only reaches inside a single workflow. A
     # separate file would have to re-run the suite or chain off workflow_run.
     needs: [test, wheel]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    # workflow_dispatch as well as push, or the manual trigger above cannot
+    # reach the one job it exists to recover. Still main-only, and still behind
+    # the tests. This does not widen who may publish: dispatching a workflow
+    # requires write access, and the environment below is the actual fence.
+    if: >-
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+      && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     # The environment is the real fence, not the `if` above. An OIDC token is
     # minted only for a job asking for id-token: write, and a fork's pull request
