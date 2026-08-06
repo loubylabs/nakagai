@@ -4,6 +4,7 @@ No evidence store, no workspace, no config: everything is parameterized.
 """
 
 import math
+from dataclasses import dataclass
 
 import pandas as pd
 
@@ -86,3 +87,65 @@ def pf_from_trades(trades: pd.DataFrame | None) -> float | None:
     if losses == 0:
         return PF_CLAMP if wins > 0 else 0.0
     return wins / losses
+
+
+@dataclass(frozen=True)
+class PooledMoments:
+    """The first four moments of a return series, recovered from raw sums.
+
+    `sharpe` is PER OBSERVATION and uses the population standard deviation
+    (ddof=0), matching the convention the deflated-Sharpe maths below is
+    written against. Annualizing is the caller's job and deliberately not
+    done here: this module knows nothing about trading calendars.
+
+    `skew` and `kurtosis` are BIAS-CORRECTED sample estimates, and `kurtosis`
+    is NON-excess (a normal distribution scores 3.0, not 0.0). Both match
+    scipy.stats' `bias=False` / `fisher=False` forms, which is what the
+    published PSR and DSR formulae expect.
+    """
+
+    n: int
+    mean: float
+    std: float
+    sharpe: float
+    skew: float
+    kurtosis: float
+
+
+def pooled_moments(n: int, total: float, total_sq: float,
+                   total_cube: float, total_fourth: float) -> PooledMoments | None:
+    """Recover the first four moments from raw power sums, or None.
+
+    Sums add across windows where ratios cannot, which is why
+    engine/metrics.py emits them per window instead of emitting the moments.
+    Thirteen one-month windows pooled here is a statistic; each one alone is
+    not.
+
+    ONE derivation with two repos calling it. The platform's pooled_risk
+    imports this rather than repeating the algebra, because a second copy is
+    how the bias correction drifts in exactly one of them.
+
+    None rather than a number when n < 4 (the kurtosis bias correction has
+    (n-2)(n-3) in a denominator) or the variance is not positive. Zero
+    variance means every day returned the same amount, and a Sharpe there is
+    a division by zero, not an infinitely good result.
+    """
+    if n < 4:
+        return None
+    mean = total / n
+    # Central moments from raw power sums (the binomial expansions).
+    m2 = total_sq / n - mean ** 2
+    if not (m2 > 0):
+        return None
+    m3 = total_cube / n - 3 * mean * total_sq / n + 2 * mean ** 3
+    m4 = (total_fourth / n - 4 * mean * total_cube / n
+          + 6 * mean ** 2 * total_sq / n - 3 * mean ** 4)
+    std = math.sqrt(m2)
+    g1 = m3 / std ** 3          # biased skew
+    g2 = m4 / m2 ** 2           # biased NON-excess kurtosis
+    # scipy's bias=False corrections. Written out rather than folded together
+    # so each one can be checked against its own reference.
+    skew = g1 * math.sqrt(n * (n - 1)) / (n - 2)
+    excess = (n - 1) / ((n - 2) * (n - 3)) * ((n + 1) * (g2 - 3) + 6)
+    return PooledMoments(n=n, mean=mean, std=std, sharpe=mean / std,
+                         skew=skew, kurtosis=excess + 3.0)
