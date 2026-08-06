@@ -12,11 +12,19 @@ PF_CLAMP = 1000.0   # a ledger or resample with no losers: "infinite" PF
 
 
 def _norm_cdf(z: float) -> float:
-    """Standard normal CDF, from math.erf.
+    """Standard normal CDF, from math.erf and math.erfc.
 
     Core carries four dependencies and scipy is not among them. Phi is a
     two-line identity on erf, which the standard library has, so importing a
-    numerical stack for it would be a poor trade."""
+    numerical stack for it would be a poor trade.
+
+    Routed through erfc for z < 0 rather than 1 + erf(z/sqrt2) uniformly:
+    erf saturates to exactly -1.0 well before the true left-tail probability
+    underflows (deflated_sharpe_ratio reaches z below -15 at realistic trial
+    counts), and 1 + (-1.0) cancels to exactly 0.0 where the true answer is
+    still representable, e.g. 1e-65. erfc has no such cancellation."""
+    if z < 0:
+        return 0.5 * math.erfc(-z / math.sqrt(2.0))
     return 0.5 * (1.0 + math.erf(z / math.sqrt(2.0)))
 
 
@@ -149,3 +157,122 @@ def pooled_moments(n: int, total: float, total_sq: float,
     excess = (n - 1) / ((n - 2) * (n - 3)) * ((n + 1) * (g2 - 3) + 6)
     return PooledMoments(n=n, mean=mean, std=std, sharpe=mean / std,
                          skew=skew, kurtosis=excess + 3.0)
+
+
+# ---------------------------------------------------------------------------
+# Search-aware Sharpe statistics.
+#
+# Vendored from github.com/eslazarev/purged-cross-validation (purgedcv 0.1.3),
+# MIT, Copyright (c) 2026 Evgenii Lazarev. The maths is unchanged; the entry
+# points take PooledMoments instead of a returns array, because the platform
+# holds thirteen windows of sums and never the whole series at once.
+#
+# Formulae: Bailey & Lopez de Prado, "The Sharpe Ratio Efficient Frontier"
+# (2012) for PSR and the minimum track record length, and "The Deflated Sharpe
+# Ratio" (2014) for DSR.
+# ---------------------------------------------------------------------------
+
+_GAMMA_EM = 0.5772156649015329   # Euler-Mascheroni
+
+
+def probabilistic_sharpe_ratio(m: PooledMoments | None,
+                               benchmark: float = 0.0) -> float | None:
+    """Probability the true Sharpe exceeds `benchmark`, given skew and kurtosis.
+
+    The answer to a problem this codebase already had: an annualized Sharpe on
+    twenty returns is a rounding of noise, which is why `_sharpe` returns None
+    below sixty. This reports a PROBABILITY instead of a point estimate, so it
+    stays meaningful at small n where the ratio does not.
+    """
+    if m is None:
+        return None
+    denom_sq = (1 - m.skew * m.sharpe
+                + (m.kurtosis - 1) / 4 * m.sharpe ** 2)
+    if not (denom_sq > 0) or not math.isfinite(denom_sq):
+        # The higher moments are too extreme for the Gaussian approximation.
+        # None rather than a number computed from a formula outside its domain.
+        return None
+    z = (m.sharpe - benchmark) * math.sqrt(m.n - 1) / math.sqrt(denom_sq)
+    return _norm_cdf(z)
+
+
+def _expected_max_z(n_trials: int) -> float:
+    """Standardized expected maximum of n_trials independent N(0,1) draws.
+
+    One trial has no maximum to correct for, and the formula diverges there
+    (Phi-inverse of 0), so it is 0.0 by definition rather than by accident.
+    """
+    if n_trials <= 1:
+        return 0.0
+    return ((1 - _GAMMA_EM) * _norm_ppf(1 - 1 / n_trials)
+            + _GAMMA_EM * _norm_ppf(1 - 1 / (n_trials * math.e)))
+
+
+def deflated_sharpe_ratio(m: PooledMoments | None, n_trials: int,
+                          var_sharpe: float) -> float | None:
+    """PSR against a benchmark raised to what the best of `n_trials` would
+    show by luck alone.
+
+    `var_sharpe` is the variance of the per-observation Sharpes ACROSS the
+    search, so it is a property of the search and not of one strategy. A
+    single backtest that was never searched over passes n_trials=1, where the
+    deflation is zero and this reduces exactly to PSR against zero.
+
+    Feed `effective_n_trials`, not a raw candidate count, whenever the
+    candidates came from a grammar: specs differing in one threshold are
+    nearly the same strategy, and a raw count over-deflates.
+    """
+    if m is None:
+        return None
+    if n_trials < 1 or not math.isfinite(var_sharpe) or var_sharpe < 0:
+        return None
+    sr_star = math.sqrt(var_sharpe) * _expected_max_z(n_trials)
+    return probabilistic_sharpe_ratio(m, sr_star)
+
+
+def min_track_record_length(sharpe: float, target: float, alpha: float,
+                            skew: float, kurtosis: float) -> float | None:
+    """Observations needed before this Sharpe could be believed at 1 - alpha.
+
+    Inverts PSR for n. The product answer to a blank field: "too short to
+    say, and here is how much longer it would have to be" beats an empty cell.
+    """
+    gap = sharpe - target
+    if gap <= 0 or not 0.0 < alpha < 1.0:
+        return None
+    denom_sq = 1 - skew * sharpe + (kurtosis - 1) / 4 * sharpe ** 2
+    if not (denom_sq > 0):
+        return None
+    return 1.0 + math.ceil((_norm_ppf(1 - alpha) ** 2) * denom_sq / gap ** 2)
+
+
+def effective_n_trials(trial_sharpes) -> int:
+    """Independent-equivalent trial count, from the autocorrelation of the
+    trial Sharpes.
+
+    The house answer to "how many things did we really try". Grammar-generated
+    candidates are correlated by construction, so the raw count is an
+    overstatement and feeding it to `deflated_sharpe_ratio` would reject real
+    edges. n / (1 + 2 * sum of positive autocorrelations), truncated at the
+    first non-positive lag.
+
+    Never above the raw count and never below 1: both are guarded rather than
+    assumed, because either violation would silently corrupt a deflation.
+    """
+    values = [float(x) for x in trial_sharpes if math.isfinite(float(x))]
+    n = len(values)
+    if n < 2:
+        return 1
+    mean = sum(values) / n
+    dev = [v - mean for v in values]
+    var = sum(d * d for d in dev) / n
+    if var <= 0:
+        return 1
+    total = 0.0
+    for lag in range(1, n):
+        rho = sum(dev[i] * dev[i + lag] for i in range(n - lag)) / (n * var)
+        if rho <= 0:
+            break
+        total += rho
+    n_eff = n / (1.0 + 2.0 * total)
+    return max(1, min(n, int(math.ceil(n_eff))))
