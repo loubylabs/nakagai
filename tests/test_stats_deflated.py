@@ -79,3 +79,23 @@ def test_refuses_rather_than_returning_a_number(moments):
     assert deflated_sharpe_ratio(None, 10, 0.5) is None
     assert deflated_sharpe_ratio(moments, 10, -1.0) is None   # negative variance
     assert min_track_record_length(0.05, 0.05, 0.05, 0.0, 3.0) is None  # no gap
+
+
+def test_mtrl_floors_at_two_for_non_positive_quantile(moments):
+    """alpha >= 0.5 puts the confidence target at or below 0.5, which any
+    track record with a positive Sharpe gap already clears at the smallest
+    workable length. Falling through would square a non-positive z-quantile
+    and wrongly inflate the requirement instead of returning the floor."""
+    assert min_track_record_length(
+        moments.sharpe, 0.0, 0.5, moments.skew, moments.kurtosis
+    ) == pytest.approx(GOLDENS["mtrl_alpha_0p5_floor"], rel=1e-9)
+    assert min_track_record_length(
+        moments.sharpe, 0.0, 0.7, moments.skew, moments.kurtosis
+    ) == pytest.approx(GOLDENS["mtrl_alpha_0p7_floor"], rel=1e-9)
+
+
+def test_effective_n_trials_rounds_rather_than_ceils():
+    """The prior golden could not tell round from ceil; this input can."""
+    result = effective_n_trials(GOLDENS["eff_discriminating_input"])
+    assert result == GOLDENS["eff_discriminating_expected_round"]
+    assert result != GOLDENS["eff_discriminating_wrong_if_ceil"]

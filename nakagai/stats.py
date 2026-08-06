@@ -240,10 +240,17 @@ def min_track_record_length(sharpe: float, target: float, alpha: float,
     gap = sharpe - target
     if gap <= 0 or not 0.0 < alpha < 1.0:
         return None
+    z_target = _norm_ppf(1 - alpha)
+    if z_target <= 0:
+        # alpha >= 0.5 puts the confidence target at or below 0.5, which any
+        # track record with gap > 0 already clears at the smallest workable
+        # length. Falling through would square a non-positive z and wrongly
+        # inflate the requirement.
+        return 2.0
     denom_sq = 1 - skew * sharpe + (kurtosis - 1) / 4 * sharpe ** 2
-    if not (denom_sq > 0):
+    if not (denom_sq > 0) or not math.isfinite(denom_sq):
         return None
-    return 1.0 + math.ceil((_norm_ppf(1 - alpha) ** 2) * denom_sq / gap ** 2)
+    return 1.0 + math.ceil((z_target ** 2) * denom_sq / gap ** 2)
 
 
 def effective_n_trials(trial_sharpes) -> int:
@@ -275,4 +282,4 @@ def effective_n_trials(trial_sharpes) -> int:
             break
         total += rho
     n_eff = n / (1.0 + 2.0 * total)
-    return max(1, min(n, int(math.ceil(n_eff))))
+    return max(1, min(n, round(n_eff)))
