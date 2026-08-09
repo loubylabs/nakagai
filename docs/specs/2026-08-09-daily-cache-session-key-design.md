@@ -50,8 +50,9 @@ second cleanup or interpretation path.
 
 ## Merge and survivor rule
 
-Normalize both the existing frame and the incoming frame before concatenation.
-Keep the existing merge order and `keep="last"` rule:
+Normalize the pure incoming frame before acquiring the pair lock. Inside the
+lock, normalize the existing frame after reading it, then concatenate. Keep the
+existing merge order and `keep="last"` rule:
 
 1. Within an already mixed existing frame, sorting places `00:00Z` before
    `04:00Z` or `05:00Z`. The later current-provider row survives.
@@ -64,8 +65,9 @@ write path. No compatibility wrapper or read-side fallback is added.
 
 ## Core implementation
 
-`nakagai/data/cache.py` gains one private daily-index normalization helper and
-calls it for the existing and incoming frames inside the existing pair lock.
+`nakagai/data/cache.py` gains one private daily-index normalization helper. It
+normalizes the incoming frame before the pair lock, then normalizes the existing
+frame inside the lock after reading it.
 
 Tests in `tests/test_cache.py` must prove:
 

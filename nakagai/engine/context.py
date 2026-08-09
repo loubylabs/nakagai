@@ -43,11 +43,12 @@ def closed_before(df: pd.DataFrame, timeframe: str, now: pd.Timestamp,
     if timeframe in tfs.session_aligned:
         # Session bars carry a label whose UTC CALENDAR DATE is the session
         # date. That is what this depends on, and both producers satisfy it:
-        # the cache's daily resample buckets on "1D" in UTC (midnight exactly),
-        # and Alpaca's 1Day bars are stamped at midnight Eastern, which is
-        # 04:00 UTC under EDT and 05:00 under EST, still inside the same UTC
-        # date because Eastern never runs ahead of UTC. Under that convention the
-        # bar's own UTC calendar date IS the session date, so a bar is visible
+        # Legacy providers may label daily rows at 00:00Z. BarCache.upsert
+        # canonicalizes cached daily rows to midnight America/New_York, expressed
+        # as 04:00Z or 05:00Z. All of those labels carry the same UTC calendar
+        # date as the session because Eastern never runs ahead of UTC. Under that
+        # convention the bar's own UTC calendar date IS the session date, so a
+        # bar is visible
         # only strictly before its session date arrives in NY: ts.date() < NY
         # date, which for these labels is exactly ts < that date's UTC
         # midnight. Comparing NY-converted timestamps instead would shift a

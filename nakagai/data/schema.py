@@ -119,10 +119,11 @@ def _is_session_frame(idx: pd.DatetimeIndex) -> bool:
     """True when the frame's rows are SESSION bars: at most one per UTC date.
 
     The property, not a label pattern. Both daily conventions the engine meets
-    satisfy it and neither is recognisable from a single timestamp: the cache's
-    own resample buckets on "1D" in UTC (midnight exactly) and Alpaca's 1Day
-    bars are stamped at midnight Eastern (04:00 or 05:00 UTC). What they share
-    is one row per session, which is also exactly what makes the UTC calendar
+    satisfy it and neither is recognisable from a single timestamp: legacy
+    providers may label daily rows at 00:00Z, while BarCache.upsert
+    canonicalizes cached daily rows to midnight America/New_York, expressed as
+    04:00Z or 05:00Z. What they share is one row per session, which is also
+    exactly what makes the UTC calendar
     date of the label the session date, the fact engine/context.closed_before
     already rests on.
 
@@ -149,9 +150,10 @@ def rth_mask(index: pd.DatetimeIndex) -> pd.Series:
 
     A frame that already holds one row per session comes back ALL TRUE, and
     that branch is load-bearing rather than a convenience. A session bar's
-    label is not a time inside its session at all: the cache's own resample
-    stamps it at midnight UTC and Alpaca's 1Day bars stamp it at midnight
-    Eastern (04:00 or 05:00 UTC), and BOTH of those sit outside [09:30, 16:00).
+    label is not a time inside its session at all: legacy providers may label it
+    at 00:00Z, while BarCache.upsert canonicalizes cached daily rows to midnight
+    America/New_York, expressed as 04:00Z or 05:00Z. All of those labels sit
+    outside [09:30, 16:00).
     Without the branch the mask would come back all False and silently blank
     every session-scoped reading on every daily spec. That is a live path and
     not a hypothetical: prev_session_*, gap_pct and vwap all legitimately run
