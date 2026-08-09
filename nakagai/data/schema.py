@@ -173,8 +173,9 @@ def rth_mask(index: pd.DatetimeIndex) -> pd.Series:
 class TimeframeSet:
     """The engine's time vocabulary: one driving timeframe (the replay
     cadence) plus higher context timeframes. A session-aligned timeframe
-    (daily bars labeled at midnight UTC of their session date) has no fixed
-    delta; visibility is decided by session date, not bar arithmetic."""
+    (daily bars keyed by their session date and labeled at midnight
+    America/New_York, expressed as 04:00Z or 05:00Z) has no fixed delta;
+    visibility is decided by session date, not bar arithmetic."""
 
     driving: str
     higher: tuple[str, ...] = ()
