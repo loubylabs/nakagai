@@ -4,6 +4,19 @@ import pytest
 from nakagai.data.cache import BarCache, MemoryBars
 
 
+def _bars_at(stamps: list[str], closes: list[float], volumes: list[float]) -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "open": closes,
+            "high": [value + 1 for value in closes],
+            "low": [value - 1 for value in closes],
+            "close": closes,
+            "volume": volumes,
+        },
+        index=pd.DatetimeIndex(stamps, name="ts"),
+    )
+
+
 def test_upsert_then_load_roundtrip(tmp_path, make_bars):
     cache = BarCache(tmp_path)
     df = make_bars(10)
@@ -23,6 +36,98 @@ def test_upsert_merges_and_overwrites_overlap(tmp_path, make_bars):
     loaded = cache.load("SPY", "15m")
     assert len(loaded) == 15  # 5 old + 10 second (5 overlapped, revised wins)
     assert loaded.loc[pd.Timestamp("2026-06-01 14:45", tz="UTC"), "close"] == second["close"].iloc[0]
+
+
+def test_daily_upsert_collapses_summer_labels_to_new_york_midnight(tmp_path):
+    cache = BarCache(tmp_path)
+    mixed = _bars_at(
+        ["2026-07-14T00:00:00Z", "2026-07-14T04:00:00Z"],
+        [100.0, 200.0],
+        [1_000.0, 2_000.0],
+    )
+
+    assert cache.upsert("SPY", "1d", mixed) == 2
+
+    loaded = cache.load("SPY", "1d")
+    expected = _bars_at(["2026-07-14T04:00:00Z"], [200.0], [2_000.0])
+    pd.testing.assert_frame_equal(loaded, expected)
+
+
+def test_daily_upsert_collapses_winter_labels_to_new_york_midnight(tmp_path):
+    cache = BarCache(tmp_path)
+    mixed = _bars_at(
+        ["2026-01-14T00:00:00Z", "2026-01-14T05:00:00Z"],
+        [100.0, 200.0],
+        [1_000.0, 2_000.0],
+    )
+
+    cache.upsert("SPY", "1d", mixed)
+
+    expected = _bars_at(["2026-01-14T05:00:00Z"], [200.0], [2_000.0])
+    pd.testing.assert_frame_equal(cache.load("SPY", "1d"), expected)
+
+
+def test_daily_upsert_keeps_incoming_row_for_same_session(tmp_path):
+    cache = BarCache(tmp_path)
+    cache.upsert(
+        "SPY",
+        "1d",
+        _bars_at(["2026-07-14T04:00:00Z"], [100.0], [1_000.0]),
+    )
+
+    cache.upsert(
+        "SPY",
+        "1d",
+        _bars_at(["2026-07-14T00:00:00Z"], [300.0], [3_000.0]),
+    )
+
+    expected = _bars_at(["2026-07-14T04:00:00Z"], [300.0], [3_000.0])
+    pd.testing.assert_frame_equal(cache.load("SPY", "1d"), expected)
+
+
+def test_daily_upsert_repairs_mixed_sessions_already_on_disk(tmp_path):
+    cache = BarCache(tmp_path)
+    cache.path("SPY", "1d").parent.mkdir(parents=True, exist_ok=True)
+    _bars_at(
+        [
+            "2026-07-14T00:00:00Z",
+            "2026-07-14T04:00:00Z",
+            "2026-07-15T04:00:00Z",
+        ],
+        [100.0, 200.0, 300.0],
+        [1_000.0, 2_000.0, 3_000.0],
+    ).to_parquet(cache.path("SPY", "1d"))
+
+    cache.upsert(
+        "SPY",
+        "1d",
+        _bars_at(["2026-07-16T04:00:00Z"], [400.0], [4_000.0]),
+    )
+
+    expected = _bars_at(
+        [
+            "2026-07-14T04:00:00Z",
+            "2026-07-15T04:00:00Z",
+            "2026-07-16T04:00:00Z",
+        ],
+        [200.0, 300.0, 400.0],
+        [2_000.0, 3_000.0, 4_000.0],
+    )
+    expected.index.freq = "D"
+    pd.testing.assert_frame_equal(cache.load("SPY", "1d"), expected)
+
+
+def test_intraday_upsert_preserves_exact_timestamps(tmp_path):
+    cache = BarCache(tmp_path)
+    bars = _bars_at(
+        ["2026-07-14T00:00:00Z", "2026-07-14T04:00:00Z"],
+        [100.0, 200.0],
+        [1_000.0, 2_000.0],
+    )
+
+    cache.upsert("SPY", "15m", bars)
+
+    pd.testing.assert_frame_equal(cache.load("SPY", "15m"), bars)
 
 
 def test_interpolated_rows_dropped(tmp_path, make_bars):

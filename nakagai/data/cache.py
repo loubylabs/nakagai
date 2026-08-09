@@ -8,10 +8,21 @@ import pandas as pd
 # empty_bars is re-exported here because this module has always been its import
 # site; it now lives in schema.py, beside BAR_COLUMNS, so the providers can share
 # the one implementation instead of each hardcoding the column list.
-from nakagai.data.schema import empty_bars, validate_bars
+from nakagai.data.schema import EXCHANGE_TZ, empty_bars, validate_bars
 from nakagai.filelock import file_lock
 
 __all__ = ["BarCache", "MemoryBars", "empty_bars"]
+
+
+def _canonical_cache_frame(timeframe: str, df: pd.DataFrame) -> pd.DataFrame:
+    """Use one New York-midnight key per daily session date."""
+    if timeframe != "1d" or df.empty:
+        return df
+    canonical = df.copy()
+    session_dates = canonical.index.tz_convert("UTC").tz_localize(None).normalize()
+    canonical.index = session_dates.tz_localize(EXCHANGE_TZ).tz_convert("UTC")
+    canonical.index.name = "ts"
+    return canonical
 
 
 class MemoryBars:
@@ -50,10 +61,10 @@ class BarCache:
         """
         if "interpolated" in df.columns:
             df = df[df["interpolated"] != True]  # noqa: E712 (spec: fake gap-fill bars never enter the cache)
-        df = validate_bars(df)
+        df = _canonical_cache_frame(timeframe, validate_bars(df))
         path = self.path(symbol, timeframe)
         with file_lock(path):
-            existing = self.load(symbol, timeframe)
+            existing = _canonical_cache_frame(timeframe, self.load(symbol, timeframe))
             merged = pd.concat([existing, df])
             merged = merged[~merged.index.duplicated(keep="last")].sort_index()
             tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
