@@ -149,6 +149,11 @@ The hosted product at nakag.ai is built on top of this core.
 
 ## Release notes
 
+### 0.4.1
+
+- Canonicalize daily cache rows to midnight New York by UTC session date, so
+  mixed provider labels cannot retain duplicate rows for one market session.
+
 ### 0.4.0
 
 **Breaking: `nakagai.stats.pf_from_trades` and `PF_CLAMP` are removed.** They
