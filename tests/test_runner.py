@@ -4,6 +4,7 @@ import pytest
 
 from nakagai.data.cache import BarCache
 from nakagai.data.schema import TimeframeSet
+from nakagai.engine.provenance import ARITHMETIC_VERSION, FILL_MODE
 from nakagai.engine.runner import run_grid, run_one
 from nakagai.engine.windows import Window
 from nakagai.strategies.base import Strategy
@@ -56,6 +57,12 @@ def test_spawned_worker_rebuilds_the_injected_vocabulary(tmp_path):
 
     assert len(rows) == 1
     assert rows.iloc[0]["strategy"] == "rules"
+    assert rows.iloc[0]["arithmetic_version"] == ARITHMETIC_VERSION == "1"
+    assert rows.iloc[0]["fill_mode"] == FILL_MODE == "pessimistic"
+
+    persisted = pd.read_parquet(tmp_path / "runs.parquet")
+    assert persisted.iloc[0]["arithmetic_version"] == "1"
+    assert persisted.iloc[0]["fill_mode"] == "pessimistic"
 
 
 def test_a_vocabulary_factory_for_a_non_rule_strategy_is_refused(tmp_path):
@@ -76,6 +83,8 @@ def test_a_vocabulary_factory_for_a_non_rule_strategy_is_refused(tmp_path):
     row = run_one(str(tmp_path / "cache"), "inert", {}, "SPY", window, tfs=TFS,
                   registry=worker_registry)
     assert row["strategy"] == "inert"
+    assert row["arithmetic_version"] == "1"
+    assert row["fill_mode"] == "pessimistic"
 
 
 def test_run_one_injects_the_vocabulary_without_minting_a_subclass(tmp_path, monkeypatch):
@@ -95,3 +104,22 @@ def test_run_one_injects_the_vocabulary_without_minting_a_subclass(tmp_path, mon
                   window, tfs=TFS, registry=worker_registry,
                   vocabulary_factory=worker_vocabulary)
     assert row["strategy"] == "rules" and row["trades"]
+
+
+def test_grid_append_preserves_legacy_rows_as_unversioned(tmp_path):
+    _, window = _cache(tmp_path)
+    out = tmp_path / "runs.parquet"
+    pd.DataFrame([{"run_id": "legacy", "strategy": "inert"}]).to_parquet(out)
+
+    rows = run_grid(
+        str(tmp_path / "cache"), ["inert"], ["SPY"], [window], workers=1,
+        out=str(out), tfs=TFS, registry=worker_registry,
+    )
+
+    assert rows.iloc[0]["arithmetic_version"] == "1"
+    assert rows.iloc[0]["fill_mode"] == "pessimistic"
+    persisted = pd.read_parquet(out).set_index("run_id")
+    assert pd.isna(persisted.loc["legacy", "arithmetic_version"])
+    assert pd.isna(persisted.loc["legacy", "fill_mode"])
+    assert persisted.loc[rows.iloc[0]["run_id"], "arithmetic_version"] == "1"
+    assert persisted.loc[rows.iloc[0]["run_id"], "fill_mode"] == "pessimistic"

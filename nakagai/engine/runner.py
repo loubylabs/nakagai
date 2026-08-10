@@ -138,6 +138,8 @@ def run_one(cache_root, strategy_name: str, params: dict, symbol: str,
         # Backtests page shows labeled rows only.
         "config": config,
         "batch_id": batch_id,
+        "arithmetic_version": engine.arithmetic_version,
+        "fill_mode": engine.fill_mode,
         "equity0": float(equity0),
         "risk_pct": float(risk_pct),
         "train_start": window.train_start.isoformat(),

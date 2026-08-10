@@ -149,6 +149,13 @@ The hosted product at nakag.ai is built on top of this core.
 
 ## Release notes
 
+### 0.4.2
+
+- Stamp every new replay run with arithmetic version `1` and fill mode
+  `pessimistic`. These durable identities distinguish result semantics from
+  package releases and source revisions. Existing replay arithmetic and trade
+  output are unchanged.
+
 ### 0.4.1
 
 - Canonicalize daily cache rows to midnight New York by UTC session date, so
