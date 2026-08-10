@@ -17,6 +17,7 @@ from nakagai.data.schema import TimeframeSet
 from nakagai.engine.costs import FeeModel, SlippageModel
 from nakagai.engine.engine import Engine
 from nakagai.engine.portfolio import SettledLedger
+from nakagai.engine.provenance import ARITHMETIC_VERSION, FILL_MODE
 from nakagai.strategies.base import Direction, Signal, Strategy
 
 SYMBOL = "GAPX"
@@ -139,6 +140,8 @@ def test_a_bar_touching_both_levels_still_assumes_the_stop():
     intrabar bar would turn a conservative backtest into an optimistic one.
     """
     trade = _run(_bars((100.0, 104.5, 98.5, 100.5))).trades[0]
+    assert Engine.arithmetic_version == ARITHMETIC_VERSION == "1"
+    assert Engine.fill_mode == FILL_MODE == "pessimistic"
     assert trade.exit_reason == "stop"
     assert trade.exit == pytest.approx(STOP - 0.01)   # 1bp of 99 is 0.0099: floor binds
 

@@ -23,6 +23,7 @@ from nakagai.data.schema import DEFAULT_TIMEFRAMES, TimeframeSet
 from nakagai.engine.context import PreloadedBars, build_context, visible_counts
 from nakagai.engine.costs import FeeModel, SlippageModel
 from nakagai.engine.portfolio import SettledLedger
+from nakagai.engine.provenance import ARITHMETIC_VERSION, FILL_MODE
 from nakagai.strategies.base import Direction, PositionAction, Signal, Strategy
 from nakagai.strategies.rules.vocabulary import core_vocabulary
 
@@ -104,6 +105,9 @@ class BacktestResult:
 
 
 class Engine:
+    arithmetic_version = ARITHMETIC_VERSION
+    fill_mode = FILL_MODE
+
     def __init__(self, strategy: Strategy, cache: BarCache, symbol: str,
                  start: pd.Timestamp, end: pd.Timestamp,
                  equity0: float = 10_000.0, risk_pct: float = 0.01,
