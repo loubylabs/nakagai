@@ -33,9 +33,10 @@ MATH_OPS: dict[str, tuple[int, int]] = {   # op -> (min arity, max arity)
 STOP_KINDS = ("atr", "percent")
 TARGET_KINDS = ("rr", "percent")
 MAX_DEPTH = 8
-# Every group key the grammar admits, in one tuple. Four call sites (the
-# validator, the evaluator, the canonicalizer and the describe renderer) used
-# to spell this inline and three of them failed silently on an unknown key.
+# Every group key the grammar admits, in one tuple. Six call sites (the
+# validator, the describe renderer, the evaluator, the canonicalizer, the Pine
+# lowering and margins) used to spell this inline, and only the validator
+# refused a key it did not know.
 GROUP_KEYS = ("all", "any", "not")
 MAX_CONDITIONS = 30
 MAX_NODES = 40           # indicator + primitive nodes per spec
@@ -75,12 +76,17 @@ DEFAULT_RISK = {"stop": {"kind": "atr", "n": STOP_ATR_N_DEFAULT,
 def is_group_node(node) -> bool:
     """True for a dict spelling any group key.
 
-    One definition, imported by every walker over the grammar (the validator
-    and the describe renderer here, the evaluator, the canonicalizer, the Pine
-    lowering). Each of them used to spell `"all" in node or "any" in node`
-    inline, and three of the four failed SILENTLY on a key they did not know
-    about, so a group key added in one place and forgotten in another is
-    exactly the shape of bug this closes.
+    One definition, imported by all SIX walkers over the grammar: the
+    validator and the describe renderer here, the evaluator, the
+    canonicalizer, the Pine lowering, and margins. Each of them used to spell
+    `"all" in node or "any" in node` inline, and only the validator refused a
+    key it did not know about, so a group key added in one place and forgotten
+    in another is exactly the shape of bug this closes.
+
+    Count the callers, do not trust this list. It said five when `not` landed,
+    because `margins.group_margin` was missed and had to be closed a commit
+    later; a walk added without importing this is invisible to every reader of
+    this docstring.
     """
     return isinstance(node, dict) and any(k in node for k in GROUP_KEYS)
 
@@ -141,8 +147,16 @@ def _check_condition_arg(name: str, arg: str, cond, given: dict, path: str,
     spec that would have been safe is recoverable, admitting one that reaches
     outside its evaluated span is not.
     """
+    # Guard 1's message names the arg as `{name}.{arg}` and shows what was
+    # given, where _check_args' absent-arg message says `{name} needs {arg}`.
+    # The two used to be word for word identical, which cost this guard its
+    # only test: the test written for it passed the arg ABSENT, landed in the
+    # other branch, and could not tell them apart, so deleting this
+    # errs.append left the whole suite green. It is also the more useful
+    # message, since a spec that DID supply the arg is not told it needs one.
     if not isinstance(cond, dict) or not {"lhs", "op", "rhs"} <= set(cond):
-        errs.append(f"{path}: {name} needs {arg} = {{lhs, op, rhs}}")
+        errs.append(f"{path}: {name}.{arg} must be a condition "
+                    f"{{lhs, op, rhs}}, got {cond!r}")
         return
     if cond.get("op") in CROSS_OPS:
         errs.append(f"{path}: {name}.{arg} conditions use comparison ops only")

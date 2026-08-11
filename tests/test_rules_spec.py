@@ -150,6 +150,37 @@ def test_validator_never_raises_on_malformed_shapes(mutate, needle):
     assert errs and any(needle in e for e in errs)
 
 
+def _bars_since_spec(inner):
+    return {"version": 2, "name": "b", "timeframe": "1h",
+            "long": {"all": [{"lhs": {"prim": "bars_since", **inner},
+                              "op": "<", "rhs": 5}]},
+            "risk": ORB["risk"]}
+
+
+def test_bars_since_missing_cond_entirely_is_refused():
+    """The core term's ABSENT branch (`_check_args`), not guard 1."""
+    errs = validate_spec(_bars_since_spec({}))
+    assert any("bars_since needs cond" in e for e in errs), errs
+
+
+@pytest.mark.parametrize("cond,shown", [
+    (5, "5"),
+    ("close > open", "'close > open'"),
+    ([{"lhs": {"src": "close"}, "op": ">", "rhs": 1}], "[{'lhs'"),
+    ({"lhs": {"src": "close"}, "op": ">"}, "{'lhs': {'src': 'close'}, 'op': '>'}"),
+], ids=["int", "string", "list", "dict-missing-rhs"])
+def test_bars_since_with_a_present_but_malformed_cond_is_refused(cond, shown):
+    """Guard 1 on the SHIPPED term, reached through the real vocabulary rather
+    than the count_where fixture. Each of these supplies `cond`, so the absent
+    loop skips them and `_check_condition_arg` is the only thing that can
+    refuse them. The string case is the one a hand-written spec produces, and
+    the list case is what an NL compiler emits when it treats the arg as a
+    group."""
+    errs = validate_spec(_bars_since_spec({"cond": cond}))
+    assert any("bars_since.cond must be a condition {lhs, op, rhs}, got " in e
+               and shown in e for e in errs), errs
+
+
 def test_bars_since_condition_rejects_cross_ops():
     spec = {"version": 2, "name": "b", "timeframe": "1h",
             "long": {"all": [{"lhs": {"prim": "bars_since",
@@ -457,12 +488,43 @@ def test_a_second_condition_taking_term_validates_with_no_new_validator_code(
     assert validate_spec(_count_where_spec(node), count_where_vocab) == []
 
 
-def test_a_second_condition_taking_term_inherits_guard_1_shape(count_where_vocab):
-    """A condition-typed arg may declare no default (N3-D13), so its absence is
-    an error rather than a fallback."""
+def test_a_second_condition_taking_term_refuses_an_absent_condition_arg(
+        count_where_vocab):
+    """The ABSENT branch, which is _check_args' condition loop, NOT guard 1.
+
+    A condition-typed arg may declare no default (N3-D13), so its absence is
+    an error rather than a fallback. This test is named for the branch it
+    reaches rather than for the guard it was once named for: the two branches
+    used to emit the identical message, this was the only test either had, and
+    deleting guard 1's `errs.append` outright left all 1169 tests green. The
+    two shape cases below are what actually reach guard 1, and they are told
+    apart from this one by the message as well as by the input.
+    """
     errs = validate_spec(_count_where_spec({"prim": "count_where"}),
                          count_where_vocab)
     assert any("count_where needs when" in e for e in errs), errs
+
+
+def test_a_second_condition_taking_term_inherits_guard_1_shape_non_dict(
+        count_where_vocab):
+    """Guard 1 proper. The arg is PRESENT, so `_check_args`' absent loop skips
+    it and only `_check_condition_arg`'s shape refusal can produce this."""
+    node = {"prim": "count_where", "when": 5}
+    errs = validate_spec(_count_where_spec(node), count_where_vocab)
+    assert any("count_where.when must be a condition {lhs, op, rhs}, got 5" in e
+               for e in errs), errs
+
+
+def test_a_second_condition_taking_term_inherits_guard_1_shape_missing_a_key(
+        count_where_vocab):
+    """Guard 1's other half: a dict, but not a condition. Left unrefused this
+    validates clean, is saved, and raises inside FrameEval.condition_series at
+    backtest and scan time, where detect_events swallows it and the symbol
+    reports zero events."""
+    node = {"prim": "count_where", "when": {"lhs": {"src": "close"}, "op": ">"}}
+    errs = validate_spec(_count_where_spec(node), count_where_vocab)
+    assert any("count_where.when must be a condition {lhs, op, rhs}, got "
+               "{'lhs': {'src': 'close'}, 'op': '>'}" in e for e in errs), errs
 
 
 def test_a_second_condition_taking_term_inherits_guard_2_no_cross_ops(
