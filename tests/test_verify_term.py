@@ -10,7 +10,7 @@ from nakagai.strategies.rules.vocabulary import Term, core_vocabulary
 from nakagai.strategies.rules.verify import (
     CHECKED, CONDITION_ARG, EXEMPT, FAILED, MAX_ARG_SETS, PROBE_COUNT,
     TermVerdict, VACUOUS, arg_sets, evaluate_term, exemption_reason,
-    field_mismatch, probe_rows, verify_term,
+    field_mismatch, probe_rows, verify_term, verify_vocabulary,
 )
 
 
@@ -444,3 +444,75 @@ def test_an_exempt_verdict_names_the_term_and_gives_a_reason(bars):
 def test_a_condition_taking_term_is_exempt_rather_than_raising(bars):
     """bars_since cannot be called without eval_fn, so the gate refuses it early."""
     assert verify_term(core_vocabulary().primitives["bars_since"], bars).status == EXEMPT
+
+
+# The exempt set is declared, not counted. A term going silently exempt is how a
+# real look-ahead bug would hide behind a green run.
+EXPECTED_EXEMPT = {
+    "fvg_nearest": "end_anchored",
+    "order_block": "end_anchored",
+    "bars_since": "condition",
+}
+
+
+def test_every_core_term_is_checked_or_declared_exempt(bars):
+    verdicts = verify_vocabulary(core_vocabulary(), bars)
+    assert len(verdicts) == len(core_vocabulary().all_terms()) == 37
+
+    failed = [v for v in verdicts if v.status == FAILED]
+    assert not failed, "\n".join(f"{v.name}: {v.reason}" for v in failed)
+
+    vacuous = [v for v in verdicts if v.status == VACUOUS]
+    assert not vacuous, (
+        "a mandated argument set was NaN at every probe row, so the fixture is "
+        "too short for it: " + "\n".join(f"{v.name}: {v.reason}" for v in vacuous))
+
+
+def test_every_checked_term_checked_all_of_its_argument_sets(bars):
+    """CHECKED means every mandated set was exercised, not merely one of them."""
+    for verdict in verify_vocabulary(core_vocabulary(), bars):
+        if verdict.status != CHECKED:
+            continue
+        term = (core_vocabulary().indicators.get(verdict.name)
+                or core_vocabulary().primitives[verdict.name])
+        assert verdict.arg_sets_checked == len(arg_sets(term)), verdict.name
+
+
+def test_the_exempt_set_is_exactly_the_declared_one(bars):
+    verdicts = verify_vocabulary(core_vocabulary(), bars)
+    exempt = {v.name for v in verdicts if v.status == EXEMPT}
+    assert exempt == set(EXPECTED_EXEMPT)
+    for v in verdicts:
+        if v.status == EXEMPT:
+            assert EXPECTED_EXEMPT[v.name] in v.reason
+
+
+def test_the_gate_covers_every_name_in_the_vocabulary(bars):
+    """Enumeration comes from the vocabulary, so there is no manifest to forget."""
+    v = core_vocabulary()
+    names = {verdict.name for verdict in verify_vocabulary(v, bars)}
+    assert names == set(v.indicators) | set(v.primitives)
+
+
+def test_the_gate_reads_the_vocabulary_it_is_handed(bars):
+    """The property every other test in this file is blind to.
+
+    Each of the tests above compares verify_vocabulary(core_vocabulary(), bars)
+    against core_vocabulary(), so an implementation that ignored its argument and
+    enumerated core_vocabulary() internally would pass all of them. That mutant is
+    exactly the disaster node 02 walks into: it composes
+    core_vocabulary().with_terms(*ta_terms()), gets 37 green verdicts for core's own
+    terms, sees no FAILED, and registers 100-plus unverified terms while CI reads
+    green and hard rule 1 is broken.
+
+    So compose a vocabulary this function was not built from and require the
+    injected term to come back FAILED.
+    """
+    injected = Term("house_peeker", "series", {}, {}, lambda s, a: s.shift(-1))
+    composed = core_vocabulary().with_terms(injected)
+    verdicts = {v.name: v for v in verify_vocabulary(composed, bars)}
+
+    assert "house_peeker" in verdicts, (
+        "verify_vocabulary did not read the vocabulary it was handed")
+    assert verdicts["house_peeker"].status == FAILED
+    assert len(verdicts) == len(core_vocabulary().all_terms()) + 1

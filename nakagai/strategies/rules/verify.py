@@ -32,7 +32,7 @@ from dataclasses import dataclass
 
 import pandas as pd
 
-from nakagai.strategies.rules.vocabulary import Term, is_choice_rule
+from nakagai.strategies.rules.vocabulary import Term, Vocabulary, is_choice_rule
 
 # The arg rule that marks a condition-taking term. A bare string rather than a
 # tuple, so `is_choice_rule` is False for it. Node 03 promotes this to an
@@ -289,3 +289,15 @@ def verify_term(term: Term, bars: pd.DataFrame) -> TermVerdict:
         checked += 1
 
     return TermVerdict(term.name, CHECKED, "", checked)
+
+
+def verify_vocabulary(vocabulary: Vocabulary,
+                      bars: pd.DataFrame) -> tuple[TermVerdict, ...]:
+    """Every term in `vocabulary`, verified, in all_terms() order.
+
+    Enumerates from the vocabulary itself rather than from a list a human keeps,
+    which is the whole point: node 02 registers terms generated from another
+    project's library, and a manifest someone forgets to update is a hole that
+    reads as coverage.
+    """
+    return tuple(verify_term(term, bars) for term in vocabulary.all_terms())
