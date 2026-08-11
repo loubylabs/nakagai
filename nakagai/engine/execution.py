@@ -162,6 +162,7 @@ class _PortfolioRuntime:
                 "mismatched_schedule", "the schedule was validated for another request",
                 field="schedule",
             )
+        _require_prepared_closure(prepared, request, dependencies)
         self._request = request
         self._schedule = schedule
         self._prepared = prepared
@@ -472,3 +473,29 @@ class _PortfolioRuntime:
 def _prices(bars: Mapping[str, _Bar], field: str) -> dict[str, float]:
     """One raw price per symbol, in the shape the ledger marks against."""
     return {symbol: getattr(bar, field) for symbol, bar in bars.items()}
+
+
+def _require_prepared_closure(
+    prepared: _ValidatedPortfolioBars, request: PortfolioReplayRequest,
+    dependencies: ReplayDependencies,
+) -> None:
+    """Every frame this chronology will read was actually prepared.
+
+    The prepared bars do not carry the closure they were prepared under, so a
+    caller that hydrates one `ReplayDependencies` and drives the loop with
+    another is only discoverable here. Without this the failure is a bare
+    `KeyError` out of `prepared.frame`, mid-replay, from outside the closed
+    taxonomy; with it, it is a typed refusal before a strategy is constructed.
+    """
+    pairs = frozenset(prepared.pairs)
+    absent = tuple(
+        (symbol, timeframe)
+        for symbol in request.symbols for timeframe in dependencies.timeframes
+        if (symbol, timeframe) not in pairs
+    )
+    if absent:
+        raise _fail(
+            "mismatched_dependencies",
+            "the bars were prepared under another dependency closure",
+            field="prepared", symbol=absent[0][0], timeframe=absent[0][1],
+        )

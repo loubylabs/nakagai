@@ -1062,6 +1062,7 @@ class ScriptedPlay:
     signals: tuple[SignalPlan, ...] = ()
     manages: tuple[ManagePlan, ...] = ()
     on_bar_returns: object = _UNSET
+    manage_returns: object = _UNSET
     on_bar_raises: str | None = None
     manage_raises: str | None = None
     factory_raises: str | None = None
@@ -1103,6 +1104,8 @@ class ScriptedStrategy(Strategy):
     def manage(self, position, ctx: MarketContext) -> ManagementDecision:
         self._record("manage", ctx)
         self._raise_if_due(self._play.manage_raises, ctx.now)
+        if self._play.manage_returns is not _UNSET:
+            return self._play.manage_returns
         for plan in self._play.manages:
             if plan.symbol == ctx.symbol and plan.at == ctx.now:
                 return ManagementDecision(action=plan.action, stop=plan.stop,
@@ -1141,14 +1144,24 @@ def scripted_digest(play_id: str) -> str:
 
 
 def scripted_definition(play: ScriptedPlay, *, timeframes: tuple[str, ...] = ("15m",),
+                        external_symbols: tuple[str, ...] = (),
                         calls: list | None = None) -> StrategyDefinition:
-    """One definition per scripted play, built the way a real one is."""
+    """One definition per scripted play, built the way a real one is.
+
+    Both halves of the closure are parameters, and `replay_fixture` feeds them
+    the same `ReplayDependencies` it prepares bars from. A definition that
+    declared less than the fixture hydrated would be invisible today and would
+    surface at the C11 re-point, where `dependencies_for` derives the closure
+    from these declarations instead: the bar set would change and the golden
+    bytes would move.
+    """
     name = scripted_name(play.play_id)
     digest = vocabulary_digest(core_vocabulary)
 
     def dependencies(params: Mapping) -> StrategyDependencies:
         return StrategyDependencies(timeframes=tuple(timeframes),
-                                    external_symbols=(), vocabulary_digest=digest)
+                                    external_symbols=tuple(external_symbols),
+                                    vocabulary_digest=digest)
 
     def factory(params: Mapping) -> Strategy:
         if play.factory_raises is not None:
@@ -1219,6 +1232,7 @@ def replay_fixture(
     account: AccountPolicy | None = None,
     execution: ExecutionPolicy | None = None,
     dependencies: ReplayDependencies | None = None,
+    drive_dependencies: ReplayDependencies | None = None,
     window: ReplayWindow | None = None,
     calls: list | None = None,
 ) -> ReplayEvents:
@@ -1229,6 +1243,10 @@ def replay_fixture(
     symbols and its bar mapping in either order, `reverse_plays` supplies the
     plays and the registry's definitions in either order, and
     `reverse_param_keys` supplies each play's parameter object in either order.
+
+    `drive_dependencies` drives the loop with a closure the bars were NOT
+    prepared under, which is the one miswiring the runtime has to refuse and
+    which nothing else can stage.
     """
     scripted = (default_plays(at=signal_at, stop=signal_stop, target=signal_target)
                 if plays is None else tuple(plays))
@@ -1252,12 +1270,16 @@ def replay_fixture(
     if reverse_param_keys:
         frames = dict(reversed(list(frames.items())))
     registry = FrozenStrategyRegistry.from_definitions(tuple(
-        scripted_definition(play, timeframes=declared.timeframes, calls=calls)
+        scripted_definition(play, timeframes=declared.timeframes,
+                            external_symbols=declared.external_symbols, calls=calls)
         for play in supplied
     ))
     prepared = prepare_portfolio_bars(
         request, PortfolioBars(frames), validated, declared)
-    return _PortfolioRuntime(request, validated, registry, prepared, declared).run()
+    return _PortfolioRuntime(
+        request, validated, registry, prepared,
+        declared if drive_dependencies is None else drive_dependencies,
+    ).run()
 
 
 def canonical_event_bytes(events: ReplayEvents) -> bytes:

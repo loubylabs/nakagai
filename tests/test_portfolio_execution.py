@@ -25,6 +25,7 @@ import pytest
 from nakagai.engine.portfolio_types import (
     ExitReason,
     RejectionReason,
+    ReplayInputError,
     ReplayWindow,
     StrategyOutputError,
     StrategyRuntimeError,
@@ -203,6 +204,52 @@ def test_a_gap_exit_books_at_the_open_and_frees_its_seat_first():
     assert (gapped.mae, gapped.mfe) == (4.0, 0.0)
     assert (funded.play_id, funded.entry_ts, funded.qty) == ("play-b", opens(2), 33)
     assert events.rejections == ()
+
+
+def test_a_gap_above_the_target_books_at_the_open_too():
+    """The other gap reason, on the other side of the position.
+
+    A bar that opens above a long's target never offered that target, so the
+    open is the reference and the open is the instant. Recognizing only the stop
+    gap would send this one to step 7 and stamp it at the close, behind the
+    fills at this open.
+    """
+    events = replay_fixture(
+        symbol_order=("SPY",), plays=one_play(),
+        bars=(BarPlan(symbol="SPY", at=opens(2), open=104.0, high=105.0,
+                      low=103.5, close=104.5),),
+    )
+
+    (trade,) = events.trades
+    assert (trade.exit_reason, trade.exit_ts, trade.exit) == (
+        ExitReason.TARGET_GAP, opens(2), 104.0)
+    # The opening print alone: the 105 high it never traded at cannot flatter
+    # the excursion of a position that had already left.
+    assert (trade.mae, trade.mfe) == (0.0, 4.0)
+
+
+def test_a_short_target_exit_credits_the_high_it_traded_through():
+    """The mirror of the long stop, and the only exit that credits an extreme.
+
+    Pessimistic ordering assumes the adverse extreme came first, so a target
+    exit folds it. For a short that extreme is the HIGH, and reading the low
+    there would report an adverse excursion of zero on a bar that ran half a
+    point against the position.
+    """
+    events = replay_fixture(
+        symbol_order=("SPY",),
+        plays=(ScriptedPlay(play_id="play-a", signals=(
+            SignalPlan(symbol="SPY", at=closes(0), direction="short",
+                       stop=101.0, target=97.0),)),),
+        bars=(BarPlan(symbol="SPY", at=opens(2), open=100.0, high=100.5,
+                      low=96.5, close=97.0),),
+    )
+
+    (trade,) = events.trades
+    assert (trade.direction, trade.exit_reason) == ("short", ExitReason.TARGET)
+    assert (trade.exit_ts, trade.exit, trade.qty) == (closes(2), 97.0, 100)
+    assert (trade.mae, trade.mfe) == (0.5, 3.0)
+    assert trade.r_multiple == 3.0
 
 
 def test_gap_proceeds_cannot_fund_a_fill_at_the_same_open():
@@ -430,6 +477,27 @@ def test_pending_intents_expire_in_funding_order():
     assert events.trades == ()
 
 
+def test_expiry_order_puts_the_lower_priority_play_first():
+    """Priority outranks symbol, which the equal-priority goldens cannot show.
+
+    Play b acts first here, so it is evaluated first and numbered first as well.
+    Dropping priority from the order would interleave the two plays by symbol
+    instead: QQQ from b, QQQ from a, then the two SPY intents.
+    """
+    signals = tuple(SignalPlan(symbol=symbol, at=closes(LAST_INTERVAL),
+                               stop=99.0, target=103.0)
+                    for symbol in ("QQQ", "SPY"))
+    events = replay_fixture(plays=(
+        ScriptedPlay(play_id="play-a", priority=100, signals=signals),
+        ScriptedPlay(play_id="play-b", priority=50, signals=signals),
+    ))
+
+    assert attributed(events.rejections) == (
+        ("play-b", "QQQ", 0), ("play-b", "SPY", 1),
+        ("play-a", "QQQ", 2), ("play-a", "SPY", 3),
+    )
+
+
 def test_only_intervals_opening_inside_the_window_are_replayed():
     """The schedule runs on to the IC tail. The event loop stops at the window,
     so an intent whose one eligibility open lies in the tail expires."""
@@ -502,6 +570,16 @@ def test_a_malformed_return_is_a_strategy_output_error(returned, field):
     assert caught.value.details["field"] == field
 
 
+def test_a_malformed_management_decision_is_a_strategy_output_error():
+    """The management half of the strategy boundary, reached from the loop."""
+    with pytest.raises(StrategyOutputError) as caught:
+        replay_fixture(symbol_order=("SPY",),
+                       plays=one_play(manage_returns="hold"))
+
+    assert caught.value.code == "invalid_type"
+    assert caught.value.details["field"] == "manage"
+
+
 @pytest.mark.parametrize(("behavior", "operation"), [
     ({"factory_raises": "no runtime"}, "construct"),
     ({"manage_raises": "no decision"}, "manage"),
@@ -515,3 +593,18 @@ def test_construction_and_management_failures_name_their_operation(
     assert caught.value.code == "strategy_raised"
     assert caught.value.details["operation"] == operation
     assert caught.value.details["play_id"] == "play-a"
+
+
+def test_bars_prepared_under_another_closure_are_refused():
+    """The one seam the prepared bars cannot police themselves.
+
+    They carry no record of the closure they were hydrated under, so a caller
+    that prepares one and drives the loop with another would otherwise fail as a
+    bare KeyError mid-replay, from outside the closed taxonomy.
+    """
+    with pytest.raises(ReplayInputError) as caught:
+        replay_fixture(symbol_order=("SPY",), plays=one_play(),
+                       drive_dependencies=base_dependencies())
+
+    assert caught.value.code == "mismatched_dependencies"
+    assert caught.value.details["timeframe"] == "1h"
