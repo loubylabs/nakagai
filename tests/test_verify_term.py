@@ -1,13 +1,16 @@
 # tests/test_verify_term.py
 """The per-term causality gate, and its honesty about what it cannot test."""
 
+import itertools
+
 import numpy as np
 import pandas as pd
 import pytest
 
 from nakagai.strategies.rules.vocabulary import Term, core_vocabulary
 from nakagai.strategies.rules.verify import (
-    CONDITION_ARG, TermVerdict, evaluate_term, exemption_reason, field_mismatch,
+    CONDITION_ARG, MAX_ARG_SETS, TermVerdict, arg_sets, evaluate_term,
+    exemption_reason, field_mismatch,
 )
 
 
@@ -215,3 +218,69 @@ def test_a_term_that_under_declares_its_fields_is_caught(bars):
     raw = term.fn(bars["close"], {"field": "a"})
     reason = field_mismatch(term, raw)
     assert reason is not None and "b" in reason
+
+
+def test_arg_sets_crosses_every_choice_combination():
+    """A peek reachable only at one combination of choices must be reachable here."""
+    term = Term("two_choices", "series",
+                {"mode": ("safe", "fast"), "offset": (0.0, 1.0),
+                 "level": ("a", "b")},
+                {"mode": "safe", "offset": 0.0, "level": "a"},
+                lambda s, a: s)
+    combos = {(s["mode"], s["level"]) for s in arg_sets(term)}
+    assert combos == {("safe", "a"), ("safe", "b"), ("fast", "a"), ("fast", "b")}
+
+
+def test_arg_sets_varies_range_endpoints_against_every_choice_combination():
+    term = core_vocabulary().indicators["macd"]
+    sets = arg_sets(term)
+    for field in ("macd", "signal", "hist"):
+        fasts = {s["fast"] for s in sets if s["field"] == field}
+        assert {2, 100} <= fasts, f"{field}: range endpoints not varied under it"
+
+
+def test_arg_sets_covers_defaults_every_choice_and_both_range_ends():
+    term = core_vocabulary().indicators["macd"]
+    sets = arg_sets(term)
+    assert dict(term.defaults) in sets
+    assert {s["field"] for s in sets} == {"macd", "signal", "hist"}
+
+
+def test_arg_sets_covers_every_field_of_every_multi_output_term():
+    for term in core_vocabulary().all_terms():
+        want = set(term.args.get("field", ()))
+        if not want:
+            continue
+        got = {s["field"] for s in arg_sets(term)}
+        assert got >= want, f"{term.name}: fields {sorted(want - got)} not covered"
+
+
+def test_arg_sets_is_deduplicated_and_stable():
+    term = core_vocabulary().indicators["sma"]
+    sets = arg_sets(term)
+    assert len(sets) == len({tuple(sorted(s.items())) for s in sets})
+    assert arg_sets(term) == sets
+
+
+def test_arg_sets_skips_a_condition_arg():
+    term = core_vocabulary().primitives["bars_since"]
+    assert all("cond" not in s for s in arg_sets(term))
+
+
+def test_arg_sets_of_a_term_with_no_args_is_one_empty_set():
+    assert arg_sets(core_vocabulary().primitives["gap_pct"]) == ({},)
+
+
+def test_no_core_term_exceeds_the_argument_set_cap():
+    worst = max(core_vocabulary().all_terms(), key=lambda t: len(arg_sets(t)))
+    assert len(arg_sets(worst)) <= MAX_ARG_SETS, worst.name
+
+
+def test_a_term_over_the_cap_is_refused_loudly_not_sampled():
+    """No silent caps: a bounded result that reads as complete is the failure."""
+    term = Term("too_wide", "series",
+                {f"c{i}": ("x", "y", "z") for i in range(6)},
+                {f"c{i}": "x" for i in range(6)},
+                lambda s, a: s)
+    with pytest.raises(ValueError, match="argument sets"):
+        arg_sets(term)

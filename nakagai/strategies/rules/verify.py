@@ -27,6 +27,7 @@ which is the one failure this gate cannot afford, so every answer is a
 TermVerdict carrying a status and a reason.
 """
 
+import itertools
 from dataclasses import dataclass
 
 import pandas as pd
@@ -37,6 +38,12 @@ from nakagai.strategies.rules.vocabulary import Term, is_choice_rule
 # tuple, so `is_choice_rule` is False for it. Node 03 promotes this to an
 # official arg type; keying on the string means this module needs no edit then.
 CONDITION_ARG = "condition"
+
+# A term whose schema generates more than this is refused rather than sampled.
+# Measured on core: ichimoku is the worst non-exempt term at 36, fvg_nearest is
+# 60 and exempt anyway. A bounded result that reads as complete is worse than a
+# loud partial one, so this raises rather than truncating.
+MAX_ARG_SETS = 128
 
 CHECKED = "checked"
 FAILED = "failed"
@@ -109,3 +116,49 @@ def evaluate_term(term: Term, bars: pd.DataFrame, args: dict):
     if isinstance(out, pd.DataFrame):
         out = out[args["field"]]
     return out
+
+
+def arg_sets(term: Term) -> tuple[dict, ...]:
+    """Every argument set D11 mandates for this term.
+
+    The full cross product over choice rules, because that is where a callable
+    branches and a peek can be reachable only under one combination. Range
+    endpoints are varied one at a time against each choice combination rather
+    than crossed with each other, which would be exponential in the range-argument
+    count and buys much less: a numeric bound rarely selects a code path.
+
+    A condition arg is skipped rather than sampled: a term declaring one is exempt
+    anyway, and there is no value to sample.
+    """
+    choices, ranges = {}, {}
+    for name, rule in term.args.items():
+        if rule == CONDITION_ARG:
+            continue
+        (choices if is_choice_rule(rule) else ranges)[name] = rule
+
+    total = (len(list(itertools.product(*choices.values()))) if choices else 1)
+    total *= 1 + 2 * len(ranges)
+    if total > MAX_ARG_SETS:
+        raise ValueError(
+            f"term {term.name!r} generates {total} argument sets, over the "
+            f"{MAX_ARG_SETS} cap; widen the cap deliberately or narrow the "
+            f"schema, but do not sample it silently")
+
+    out, seen = [], set()
+
+    def add(candidate: dict) -> None:
+        key = tuple(sorted(candidate.items()))
+        if key not in seen:
+            seen.add(key)
+            out.append(candidate)
+
+    combos = ([dict(zip(choices, values))
+               for values in itertools.product(*choices.values())]
+              if choices else [{}])
+    for combo in combos:
+        base = {**term.defaults, **combo}
+        add(base)
+        for name, rule in ranges.items():
+            for value in (rule[0], rule[1]):
+                add({**base, name: value})
+    return tuple(out)
