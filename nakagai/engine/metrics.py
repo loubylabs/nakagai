@@ -54,6 +54,7 @@ from nakagai.engine.benchmark import ReplayCurve
 from nakagai.engine.execution import ReplayEvents
 from nakagai.engine.portfolio import PositionKey
 from nakagai.engine.portfolio_types import (
+    ARITHMETIC_VERSION,
     POOLED_MIN_DAILY,
     EquityPoint,
     PortfolioMetrics,
@@ -70,11 +71,6 @@ from nakagai.engine.portfolio_types import (
 )
 from nakagai.engine.schedule import ValidatedSchedule
 from nakagai.stats import pooled_moments, probabilistic_sharpe_ratio
-
-# The chronology, the cost model, and these formulas are one arithmetic. A
-# request naming another version is refused rather than reported under a label
-# that does not describe how its numbers were reached.
-ARITHMETIC_VERSION = "2"
 
 # Trading days in a year, for annualizing a daily statistic, and the seconds in
 # a Julian year, for annualizing a window. They answer different questions and

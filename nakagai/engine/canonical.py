@@ -151,9 +151,33 @@ def _enum_text(value: Enum, path: str) -> str:
 
 
 def _require_finite(value: float, path: str) -> float:
+    """A finite binary64 whose zero, if it is one, is positive.
+
+    NaN and infinity have no canonical encoding, so they are refused. Negative
+    zero has one, and that is the problem: `float.hex()` spells it
+    `-0x0.0p+0`, so a result carrying one hashes differently from the identical
+    result that carried a positive zero. Two workers computing the same numbers
+    would report different digests and the disagreement would read as a real
+    divergence.
+
+    Refused rather than normalized, and the difference is deliberate. Folding
+    `-0.0` onto `0.0` inside the encoder would make two different bit patterns
+    hash alike, and the encoder's whole job is to be injective: it exists so
+    that a value which differs in its last bit differs in its bytes. So the
+    refusal sits UPSTREAM of the spelling. Every result crosses this function
+    on its way to a digest, which makes it the one chokepoint where a stray
+    negative zero anywhere in a trade, a rejection, or an equity point becomes
+    a typed error instead of a silent hash divergence.
+
+    The producers hold up their end: the metric fold accumulates losses as
+    positive magnitudes and the IC lens adds zero to its rounded coefficient,
+    so nothing in a correct replay ever reaches this branch.
+    """
     number = float(value)
     if not math.isfinite(number):
         raise _fail("nonfinite_binary64", "value must be finite", field=path)
+    if number == 0.0 and math.copysign(1.0, number) < 0.0:
+        raise _fail("negative_zero", "a canonical zero is positive", field=path)
     return number
 
 

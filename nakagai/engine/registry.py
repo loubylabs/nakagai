@@ -33,10 +33,16 @@ from typing import Protocol, TypeAlias, runtime_checkable
 import pandas as pd
 
 from nakagai.data.schema import DEFAULT_TIMEFRAMES, TimeframeSet
-from nakagai.engine.bars import BAR_TIMEFRAMES, BASE_TIMEFRAME, _require_timeframe
-from nakagai.engine.canonical import _digest
+from nakagai.engine.bars import (
+    BAR_TIMEFRAMES,
+    BASE_TIMEFRAME,
+    ReplayDependencies,
+    _require_timeframe,
+)
+from nakagai.engine.canonical import _digest, definition_digest
 from nakagai.engine.portfolio_types import (
     JSONValue,
+    PortfolioReplayRequest,
     _fail,
     _require_digest,
     _require_instance,
@@ -46,7 +52,7 @@ from nakagai.engine.portfolio_types import (
     _require_symbol,
     _set,
 )
-from nakagai.strategies.base import Strategy
+from nakagai.strategies.base import Strategy, strategy_operation
 from nakagai.strategies.composite.strategy import CompositeStrategy, member_blocks
 from nakagai.strategies.rules.margins import spec_margin
 from nakagai.strategies.rules.strategy import (
@@ -225,6 +231,83 @@ class FrozenStrategyRegistry:
                 field="strategy", strategy=name,
             )
         return definition
+
+
+# ------------------------------------------------ the two preflight doors
+
+
+def validate_registry(
+    request: PortfolioReplayRequest, registry: StrategyRegistry,
+) -> StrategyRegistry:
+    """Resolve every play's definition and prove it is the one the play names.
+
+    Two different digests meet here and they are one keystroke apart, so read
+    the names carefully. `StrategyDefinition.definition_digest` is the BASE
+    digest of a strategy body, which `spec_definition_digest` above computes
+    for a rule spec. `canonical.definition_digest(base, params)` binds that
+    base to ONE play's parameters, and it is what a `PlayRequest` carries.
+
+    Checking the pair is what stops a play naming any params under any
+    definition. Nothing upstream can: the registry digest deliberately covers
+    names and base digests alone, since param-dependent values belong to a
+    candidate's identity rather than to the bundle's, so a play that swapped
+    its params would leave every other digest in the request intact.
+
+    Resolution happens here and not later because it is the registry step of
+    the preflight: a play naming a strategy this bundle never registered is
+    refused before any dependency is asked for and long before a factory runs.
+    """
+    _require_instance(request, "request", PortfolioReplayRequest)
+    if not isinstance(registry, StrategyRegistry):
+        raise _fail("invalid_type", "value must be a strategy registry",
+                    field="registry")
+    for play in request.plays:
+        definition = registry.resolve(play.strategy)
+        expected = definition_digest(definition.definition_digest, play.params)
+        if play.definition_digest != expected:
+            raise _fail(
+                "definition_digest_mismatch",
+                "a play's digest does not bind this definition to these params",
+                field="definition_digest", play_id=play.play_id,
+                strategy=play.strategy, expected=expected,
+                actual=play.definition_digest,
+            )
+    return registry
+
+
+def dependencies_for(
+    request: PortfolioReplayRequest, registry: StrategyRegistry,
+) -> ReplayDependencies:
+    """The union of what every play reads, as one closure for the whole replay.
+
+    Pure: a definition answers for its params and nothing is constructed, so
+    this runs inside the preflight without putting a strategy on the clock.
+
+    The base timeframe is injected rather than assumed present. A definition
+    declares what its own conditions read, and a daily-only play legitimately
+    declares `1d` alone; the ACCOUNT still fills, marks, and settles on the
+    base clock, so the replay reads it whatever a strategy chose. Without the
+    injection the union of such a portfolio would be a tuple
+    `ReplayDependencies` refuses outright, and a valid request would fail as a
+    contract error rather than run.
+
+    Ordering and deduplication belong to `ReplayDependencies`, which puts the
+    timeframes into the fixed `15m, 1h, 4h, 1d` order and sorts the symbols, so
+    the closure cannot depend on which play was asked first.
+    """
+    _require_instance(request, "request", PortfolioReplayRequest)
+    timeframes: list[str] = [BASE_TIMEFRAME]
+    symbols: list[str] = []
+    for play in request.plays:
+        definition = registry.resolve(play.strategy)
+        with strategy_operation("dependencies", strategy=definition.name,
+                                play_id=play.play_id):
+            declared = definition.dependencies(play.params)
+        _require_instance(declared, "dependencies", StrategyDependencies)
+        timeframes.extend(declared.timeframes)
+        symbols.extend(declared.external_symbols)
+    return ReplayDependencies(timeframes=tuple(timeframes),
+                              external_symbols=tuple(symbols))
 
 
 def _require_definitions(value: object) -> tuple[StrategyDefinition, ...]:

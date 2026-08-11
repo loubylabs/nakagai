@@ -1,4 +1,10 @@
-"""Composite over the example catalog: bound() is the only membership door."""
+"""Composite over the example catalog: member FACTORIES are the only door.
+
+Membership arrives one way, as a mapping from strategy name to a callable
+that builds a fresh member, passed to `__init__`. There is no class-bound
+alternative, so a composite handed no membership only ever accepts an empty
+spec and every populated one names its members explicitly.
+"""
 
 from pathlib import Path
 
@@ -40,13 +46,15 @@ def test_validate_rejects_unknown_member():
     assert errs
 
 
-def test_bound_composite_instantiates_members():
-    bound = CompositeStrategy.bound(load_catalog(SPECS, core_vocabulary))
-    strat = bound({"spec": _two_member_spec()})
-    assert strat is not None
+def test_supplied_membership_instantiates_members():
+    strat = CompositeStrategy({"spec": _two_member_spec()},
+                              members=load_catalog(SPECS, core_vocabulary))
+    assert set(strat._members) == {"a", "b"}
 
 
-def test_unbound_composite_rejects_a_populated_spec():
+def test_a_composite_handed_no_membership_rejects_a_populated_spec():
+    """No class binding to fall back on, so every block names a strategy
+    nothing can build and the spec is refused by name."""
     with pytest.raises(ValueError):
         CompositeStrategy({"spec": _two_member_spec()})
 
@@ -127,19 +135,19 @@ def test_a_passed_vocabulary_reaches_the_nested_rules_block():
     assert validate_composite_blocks(spec, _MEMBERS, house) == []
 
 
-def test_a_composite_carries_the_vocabulary_its_members_were_bound_to():
-    """engine.py resolves getattr(strategy, "vocabulary", core_vocabulary()).
-    Without this attribute a composite silently backtests on core's terms
-    while the scan evaluates it on the house's, which fails as a wrong
+def test_a_composite_carries_the_vocabulary_its_members_were_built_with():
+    """The live scanner resolves `getattr(strategy, "vocabulary", ...)`.
+    Without this attribute a composite silently evaluates on core's terms
+    while its own members evaluate on the house's, which fails as a wrong
     number rather than as an error."""
     house = core_vocabulary().with_terms(
         Term("always_one", "series", {}, {},
              lambda s, a: pd.Series(1.0, index=s.index)))
-    bound = CompositeStrategy.bound({"rules": RuleStrategy.bound(lambda: house)})
     spec = {"name": "c",
             "blocks": {"a": {"strategy": "rules", "params": {"spec": _LEG_SPEC}}},
             "long": {"all": ["a"]}}
-    strategy = bound({"spec": spec})
+    strategy = CompositeStrategy(
+        {"spec": spec}, members={"rules": RuleStrategy.bound(lambda: house)})
 
     assert strategy.vocabulary is house
 
@@ -201,8 +209,8 @@ def _both_sides_spec(member: str):
 
 
 def _composite(member_cls):
-    bound = CompositeStrategy.bound({member_cls.name: member_cls})
-    return bound({"spec": _both_sides_spec(member_cls.name)})
+    return CompositeStrategy({"spec": _both_sides_spec(member_cls.name)},
+                             members={member_cls.name: member_cls})
 
 
 def test_a_member_returning_two_signals_casts_both_votes():
@@ -274,14 +282,13 @@ def test_a_composite_builds_members_from_supplied_factories():
     assert len(calls) == 2
 
 
-def test_supplied_membership_replaces_the_class_binding():
-    bound = CompositeStrategy.bound({"bare_play": _Bare})
+def test_only_the_supplied_membership_decides_what_a_block_may_name():
     spec = {"version": 1, "name": "c", "blocks": {"a": {"strategy": "rules",
                                                        "params": {"spec": _LEG_SPEC}}},
             "long": {"all": ["a"]}}
-    # The bound class knows only bare_play, so this spec is refused unless the
-    # membership passed in is the one that decides.
+    # A membership that knows only bare_play cannot build this block, and there
+    # is no second place a name could resolve from.
     with pytest.raises(ValueError):
-        bound({"spec": spec})
-    built = bound({"spec": spec}, members={"rules": RuleStrategy})
+        CompositeStrategy({"spec": spec}, members={"bare_play": _Bare})
+    built = CompositeStrategy({"spec": spec}, members={"rules": RuleStrategy})
     assert isinstance(built._members["a"], RuleStrategy)

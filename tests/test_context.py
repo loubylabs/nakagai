@@ -1,16 +1,20 @@
 """The unscheduled door: a point-in-time context reconstructed from labels.
 
-A scanner, a screener, and the legacy replay have no `ReplaySchedule`, so this
-door answers both causal questions from the bar labels themselves. Visibility
-is `closed_before`; the emission gate is `strategies/util.label_freshness`. The
-portfolio replay answers the same two questions from its schedule instead, and
+A scanner and a screener have no `ReplaySchedule`, so this door answers both
+causal questions from the bar labels themselves. Visibility is `closed_before`;
+the emission gate is `strategies/util.label_freshness`. The portfolio replay
+answers the same two questions from its schedule instead, and
 `tests/test_portfolio_contexts.py` is where that door is pinned.
+
+`PreloadedBars` belongs here for the same reason: it is the in-memory,
+BarCache-shaped view a caller with no schedule hands this door, so that a scan
+does one read per timeframe rather than one per bar.
 """
 
 import pandas as pd
 
 from nakagai.data.cache import BarCache
-from nakagai.engine.context import build_context
+from nakagai.engine.context import PreloadedBars, build_context
 from nakagai.strategies.rules import RuleStrategy
 
 
@@ -113,3 +117,33 @@ def test_an_hourly_play_decides_only_where_the_context_says_it_may(
     decided = [now for now in closes
                if strategy._fresh(build_context(cache, "SPY", now))]
     assert decided == [pd.Timestamp("2026-06-01 15:00", tz="UTC")]
+
+
+# --------------------------------------------------------- the preloaded view
+
+
+def test_preloaded_bars_matches_cache(tmp_path, make_bars):
+    """The view answers `load` exactly as the cache behind it does."""
+    cache = BarCache(tmp_path)
+    cache.upsert("SPY", "15m", make_bars(10, "15m"))
+
+    view = PreloadedBars(cache, "SPY")
+
+    pd.testing.assert_frame_equal(view.load("SPY", "15m"), cache.load("SPY", "15m"))
+    assert view.load("SPY", "1h").empty  # missing timeframe -> empty schema frame
+
+
+def test_preloaded_context_equals_cache_context(tmp_path, make_bars):
+    """Building a context through the view sees the same bars as through the
+    cache, which is what makes it a performance seam rather than a second
+    visibility rule."""
+    cache = BarCache(tmp_path)
+    _fill(cache, make_bars)
+    now = pd.Timestamp("2026-06-01 15:00", tz="UTC")
+
+    direct = build_context(cache, "SPY", now)
+    preloaded = build_context(PreloadedBars(cache, "SPY"), "SPY", now)
+
+    for timeframe in ("15m", "1h", "1d"):
+        pd.testing.assert_frame_equal(direct.bars[timeframe],
+                                      preloaded.bars[timeframe])

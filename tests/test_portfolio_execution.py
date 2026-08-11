@@ -22,6 +22,8 @@ import dataclasses
 import pandas as pd
 import pytest
 
+from nakagai.engine.bars import prepare_portfolio_bars
+from nakagai.engine.execution import _PortfolioRuntime
 from nakagai.engine.portfolio_types import (
     ExitReason,
     RejectionReason,
@@ -30,6 +32,8 @@ from nakagai.engine.portfolio_types import (
     StrategyOutputError,
     StrategyRuntimeError,
 )
+from nakagai.engine.registry import dependencies_for
+from nakagai.engine.schedule import validate_schedule
 from tests.portfolio_fixtures import (
     BarPlan,
     ManagePlan,
@@ -40,6 +44,7 @@ from tests.portfolio_fixtures import (
     canonical_event_bytes,
     replay_account,
     replay_fixture,
+    replay_inputs,
     ts,
 )
 
@@ -601,10 +606,23 @@ def test_bars_prepared_under_another_closure_are_refused():
     They carry no record of the closure they were hydrated under, so a caller
     that prepares one and drives the loop with another would otherwise fail as a
     bare KeyError mid-replay, from outside the closed taxonomy.
+
+    The only test in this file that reaches past `run_portfolio`, and
+    deliberately: the public door derives ONE closure and hands the same value
+    to the bar preflight and to the runtime, so this mismatch is unreachable
+    through it. That is the guarantee, and the guard below is what keeps the
+    guarantee from being the only thing standing between a future caller and a
+    KeyError.
     """
+    inputs = replay_inputs(symbol_order=("SPY",), plays=one_play())
+    schedule = validate_schedule(inputs.request, inputs.schedule)
+    prepared = prepare_portfolio_bars(
+        inputs.request, inputs.bars, schedule,
+        dependencies_for(inputs.request, inputs.registry))
+
     with pytest.raises(ReplayInputError) as caught:
-        replay_fixture(symbol_order=("SPY",), plays=one_play(),
-                       drive_dependencies=base_dependencies())
+        _PortfolioRuntime(inputs.request, schedule, inputs.registry, prepared,
+                          base_dependencies())
 
     assert caught.value.code == "mismatched_dependencies"
     assert caught.value.details["timeframe"] == "1h"

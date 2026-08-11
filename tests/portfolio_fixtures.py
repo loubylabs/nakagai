@@ -6,12 +6,12 @@ test, so one failure names one cause. Parent identities are derived here the
 way platform derives them: build the draft, ask core for the candidate
 identity, then ask core for the replay identity.
 
-`replay_parts` at the foot of the module runs a real replay: it assembles the
-request, schedule, registry, and prepared bars and hands them to the one
-runtime. `replay_fixture` and `replay_curve` are two views of what it returns.
-Later Phase 1 tasks extend it and the last re-points it at the public entry
-point. It stays a thin assembler over the real core values and never grows a
-second replay implementation.
+`replay_parts` at the foot of the module runs a real replay: `replay_inputs`
+assembles the four values `run_portfolio` takes, and the replay itself goes
+through the public path's own two steps, so `replay_fixture`, `replay_curve`,
+`replay_metrics`, `replay_ic`, and `replay_result` are five views of one drive
+through `run_portfolio`. It is a thin assembler over the real core values and
+never a second replay implementation.
 """
 
 import dataclasses
@@ -39,9 +39,8 @@ from nakagai.engine.canonical import (
     trade_id,
     _projection,
 )
-from nakagai.engine.benchmark import ReplayCurve, _equity_series
-from nakagai.engine.execution import ReplayEvents, _PortfolioRuntime
-from nakagai.engine.ic import _ic_map, _portfolio_slices
+from nakagai.engine.benchmark import ReplayCurve
+from nakagai.engine.execution import ReplayEvents
 from nakagai.engine.metrics import _portfolio_metrics, _slice_accumulators
 from nakagai.engine.portfolio import EntryProposal, PositionKey, _Ledger
 from nakagai.engine.portfolio_types import (
@@ -78,8 +77,10 @@ from nakagai.engine.registry import (
     StrategyDependencies,
     composite_definition,
     rules_definition,
+    spec_definition_digest,
     vocabulary_digest,
 )
+from nakagai.engine.replay import _finalize_result, _replay, run_portfolio
 from nakagai.engine.schedule import ValidatedSchedule, validate_schedule
 from nakagai.strategies.base import HOLD, MarketContext, Strategy
 from nakagai.strategies.rules.vocabulary import core_vocabulary
@@ -1158,10 +1159,9 @@ def _fold_exit_excursion(
 
 # ---------------------------------------------------------- replay fixtures
 
-# `replay_fixture` runs a REAL replay. It assembles the same request, schedule,
-# registry, and prepared bars the public entry point will and hands them to the
-# one runtime, so it is a thin assembler rather than a second engine. Task C11
-# re-points it at `run_portfolio` and nothing it produces may move.
+# `replay_fixture` runs a REAL replay. `replay_inputs` assembles the four values
+# `run_portfolio` takes and the drive goes through the public path's own two
+# steps, so it is a thin assembler rather than a second engine.
 
 # The default window trades the 2026-11-27 half day, whose first interval opens
 # at 14:30Z and whose last closes at 18:00Z.
@@ -1501,13 +1501,30 @@ def with_base_bars(frames: dict, plans) -> dict:
 
 
 @dataclasses.dataclass(frozen=True)
-class ReplayParts:
-    """One replay's assembled inputs and everything its loop produced.
+class ReplayInputs:
+    """The four values `run_portfolio` takes, assembled and matched.
 
-    The three inputs travel with the events because the lenses over a replay
-    need them: the equity curve marks the benchmark on the schedule's own
-    instants and reads its prices from the same prepared bars the loop filled
-    against. Handing a lens anything else is the miswiring those lenses refuse.
+    Separated from the replay itself so a test can edit one input after the
+    assembly and before the door: withholding a bar, breaking a frame's
+    geometry, or naming another schedule are all things a caller can do and the
+    public boundary has to refuse.
+    """
+
+    request: PortfolioReplayRequest
+    bars: PortfolioBars
+    registry: FrozenStrategyRegistry
+    schedule: ReplaySchedule
+
+
+@dataclasses.dataclass(frozen=True)
+class ReplayParts:
+    """One replay's validated inputs, its chronology, and its finished result.
+
+    Both views come from ONE drive through the public path: `_replay` performs
+    every preflight and runs the loop, and `_finalize_result` is the same
+    assembly `run_portfolio` performs on top of it. Nothing here is a second
+    engine, and a test asserting on `events` and a test asserting on `result`
+    are looking at one replay from two distances.
     """
 
     request: PortfolioReplayRequest
@@ -1515,9 +1532,10 @@ class ReplayParts:
     prepared: _ValidatedPortfolioBars
     events: ReplayEvents
     registry: FrozenStrategyRegistry
+    result: PortfolioReplayResult
 
 
-def replay_parts(
+def replay_inputs(
     *,
     plays: tuple[ScriptedPlay, ...] | None = None,
     symbol_order: tuple[str, ...] = ("SPY", "QQQ"),
@@ -1533,14 +1551,13 @@ def replay_parts(
     execution: ExecutionPolicy | None = None,
     benchmark: BenchmarkSpec | None = None,
     dependencies: ReplayDependencies | None = None,
-    drive_dependencies: ReplayDependencies | None = None,
     window: ReplayWindow | None = None,
     build: Callable[[tuple], pd.DataFrame] | None = None,
     wrap: Callable[[StrategyDefinition], StrategyDefinition] | None = None,
     calls: list | None = None,
     factor_calls: list | None = None,
-) -> ReplayParts:
-    """One complete replay over the real internal components.
+) -> ReplayInputs:
+    """The request, bars, registry, and schedule for one scripted replay.
 
     Three knobs vary orderings the canonical contract is supposed to ignore, and
     they exist for the determinism tests: `symbol_order` supplies the request's
@@ -1548,11 +1565,13 @@ def replay_parts(
     plays and the registry's definitions in either order, and
     `reverse_param_keys` supplies each play's parameter object in either order.
 
-    `drive_dependencies` drives the loop with a closure the bars were NOT
-    prepared under, which is the one miswiring the runtime has to refuse and
-    which nothing else can stage. `drop_pairs` withholds a frame the request
-    declares, which is what proves a preflight refusal lands before any play is
-    constructed.
+    `drop_pairs` withholds a frame the request declares, which is what proves a
+    preflight refusal lands before any play is constructed.
+
+    `dependencies` is what the scripted definitions DECLARE, and the frames are
+    built from the same closure. `run_portfolio` derives the closure from those
+    declarations, so the two agree by construction rather than by a fixture
+    telling the bar preflight one thing and the loop another.
 
     `wrap` decorates every definition on its way into the registry, the way
     `base_definitions` does, so a caller that wants each construction counted
@@ -1567,10 +1586,10 @@ def replay_parts(
     scripted = (default_plays(at=signal_at, stop=signal_stop, target=signal_target)
                 if plays is None else tuple(plays))
     declared = BASE_ONLY if dependencies is None else dependencies
-    params = _scripted_params(reverse_param_keys)
+    params = scripted_params(reverse_param_keys)
     supplied = tuple(reversed(scripted)) if reverse_plays else scripted
     request = base_request(
-        plays=tuple(_scripted_play_request(play, params) for play in supplied),
+        plays=tuple(scripted_play_request(play, params) for play in supplied),
         symbols=tuple(symbol_order),
         account=replay_account() if account is None else account,
         execution=frictionless_execution() if execution is None else execution,
@@ -1578,7 +1597,6 @@ def replay_parts(
         **({} if window is None else {"window": window}),
     )
     schedule = base_schedule()
-    validated = validate_schedule(request, schedule)
     geometry = (lambda labels: flat_frame(labels, price)) if build is None else build
     frames = with_base_bars(
         frames_for(request, schedule, declared, build=geometry),
@@ -1595,14 +1613,17 @@ def replay_parts(
             factor_calls=factor_calls))
         for play in supplied
     ))
-    prepared = prepare_portfolio_bars(
-        request, PortfolioBars(frames), validated, declared)
-    events = _PortfolioRuntime(
-        request, validated, registry, prepared,
-        declared if drive_dependencies is None else drive_dependencies,
-    ).run()
-    return ReplayParts(request=request, schedule=validated, prepared=prepared,
-                       events=events, registry=registry)
+    return ReplayInputs(request=request, bars=PortfolioBars(frames),
+                        registry=registry, schedule=schedule)
+
+
+def replay_parts(**overrides) -> ReplayParts:
+    """One complete replay through the public entry point's own composition."""
+    inputs = replay_inputs(**overrides)
+    run = _replay(inputs.request, inputs.bars, inputs.registry, inputs.schedule)
+    return ReplayParts(request=run.request, schedule=run.schedule,
+                       prepared=run.prepared, events=run.events,
+                       registry=run.registry, result=_finalize_result(run))
 
 
 def replay_fixture(**overrides) -> ReplayEvents:
@@ -1610,15 +1631,15 @@ def replay_fixture(**overrides) -> ReplayEvents:
     return replay_parts(**overrides).events
 
 
-def replay_curve(**overrides) -> ReplayCurve:
-    """The equity and benchmark lens over one replay.
+def replay_result(**overrides) -> PortfolioReplayResult:
+    """The finished result of one replay, exactly as a caller receives it."""
+    return replay_parts(**overrides).result
 
-    The same assembly as `replay_fixture` with the one lens applied, which is
-    the composition the public entry point performs. Task C11 re-points both at
-    `run_portfolio` and nothing either produces may move.
-    """
-    parts = replay_parts(**overrides)
-    return _equity_series(parts.schedule, parts.events, parts.prepared)
+
+def replay_curve(**overrides) -> ReplayCurve:
+    """The equity and benchmark series the finished result carries."""
+    result = replay_parts(**overrides).result
+    return ReplayCurve(equity=result.equity, benchmark=result.benchmark)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1639,21 +1660,22 @@ class ReplayLenses:
 
 
 def replay_metrics(**overrides) -> ReplayLenses:
-    """The metric and slice lenses over one replay.
+    """The metrics the finished result carries, plus the accumulators behind it.
 
-    The same assembly as `replay_curve` with the metric lens applied on top,
-    which is the composition the public entry point performs. Task C11
-    re-points it at `run_portfolio` and nothing it produces may move.
+    `metrics` and `curve` are read off the result rather than recomputed, so a
+    test asserting on them is asserting on what a caller receives. The
+    accumulators are the one value a result does not carry: a slice is frozen
+    with its IC estimates, and a test about attribution wants the totals before
+    that.
     """
     parts = replay_parts(**overrides)
-    curve = _equity_series(parts.schedule, parts.events, parts.prepared)
+    result = parts.result
     return ReplayLenses(
         request=parts.request,
         schedule=parts.schedule,
         events=parts.events,
-        curve=curve,
-        metrics=_portfolio_metrics(
-            curve, parts.events.trades, parts.events.rejections, parts.schedule),
+        curve=ReplayCurve(equity=result.equity, benchmark=result.benchmark),
+        metrics=result.metrics,
         slices=_slice_accumulators(parts.events, parts.schedule),
     )
 
@@ -1707,9 +1729,9 @@ def ic_plays(*, timeframe: str = "15m",
 class ReplayIc:
     """One replay, its accumulators, its IC map, and the frozen slices.
 
-    The same assembly as `replay_metrics` with the IC lens applied instead,
-    which is the composition the public entry point performs. Task C11
-    re-points it at `run_portfolio` and nothing it produces may move.
+    The same drive as `replay_metrics`, read at the IC lens instead: the map
+    and the slices come off the finished result, and the accumulators are the
+    one value a result does not carry.
     """
 
     request: PortfolioReplayRequest
@@ -1722,19 +1744,129 @@ class ReplayIc:
 
 
 def replay_ic(**overrides) -> ReplayIc:
-    """The IC map and the frozen slices over one replay."""
+    """The IC map and the frozen slices the finished result carries.
+
+    The map is read back off the slices rather than measured a second time. A
+    second `_ic_map` would call every graded factor again, which would double
+    the recorded factor calls a test counts and would measure the lens twice to
+    report it once.
+    """
     parts = replay_parts(**overrides)
-    totals = _slice_accumulators(parts.events, parts.schedule)
-    ic = _ic_map(parts.schedule, parts.prepared, parts.registry)
+    slices = parts.result.slices
     return ReplayIc(
         request=parts.request,
         schedule=parts.schedule,
         prepared=parts.prepared,
         events=parts.events,
-        totals=totals,
-        ic=ic,
-        slices=_portfolio_slices(parts.schedule, totals, ic),
+        totals=_slice_accumulators(parts.events, parts.schedule),
+        ic={(row.play_id, row.symbol): row.ic for row in slices},
+        slices=slices,
     )
+
+
+# ------------------------------------------ one long session for a real spec
+
+# The rules behaviours need a run of many base intervals over hand-authored
+# closes: a fourteen-period ATR has to warm up before a trade can run its
+# course afterwards. The two real XNYS sessions above are twenty-six intervals
+# and fourteen, which is not enough for both. Core reads the schedule as data
+# and never consults an installed calendar, so one continuous synthetic session
+# is an ordinary input rather than a claim about what XNYS trades.
+RULES_SESSION_OPEN = "T14:30:00Z"
+RULES_SESSION_INTERVALS = 26
+RULES_WARMUP_INTERVALS = 20
+
+
+def rules_schedule(intervals: int) -> ReplaySchedule:
+    """`intervals` base bars over as many weekday sessions as they need.
+
+    Twenty-six a session, opening at 14:30Z, which is a full regular session's
+    worth. It rolls rather than running on, because an interval belongs to the
+    exchange session it opens in and a sixty-bar run from one open would put
+    its later intervals on the next Eastern date.
+    """
+    built: list[ScheduledBaseInterval] = []
+    sessions = daily_session_dates(
+        -(-max(intervals, 1) // RULES_SESSION_INTERVALS))
+    for session in sessions:
+        built.extend(session_intervals(
+            session, ts(f"{session.isoformat()}{RULES_SESSION_OPEN}"),
+            min(RULES_SESSION_INTERVALS, intervals - len(built))))
+    draft = ReplaySchedule(identity=base_identity(),
+                           base_intervals=tuple(built), context_bars=())
+    return dataclasses.replace(draft, identity=base_identity(schedule_digest(draft)))
+
+
+def rules_frames(closes: Sequence[float], schedule: ReplaySchedule,
+                 symbol: str = "SPY") -> dict:
+    """One bar per scheduled interval, opening and closing at `closes[i]`.
+
+    A fifth of a point either side, so a level placed between two closes is
+    reached by the bar that spans it and by no other. Open equal to close makes
+    every fill price the caller's own number: an entry fills at the next bar's
+    open, which is that bar's stated close.
+    """
+    index = pd.DatetimeIndex([row.open_ts for row in schedule.base_intervals],
+                             tz="UTC", name="ts")
+    values = pd.Series(list(closes), index=index, dtype="float64")
+    return {(symbol, "15m"): pd.DataFrame(
+        {"open": values, "high": values + 0.2, "low": values - 0.2,
+         "close": values, "volume": 1_000.0}, index=index)}
+
+
+def rules_replay(spec: Mapping, closes: Sequence[float], *,
+                 warmup: int = RULES_WARMUP_INTERVALS, symbol: str = "SPY",
+                 bars: tuple[BarPlan, ...] = (),
+                 account: AccountPolicy | None = None,
+                 execution: ExecutionPolicy | None = None,
+                 ) -> PortfolioReplayResult:
+    """One real RuleSpec replayed through the public entry point.
+
+    Nothing is scripted: a real definition builds a real `RuleStrategy` through
+    a real factory, and it goes through the same door a portfolio of forty
+    plays goes through. The first `warmup` intervals are train and every
+    interval after them is tested, which is what gives an indicator its history
+    without letting a train bar produce a trade.
+
+    `bars` replaces named base bars outright, which is how a test puts a level
+    inside one bar's range: the default geometry is deliberately narrow, so a
+    bar that reaches a level reaches it because a test said so.
+    """
+    schedule = rules_schedule(len(closes))
+    intervals = schedule.base_intervals
+    params: dict = {}
+    base = spec_definition_digest(spec)
+    request = base_request(
+        plays=(PlayRequest(
+            play_id="play-r", strategy=spec["name"],
+            definition_digest=definition_digest(base, params),
+            params=params, priority=100),),
+        symbols=(symbol,),
+        window=ReplayWindow(
+            train_start=intervals[0].open_ts,
+            train_end=intervals[warmup].open_ts,
+            test_start=intervals[warmup].open_ts,
+            test_end=intervals[-1].close_ts,
+        ),
+        schedule_identity=schedule.identity,
+        ic_tail_end=intervals[-1].close_ts,
+        account=replay_account() if account is None else account,
+        execution=frictionless_execution() if execution is None else execution,
+    )
+    registry = FrozenStrategyRegistry.from_definitions(
+        (rules_definition(spec["name"], base, spec=spec),))
+    frames = with_base_bars(rules_frames(closes, schedule, symbol), bars)
+    return run_portfolio(request, PortfolioBars(frames), registry, schedule)
+
+
+def rules_interval(ordinal: int) -> pd.Timestamp:
+    """The open of `rules_schedule`'s interval `ordinal`.
+
+    Read off a schedule rather than computed, because the run rolls onto a new
+    weekday session every twenty-six intervals and plain arithmetic from the
+    first open would name an instant no session covers.
+    """
+    return rules_schedule(ordinal + 1).base_intervals[ordinal].open_ts
 
 
 # ------------------------------------------------- many-session metric input
@@ -1918,13 +2050,13 @@ def canonical_curve_bytes(curve: ReplayCurve) -> bytes:
     })
 
 
-def _scripted_params(reverse: bool) -> dict:
+def scripted_params(reverse: bool) -> dict:
     """One play's parameters, supplied in canonical order or against it."""
     params = {"alpha": 1, "beta": 2.5}
     return dict(reversed(list(params.items()))) if reverse else params
 
 
-def _scripted_play_request(play: ScriptedPlay, params: Mapping) -> PlayRequest:
+def scripted_play_request(play: ScriptedPlay, params: Mapping) -> PlayRequest:
     return PlayRequest(
         play_id=play.play_id,
         strategy=scripted_name(play.play_id),

@@ -1,4 +1,4 @@
-"""Concurrent parquet appends must not lose rows (runs.parquet is evidence)."""
+"""Concurrent parquet appends must not lose rows: a shared file is evidence."""
 
 import os
 from concurrent.futures import ProcessPoolExecutor
@@ -16,7 +16,7 @@ def _append(args) -> None:
 
 
 def test_append_parquet_creates_then_appends(tmp_path):
-    p = tmp_path / "runs.parquet"
+    p = tmp_path / "shared.parquet"
     append_parquet(p, pd.DataFrame([{"a": 1}]))
     append_parquet(p, pd.DataFrame([{"a": 2}]))
     assert pd.read_parquet(p)["a"].tolist() == [1, 2]
@@ -24,7 +24,7 @@ def test_append_parquet_creates_then_appends(tmp_path):
 
 def test_concurrent_appends_across_processes_lose_nothing(tmp_path):
     """8 processes x 10 rows: without the lock, read-concat-write drops rows."""
-    p = tmp_path / "runs.parquet"
+    p = tmp_path / "shared.parquet"
     with ProcessPoolExecutor(max_workers=8) as pool:
         list(pool.map(_append, [(str(p), w) for w in range(8)]))
 
@@ -35,14 +35,14 @@ def test_concurrent_appends_across_processes_lose_nothing(tmp_path):
 
 
 def test_append_parquet_leaves_no_temp_files(tmp_path):
-    p = tmp_path / "runs.parquet"
+    p = tmp_path / "shared.parquet"
     append_parquet(p, pd.DataFrame([{"a": 1}]))
     leftovers = [f.name for f in tmp_path.iterdir() if f.name.endswith(".tmp")]
     assert leftovers == []
 
 
 def test_append_parquet_keeps_prior_data_when_the_write_fails(tmp_path, monkeypatch):
-    p = tmp_path / "runs.parquet"
+    p = tmp_path / "shared.parquet"
     append_parquet(p, pd.DataFrame([{"a": 1}]))
 
     def boom(*a, **k):
@@ -56,7 +56,7 @@ def test_append_parquet_keeps_prior_data_when_the_write_fails(tmp_path, monkeypa
 
 
 def test_file_lock_times_out_rather_than_corrupting(tmp_path):
-    target = tmp_path / "runs.parquet"
+    target = tmp_path / "shared.parquet"
     pid = os.fork() if hasattr(os, "fork") else None
     if pid == 0:  # child: hold the lock past the parent's timeout
         with file_lock(target):

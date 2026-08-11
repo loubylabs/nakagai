@@ -4,15 +4,20 @@ Pillar 5 (Protocol) of the platform's docs/internal/PILLARS.md.
 
 READ THIS BEFORE QUOTING THE PROTOCOL ANYWHERE. What the pipeline runs is
 **fixed-parameter rolling out-of-sample evaluation**, not walk-forward
-optimization. These windows carry a train span, and nothing fits on it:
-runner.run_one replays `test_start .. test_end` only, with the spec's default
-parameters, on every window. That is honest, there is no in-sample leakage to
-worry about, but it is not "tune 4 months, validate 1 month" and no document
-may say so. Decision recorded in PILLARS.md Pillar 5, 2026-07-24.
+optimization. These windows carry a train span, and nothing fits on it: a
+replay uses the spec's default parameters on every window. That is honest,
+there is no in-sample leakage to worry about, but it is not "tune 4 months,
+validate 1 month" and no document may say so. Decision recorded in PILLARS.md
+Pillar 5, 2026-07-24.
 
 The train span stays in the Window because it is the span a fit step WOULD use,
 and recording it now means the evidence store already has the column when that
 step is built. It is reserved, not used.
+
+This module is the SHAPE of the evaluation protocol and nothing else. Core's
+own replay takes a `ReplayWindow` on its request and never builds one of these;
+the platform lays out a launch's windows with `walk_forward` and pins the
+13/4/1 constants against its own documentation.
 """
 
 from dataclasses import dataclass

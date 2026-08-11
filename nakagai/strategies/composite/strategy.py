@@ -1,13 +1,16 @@
 """CompositeStrategy: interprets a CompositeSpec against MarketContext.
 
-Registered as "composite" in the strategy registry, so saved composites run through the
-existing backtest/scan machinery unchanged: params = {"spec": {...}}. With no
-spec it is inert; the scanner can instantiate it harmlessly. The engine only
-accepts self-contained specs; config refs must be resolved by the API first.
+Params are `{"spec": {...}}`; with no spec it is inert, so a scanner can
+instantiate it harmlessly. Only self-contained specs are accepted, and config
+refs must be resolved before one reaches here.
+
+Membership arrives ONE way: `members` is a mapping from strategy name to a
+factory, passed to `__init__`. There is no class-bound alternative, so a
+composite's members are decided by whoever built it and two composites over one
+definition share no member instance, no vote, and no ratchet.
 """
 
 from collections.abc import Callable, Mapping
-from typing import ClassVar
 
 import pandas as pd
 
@@ -59,17 +62,6 @@ class CompositeStrategy(Strategy):
     tags = ("custom", "composite")
     DEFAULT_PARAMS = {}
 
-    # The strategies a block may reference on the retired singleton path,
-    # bound per registry via bound(). The canonical path passes member
-    # factories to __init__ instead, so nothing about a composite's membership
-    # lives on a class there. Either way, a composite that was handed no
-    # membership only accepts an empty (inert) spec.
-    MEMBERS: ClassVar[dict[str, type[Strategy]]] = {}
-
-    @classmethod
-    def bound(cls, members: dict[str, type[Strategy]]) -> type["CompositeStrategy"]:
-        return type("BoundCompositeStrategy", (cls,), {"MEMBERS": dict(members)})
-
     def __init__(self, params: dict | None = None, *,
                  members: Mapping[str, MemberFactory] | None = None,
                  name: str | None = None):
@@ -83,7 +75,11 @@ class CompositeStrategy(Strategy):
         # Bad specs fail loudly at construction (backtest submission), not
         # silently per bar. Empty spec = intentionally inert.
         if self.spec:
-            builders = type(self).MEMBERS if members is None else members
+            # Membership arrives as factories, once, and from one place. A
+            # composite handed none only ever accepts an empty spec: every
+            # block below then names a strategy nothing can build, which the
+            # validation refuses by name rather than at the first bar.
+            builders = {} if members is None else members
             errs = cspec.validate_composite_spec(self.spec, builders,
                                                  allow_refs=False)
             if errs:
@@ -94,13 +90,12 @@ class CompositeStrategy(Strategy):
             self._members = {bid: builders[strategy](block_params)
                              for bid, strategy, block_params
                              in member_blocks(self.spec)}
-        # engine.py resolves a strategy's vocabulary as
-        # getattr(self.strategy, "vocabulary", core_vocabulary()). RuleStrategy
-        # carries one through bound(); a composite did not, so the Engine
-        # built its context on core's terms while a scan built the same
-        # play's context on the house's terms. One play answering two
-        # different questions on two surfaces, and it fails as a wrong number
-        # rather than as an error.
+        # The grammar a composite is read under. The live scanner resolves a
+        # strategy's vocabulary as `getattr(strategy, "vocabulary", ...)`, and
+        # a composite that carried none would answer that question with core's
+        # grammar while its own members answered it with the house's. One play
+        # answering two different questions on two surfaces, and it fails as a
+        # wrong number rather than as an error.
         #
         # Taken from the members rather than defaulted here: the members ARE
         # the specs being evaluated, so their vocabulary is by definition the

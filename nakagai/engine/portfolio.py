@@ -31,7 +31,6 @@ from pandas import Timestamp
 
 from nakagai.data.schema import EXCHANGE_TZ
 from nakagai.engine.canonical import rejection_id, trade_id
-from nakagai.engine.costs import FeeModel, SlippageModel
 from nakagai.engine.portfolio_types import (
     DIRECTIONS,
     EntryIntent,
@@ -68,25 +67,13 @@ from nakagai.engine.schedule import ValidatedSchedule
 type PositionKey = tuple[str, str]
 
 
-def _slippage_model(spec: SlippageSpec) -> SlippageModel:
-    """The request's slippage policy as the model that prices a fill."""
-    _require_instance(spec, "slippage", SlippageSpec)
-    return SlippageModel(bps=spec.bps, min_per_share=spec.min_per_share)
-
-
-def _fee_model(spec: FeeSpec) -> FeeModel:
-    """The request's fee policy as the model that prices a fill."""
-    _require_instance(spec, "fees", FeeSpec)
-    return FeeModel(per_fill=spec.per_fill, per_share=spec.per_share)
-
-
-def _entry_fill(direction: str, reference: float, slippage: SlippageModel) -> float:
+def _entry_fill(direction: str, reference: float, slippage: SlippageSpec) -> float:
     """What an opening fill prints. A long buys and a short sells to open."""
     priced = slippage.buy(reference) if direction == "long" else slippage.sell(reference)
     return _require_positive(priced, "fill")
 
 
-def _exit_fill(direction: str, reference: float, slippage: SlippageModel) -> float:
+def _exit_fill(direction: str, reference: float, slippage: SlippageSpec) -> float:
     """What a closing fill prints. A long sells and a short buys to cover."""
     priced = slippage.sell(reference) if direction == "long" else slippage.buy(reference)
     return _require_positive(priced, "exit")
@@ -328,8 +315,10 @@ class _Ledger:
         self._schedule = schedule
         self._plays = {play.play_id: play for play in request.plays}
         self._symbols = frozenset(request.symbols)
-        self._slippage = _slippage_model(request.execution.slippage)
-        self._fees = _fee_model(request.execution.fees)
+        # The request's own policy values, which price a fill themselves.
+        # There is no second cost model to keep in step with them.
+        self._slippage = request.execution.slippage
+        self._fees = request.execution.fees
         self._risk_pct = request.account.risk_pct
         self._max_open_positions = request.account.max_open_positions
         self._starting_equity = _require_positive(
@@ -347,10 +336,6 @@ class _Ledger:
     @property
     def replay_id(self) -> str:
         return self._request.replay_id
-
-    @property
-    def starting_equity(self) -> float:
-        return self._starting_equity
 
     @property
     def settled_cash(self) -> float:
@@ -491,7 +476,7 @@ class _Ledger:
     def exit_fee(self, qty: int) -> float:
         """What one closing fill of `qty` shares costs.
 
-        `FeeModel.charge` takes the magnitude of what it is given, so a float
+        `FeeSpec.charge` takes the magnitude of what it is given, so a float
         or a negative share count would price a plausible fee rather than
         refuse. The quantity is a whole positive number of shares here.
         """

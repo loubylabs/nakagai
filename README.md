@@ -1,16 +1,22 @@
 # nakagai
 
 The deterministic, LLM-free core for rule-driven trading agents: a point-in-time
-bar cache, a statistically honest walk-forward backtester (look-ahead prevention,
-T+1 cash settlement), the RuleSpec strategy DSL, and a screener compiler.
+bar cache, a statistically honest portfolio replay (one shared cash account,
+look-ahead prevention, T+1 cash settlement), the RuleSpec strategy DSL, and a
+screener compiler.
 
 ## What is here
 
 - `data/`: `BarCache`/`MemoryBars` over local parquet, the `DataProvider` contract
   and its Alpaca implementation (single-symbol and batched multi-symbol), and a
   sync routine that keeps the cache current.
-- `engine/`: the walk-forward backtester itself, point-in-time `MarketContext`
-  assembly, T+1 cash settlement, and run metrics.
+- `engine/`: the portfolio replay itself. `run_portfolio(request, bars, registry,
+  schedule)` is the only entry point: it replays one account across every
+  selected play and symbol in one causal chronology, and returns one canonical
+  result with the trades, the structured rejections, the account equity curve,
+  an independently calculated benchmark, per play-symbol attribution, and the
+  metrics. It is deterministic and side-effect free, so it reads no cache,
+  writes no file, mints no identifier, and consults no installed calendar.
 - `strategies/`: rule-based (`rules/`), boolean-composed (`composite/`), and
   ICT-flavored (`ict/`) strategies, plus a catalog loader that turns JSON specs into
   strategy classes.
@@ -22,88 +28,163 @@ T+1 cash settlement), the RuleSpec strategy DSL, and a screener compiler.
 - `stats.py`: poolable return moments and the deflated-Sharpe family (PSR, DSR,
   minimum track record length, effective trial count), which is how a candidate
   is priced for how many candidates were tried.
-- `icir.py`: rank-IC / IR of rule-spec margins vs forward returns (the informational ICIR lens).
 - `filelock.py`: cross-process advisory file locking for concurrent read-modify-write
   on shared result files.
 
 ## Quickstart
 
-This builds a `BarCache`, loads one of the shipped example strategies, runs the
-walk-forward engine over the cached window, and prints run metrics next to
-buy-and-hold. No network, no credentials, no optional extras, and it prints the
-same numbers every time: the engine's whole contract is that a backtest reads
-the cache and nothing else. Run it from the repo root with
-`uv run python quickstart.py` (or paste it into a REPL):
+This builds one schedule, one frame of bars, one frozen registry, and one
+request, then replays them through the single public entry point and prints the
+result's metrics. No network, no credentials, no optional extras, and it prints
+the same line every time: the whole contract is that a replay reads its four
+arguments and nothing else.
+
+It is longer than a one-liner on purpose. Core does not discover strategies,
+resolve a cache, or decide what a trading session is; a caller states all of it,
+which is what makes two runs of the same request byte-identical wherever they
+run.
 
 ```python
-import tempfile
-from pathlib import Path
+import dataclasses
+from datetime import date, timedelta
 
 import numpy as np
 import pandas as pd
 
-from nakagai.data.cache import BarCache
-from nakagai.data.schema import TimeframeSet, validate_bars
-from nakagai.engine.engine import Engine
-from nakagai.engine.runner import buy_and_hold_return, summarize
-from nakagai.strategies.catalog import load_catalog
-from nakagai.strategies.rules import core_vocabulary
+from nakagai.engine import (
+    ARITHMETIC_VERSION,
+    AccountPolicy,
+    BenchmarkSpec,
+    ExchangeScheduleIdentity,
+    ExecutionPolicy,
+    FeeSpec,
+    FrozenStrategyRegistry,
+    PlayRequest,
+    PortfolioBars,
+    PortfolioReplayRequest,
+    ReplaySchedule,
+    ReplayWindow,
+    ScheduledBaseInterval,
+    SlippageSpec,
+    definition_digest,
+    expected_candidate_id,
+    expected_replay_id,
+    rules_definition,
+    run_portfolio,
+    schedule_digest,
+    spec_definition_digest,
+)
 
-# 1. Generate a deterministic hourly series. Swap this block for
-#    AlpacaProvider().fetch_bars("SPY", "1h", start, end) once you have
-#    ALPACA_KEY_ID / ALPACA_SECRET_KEY; everything below is unchanged, which is
-#    the point of the DataProvider seam.
+SESSIONS, PER_SESSION = 8, 26          # eight regular sessions of 15-minute bars
+WARMUP = 2 * PER_SESSION               # the first two are warmup, the rest is tested
+
+# 1. The schedule IS the clock. Core never consults an installed calendar: it
+#    replays exactly the intervals it is handed, so early closes and holidays
+#    enter as data. These eight weekdays open at 14:30Z.
+intervals, day = [], date(2026, 1, 5)
+while len({row.session_date for row in intervals}) < SESSIONS or not intervals:
+    if day.weekday() < 5:
+        opens = pd.Timestamp(f"{day}T14:30:00Z")
+        intervals += [
+            ScheduledBaseInterval(
+                session_date=day, interval_ordinal=n,
+                open_ts=opens + pd.Timedelta(minutes=15 * n),
+                close_ts=opens + pd.Timedelta(minutes=15 * (n + 1)))
+            for n in range(PER_SESSION)]
+    day += timedelta(days=1)
+draft = ReplaySchedule(
+    identity=ExchangeScheduleIdentity(
+        calendar_id="XNYS", calendar_version="exchange_calendars:4.5.6:nakagai-rth-v1",
+        schedule_digest="0" * 64, timezone="America/New_York", base_timeframe="15m"),
+    base_intervals=tuple(intervals), context_bars=())
+schedule = dataclasses.replace(draft, identity=dataclasses.replace(
+    draft.identity, schedule_digest=schedule_digest(draft)))
+
+# 2. One frame per (symbol, timeframe), labeled at the scheduled opens. Swap
+#    this block for real bars once you have them; nothing below changes.
 rng = np.random.default_rng(0)
-idx = pd.date_range("2024-01-01", periods=2000, freq="1h", tz="UTC", name="ts")
-close = pd.Series(400 * np.exp(np.cumsum(rng.normal(0, 0.006, len(idx)))), index=idx)
-prev = close.shift(1).fillna(close.iloc[0])
-bars = validate_bars(pd.DataFrame({
-    "open": prev,
-    "high": np.maximum(close, prev) * 1.004,
-    "low": np.minimum(close, prev) * 0.996,
-    "close": close,
-    "volume": 1_000_000.0,
-}, index=idx))
+index = pd.DatetimeIndex([row.open_ts for row in schedule.base_intervals], name="ts")
+close = pd.Series(400 * np.exp(np.cumsum(rng.normal(0, 0.004, len(index)))), index=index)
+prev = close.shift(1).bfill()
+bars = PortfolioBars({("SPY", "15m"): pd.DataFrame({
+    "open": prev, "high": np.maximum(close, prev) * 1.002,
+    "low": np.minimum(close, prev) * 0.998, "close": close, "volume": 1_000_000.0,
+}, index=index)})
 
-# 2. Store it in a local BarCache: parquet on disk, offline after this.
-cache = BarCache(Path(tempfile.mkdtemp()))
-cache.upsert("SPY", "1h", bars)
+# 3. A registry is a frozen bundle of definitions. `rules_definition` builds one
+#    over a RuleSpec; the base digest covers the spec and the grammar it is read
+#    under, because one spec under two grammars is two strategies.
+spec = {
+    "version": 2, "name": "sma_cross", "timeframe": "15m",
+    "long": {"all": [{"lhs": {"ind": "sma", "n": 10}, "op": "crosses_above",
+                      "rhs": {"ind": "sma", "n": 30}}]},
+    "risk": {"stop": {"kind": "atr", "n": 14, "mult": 2.0},
+             "target": {"kind": "rr", "rr": 2.0}},
+}
+base_digest = spec_definition_digest(spec)
+registry = FrozenStrategyRegistry.from_definitions(
+    (rules_definition("sma_cross", base_digest, spec=spec),))
 
-# 3. Load a shipped example strategy from the catalog.
-specs_dir = Path("nakagai/strategies/catalog/specs")
-catalog = load_catalog(specs_dir, core_vocabulary)
-strategy = catalog["sma_cross"]({})
+# 4. The request names the plays, the symbols, and the whole visible policy.
+#    Every play carries the digest binding its definition to its own params, and
+#    core refuses the replay if it does not recompute.
+params: dict = {}
+window = ReplayWindow(
+    train_start=intervals[0].open_ts, train_end=intervals[WARMUP].open_ts,
+    test_start=intervals[WARMUP].open_ts, test_end=intervals[-1].close_ts)
+draft = PortfolioReplayRequest(
+    request_version=1,
+    replay_id="replay:" + "0" * 64, candidate_id="candidate:" + "0" * 64,
+    batch_id="0198b1c2-3d4e-7f80-8123-456789abcdef",
+    registry_digest=registry.registry_digest,
+    plays=(PlayRequest(play_id="play-1", strategy="sma_cross",
+                       definition_digest=definition_digest(base_digest, params),
+                       params=params, priority=100),),
+    symbols=("SPY",), window=window, schedule_identity=schedule.identity,
+    ic_horizons=(1, 5, 20), ic_tail_end=window.test_end,
+    account=AccountPolicy(starting_equity=10_000.0, risk_pct=0.01,
+                          max_open_positions=5, max_positions_per_play_symbol=1,
+                          settlement_model="cash_t1"),
+    execution=ExecutionPolicy(
+        arithmetic_version=ARITHMETIC_VERSION, fill_mode="pessimistic",
+        slippage=SlippageSpec(bps=1.0, min_per_share=0.01),
+        fees=FeeSpec(per_fill=0.0, per_share=0.0),
+        funding_order="play_priority_symbol_signal", missing_bar_policy="strict"),
+    benchmark=BenchmarkSpec(kind="equal_weight_request_symbols", symbol=None,
+                            weighting="equal", rebalance="never"))
+named = dataclasses.replace(draft, candidate_id=expected_candidate_id(draft))
+request = dataclasses.replace(named, replay_id=expected_replay_id(named))
 
-# 4. Run the engine over the cached window.
-tfs = TimeframeSet(driving="1h", deltas={"1h": pd.Timedelta(hours=1)})
-engine = Engine(strategy, cache, "SPY", bars.index[0], bars.index[-1], tfs=tfs)
-result = engine.run()
-
-# 5. Print metrics next to buy-and-hold.
-bh = buy_and_hold_return(bars, bars.index[0], bars.index[-1])
-metrics = summarize(result, bh_return=bh)
-print(f"trades: {metrics['n_trades']}, win_rate: {metrics['win_rate']:.2f}, "
-      f"profit_factor: {metrics['profit_factor']:.2f}, total_return: {metrics['total_return']:.2%}, "
-      f"bh_return: {metrics['bh_return']:.2%}")
+# 5. One call, one canonical result.
+result = run_portfolio(request, bars, registry, schedule)
+metrics = result.metrics
+print(f"trades: {metrics.all_trades.n_trades}, "
+      f"rejections: {metrics.n_rejections}, "
+      f"total_return: {metrics.total_return:.2%}, "
+      f"benchmark: {metrics.benchmark_return:.2%}")
+print(f"digest: {result.result_digest}")
 ```
 
-Because the series is seeded, this prints the same line on every machine, which
-makes it a usable smoke test as well as an example:
+Because the series is seeded and the arithmetic is canonical, this prints the
+same line on every machine, which makes it a usable smoke test as well as an
+example:
 
 ```
-trades: 25, win_rate: 0.32, profit_factor: 0.92, total_return: -1.27%, bh_return: -28.77%
+trades: 3, rejections: 0, total_return: -2.89%, benchmark: -2.18%
 ```
 
 A trend follower run on a random walk is not supposed to make money, and it
-doesn't. That is the example working, not failing: the engine's job is to tell
-you that honestly. Point step 1 at real bars to see something worth judging.
+doesn't. That is the example working, not failing: the replay's job is to tell
+you that honestly. Point step 2 at real bars to see something worth judging.
 
-Two details of the generated series matter if you change it. Position size comes
-from `risk_pct` divided by the ATR stop distance, so a series with a low
-price-to-volatility ratio asks for more shares than `equity0` can buy and every
-entry is skipped, which reads as a silent zero-trade run. And the bars are
-continuous hourly, with no session gaps, which is fine for the `1h` driving
-timeframe here but is not what session-aligned daily logic expects.
+Two details matter if you change it. Position size is `risk_pct` of frozen
+equity divided by the protective distance, floored to whole shares, so a series
+with a low price-to-volatility ratio asks for more shares than the account can
+buy and every entry is refused for cash, which shows up as structured
+rejections rather than as a silent zero-trade run. And every declared frame must
+carry exactly the labels the schedule declares, with no gaps and nothing past
+the boundary: a missing scheduled bar refuses the whole replay rather than
+shrinking it.
 
 ## The RuleSpec DSL
 
@@ -136,9 +217,9 @@ fields (catalog card metadata like `category` and `tags` omitted):
 ```
 
 Two more examples ship in `nakagai/strategies/catalog/specs/`: `rsi_reversion.json`
-(mean reversion) and `macd_trend.json` (momentum). `load_catalog(specs_dir,
+(mean reversion) and `macd_trend.json` (momentum). `catalog_definitions(specs_dir,
 core_vocabulary)` turns every JSON file in a directory like this one into a
-`RuleStrategy` subclass.
+frozen `StrategyDefinition` ready to enter a registry.
 
 ## What is NOT here
 
@@ -148,6 +229,28 @@ the hosted platform: API, web UI, and the mandate and approvals judgment layer.
 The hosted product at nakag.ai is built on top of this core.
 
 ## Release notes
+
+### 0.5.0
+
+**Breaking: one public replay, and the singleton engine is gone.**
+`run_portfolio(request, bars, registry, schedule)` replaces `Engine`, `run_one`,
+and `run_grid`. It replays ONE cash account across every selected play and
+symbol in one causal chronology, so two candidates that were each affordable
+alone now contend for the same settled cash and the same position capacity, and
+the result carries a real account equity curve instead of per-symbol rows
+combined after the fact.
+
+Removed with them: `nakagai.engine.engine`, `nakagai.engine.runner`,
+`nakagai.engine.provenance`, `nakagai.engine.costs`, `nakagai.icir`,
+`BacktestResult`, the singleton `Trade`, `summarize`, `buy_and_hold_return`,
+process-grid expansion, core-owned result parquet, `FeeModel`,
+`SlippageModel`, and `CompositeStrategy.bound`. There is no adapter and no
+alias: a caller migrates to the new contract or stays on 0.4.x.
+
+`FeeSpec` and `SlippageSpec` now price a fill themselves, so the request's own
+policy is the model. Composite membership arrives one way, as member factories
+passed to `CompositeStrategy(...)`. `nakagai.engine` exports the complete
+contract and nothing else.
 
 ### 0.4.2
 

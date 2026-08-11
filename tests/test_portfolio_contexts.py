@@ -220,6 +220,31 @@ def test_a_context_carries_only_the_frames_its_replay_declared():
             context.fresh[undeclared]
 
 
+def test_the_cursor_indexes_the_newest_row_each_frame_has_released():
+    """`ctx.cursor[tf]` is the position of the last visible row, per frame.
+
+    The rules grammar reads its series AT the cursor, so one off by a row would
+    evaluate a condition on a bar the schedule had not released, or on the one
+    before the deciding close. Per frame rather than shared, because the two
+    move at different rates: the base frame gains a row at every close and an
+    hourly frame only when its own bar becomes available.
+
+    The numbers are the schedule's own. By 15:00 on the half day, twenty-six
+    intervals of 2026-11-25 and two of 2026-11-27 have closed, so the base
+    cursor is 27; both hourly bars have been released, so the hourly cursor
+    is 1.
+    """
+    dependencies = ReplayDependencies(timeframes=("15m", "1h"), external_symbols=())
+    validated, prepared = prepared_for(base_request(), base_schedule(), dependencies)
+
+    context = build_scheduled_context(
+        prepared, "SPY", ts("2026-11-27T15:00:00Z"), validated, dependencies)
+
+    assert dict(context.cursor) == {"15m": 27, "1h": 1}
+    for timeframe, position in context.cursor.items():
+        assert position == len(context.bars[timeframe]) - 1
+
+
 def test_one_plays_write_cannot_reach_another_plays_prices():
     """Two plays at one close, and the first one writes into its bars.
 

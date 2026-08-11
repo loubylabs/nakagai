@@ -46,6 +46,12 @@ _MAX_JSON_DEPTH = 64
 _RESERVED_KEYS = ("$date", "$float")
 
 REQUEST_VERSION = 1
+# The chronology, the cost model, and the metric formulas are one arithmetic.
+# A request naming another version is refused rather than reported under a
+# label that does not describe how its numbers were reached. It lives here
+# rather than beside the formulas because `ExecutionPolicy` carries it, and a
+# contract's own version belongs with the contract.
+ARITHMETIC_VERSION = "2"
 CANDIDATE_ID_PREFIX = "candidate:"
 REPLAY_ID_PREFIX = "replay:"
 TRADE_ID_PREFIX = "trade:"
@@ -528,20 +534,60 @@ class AccountPolicy:
 
 @dataclass(frozen=True)
 class SlippageSpec:
+    """Per-share slippage as basis points of the reference price, with a floor.
+
+    The policy and the model that applies it are one value. A flat cent is one
+    basis point on a hundred-dollar share and a fifth of one on a five-hundred
+    dollar share, so across a universe with mixed price levels a flat charge
+    makes the stored numbers incomparable. The floor exists because slippage
+    does not shrink to nothing on cheap stock: the spread is still crossed and
+    the tick is still a cent.
+
+    Below the crossover the floor binds and above it the proportional term
+    does, which is what a desk actually sees.
+    """
+
     bps: float
     min_per_share: float
 
     def __post_init__(self) -> None:
         _set_nonnegative(self, "bps", "min_per_share")
 
+    def per_share(self, price: float) -> float:
+        return max(self.min_per_share, abs(price) * self.bps / 10_000.0)
+
+    def buy(self, price: float) -> float:
+        """What entering a long or covering a short prints: you pay more."""
+        return price + self.per_share(price)
+
+    def sell(self, price: float) -> float:
+        """What leaving a long or opening a short prints: you get less."""
+        return price - self.per_share(price)
+
 
 @dataclass(frozen=True)
 class FeeSpec:
+    """Commissions and per-share fees, priced ONE FILL at a time.
+
+    Never a round trip. A model that priced both ends from a single call could
+    only be charged at one of them, so an entry that reserves cash and an exit
+    that credits it had no way to each pay their own fee, and a caller that did
+    charge it twice paid four fills without anything raising.
+    """
+
     per_fill: float
     per_share: float
 
     def __post_init__(self) -> None:
         _set_nonnegative(self, "per_fill", "per_share")
+
+    def charge(self, qty: int) -> float:
+        """What one fill of `qty` shares costs. Entry and exit each pay it.
+
+        The magnitude of the quantity, so a short selling to open pays what a
+        buy of the same size pays and no sign can refund a commission.
+        """
+        return self.per_fill + self.per_share * abs(qty)
 
 
 @dataclass(frozen=True)

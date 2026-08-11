@@ -28,15 +28,6 @@ def _fe(b15, b1h=None, b1d=None):
                       "1d": b1d if b1d is not None else b15}, TFS)
 
 
-def test_icir_no_longer_abstains_on_end_anchored_specs():
-    # The abstention existed because the margin walker broadcast one
-    # end-of-frame float across every row. The primitives are row-wise now, so
-    # the guard is not merely unused, it is wrong: it would hide a real lens.
-    import nakagai.icir as icir
-    assert not hasattr(icir, "_uses_end_anchored")
-    assert not hasattr(icir, "END_ANCHORED_PRIMS")
-
-
 def test_comparison_margin_is_signed_distance():
     b = _bars(np.linspace(100, 120, 40))
     fe = _fe(b)

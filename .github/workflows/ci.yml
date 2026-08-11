@@ -40,7 +40,7 @@ jobs:
           # dependencies alone, which is what a consumer's machine looks like.
           uv build --wheel -o dist/
           uv run --isolated --no-project --with dist/nakagai-*.whl \
-            python -c "import nakagai.engine.engine; import nakagai.strategies.rules; import nakagai.screen.compiler; print('ok')"
+            python -c "from nakagai.engine import run_portfolio; import nakagai.strategies.rules; import nakagai.screen.compiler; print('ok')"
 
   publish:
     name: publish to PyPI

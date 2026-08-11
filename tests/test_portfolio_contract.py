@@ -365,7 +365,40 @@ def test_canonical_bytes_are_stable_across_repeated_calls():
 def test_canonical_floats_keep_every_bit_that_decimal_text_would_lose():
     near = 0.1 + 0.2
     assert canonical_replay_bytes(near) != canonical_replay_bytes(0.3)
-    assert canonical_replay_bytes(-0.0) != canonical_replay_bytes(0.0)
+
+
+def test_a_negative_zero_is_refused_rather_than_folded_onto_a_positive_one():
+    """The encoder stays injective, so the zero is refused before it reaches it.
+
+    `float.hex()` spells a negative zero `-0x0.0p+0`, so a result carrying one
+    would hash differently from the identical result that carried a positive
+    zero: two workers computing the same numbers, reporting different digests,
+    and the disagreement reading as a real divergence.
+
+    Normalizing the two together inside the encoder would fix the digest by
+    breaking the encoder, which exists precisely so that values differing in
+    their last bit differ in their bytes. The refusal therefore sits upstream
+    of the spelling, at the one chokepoint every result crosses on its way to a
+    digest.
+    """
+    with pytest.raises(ReplayInputError) as raised:
+        canonical_replay_bytes(-0.0)
+
+    assert raised.value.code == "negative_zero"
+    assert canonical_replay_bytes(0.0) == b'{"$float":"0x0.0p+0"}'
+
+
+def test_a_negative_zero_is_refused_wherever_it_hides_in_a_result():
+    """Nested, transported, and decoded: the same refusal at every door.
+
+    The chokepoint is worth having only if it covers a value buried inside a
+    result rather than one handed straight to the codec, and only if the
+    transport cannot smuggle one back in.
+    """
+    for value in ({"metrics": {"net_pnl": -0.0}}, (1.0, -0.0), [[-0.0]]):
+        with pytest.raises(ReplayInputError) as raised:
+            canonical_replay_bytes(value)
+        assert raised.value.code == "negative_zero"
 
 
 def test_canonical_integers_and_floats_are_distinguishable():
