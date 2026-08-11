@@ -67,7 +67,8 @@ VACUOUS = "vacuous"
 # a bare FAILED cannot tell this-term-peeks from our-gate-broke. Node 02 lists
 # rejected terms in CI output and classifies them on this field, rather than
 # string-matching a reason written for a human to read.
-CAUSES = ("lookahead", "uncallable", "schema", "unenumerable", "gate_error")
+CAUSES = ("lookahead", "uncallable", "schema", "unenumerable", "mutation",
+          "gate_error")
 
 
 @dataclass(frozen=True)
@@ -170,6 +171,44 @@ def evaluate_term(term: Term, bars: pd.DataFrame, args: dict):
     if isinstance(out, pd.DataFrame):
         out = out[args["field"]]
     return out
+
+
+def _frame_fingerprint(bars: pd.DataFrame) -> tuple:
+    """A cheap summary of the frame that changes when a term writes into it.
+
+    The gate hands a term the caller's own frame, exactly as `frame_eval.py:251`
+    does, and then slices every prefix out of that same object. A term that
+    scribbles on it is compared against its own scribble, so both sides agree and
+    the verdict reads CHECKED. Measured: a bar term writing the next bar's close
+    into `open` came back CHECKED with the frame poisoned.
+
+    Detected rather than defended against. Copying the frame per argument set
+    would hide the defect, and a term that mutates its input is broken whatever
+    else it does; copying would also cost node 02 real time, at 184 argument sets
+    on core alone.
+
+    The columns catch a term that adds, drops or renames one, the shape catches a
+    term that drops rows, and the per-column sums with the NaN count catch a value
+    overwritten in place. One numpy reduction rather than a digest of every byte,
+    because this is recomputed after all 21 calls of every argument set and node
+    02 multiplies that by 100-plus terms: measured at about 19us on the reference
+    frame, so about 0.07s over a whole pass of core.
+
+    Deliberately not a cryptographic digest. Two writes whose sums cancel would
+    slip past. This is a tripwire for a term that scribbles on its input, not a
+    defence against one built to evade the tripwire, and the second is a different
+    problem from the one a causality gate is for.
+    """
+    values = bars.to_numpy()
+    if values.dtype.kind in "fiub":
+        summary = (tuple(np.nansum(values, axis=0).tolist()),
+                   int(np.isnan(values).sum()))
+    else:
+        # A frame carrying a non-numeric column reduces to no meaningful sum, so
+        # hash it instead. Total rather than skipped: a column this function
+        # cannot summarize is a column a term could rewrite unseen.
+        summary = (int(pd.util.hash_pandas_object(bars, index=False).sum()),)
+    return (tuple(bars.columns), values.shape, values.dtype.str, summary)
 
 
 def _is_range_rule(rule) -> bool:
@@ -349,6 +388,18 @@ def verify_term(term: Term, bars: pd.DataFrame) -> TermVerdict:
                            "called",
                            cause="unenumerable")
 
+    # The frame as it was handed over, to compare every call's aftermath against.
+    # Taken once, before anything is called, because a term that has already
+    # written into it would otherwise set the baseline itself.
+    try:
+        untouched = _frame_fingerprint(bars)
+    except Exception as exc:
+        return TermVerdict(
+            term.name, FAILED,
+            f"cannot fingerprint the frame this term was to be checked on: "
+            f"{type(exc).__name__}: {exc}",
+            cause="gate_error")
+
     checked = 0
     for args in every_arg_set:
         try:
@@ -365,6 +416,16 @@ def verify_term(term: Term, bars: pd.DataFrame) -> TermVerdict:
         # been measured escaping as a traceback on a malformed return: the
         # field check, the narrowing, the field lookup and the extraction.
         try:
+            # Asked before anything else is read, because every later comparison
+            # in this argument set is against the frame the term just changed.
+            if _frame_fingerprint(bars) != untouched:
+                return TermVerdict(
+                    term.name, FAILED,
+                    f"args {args}: the whole-frame call wrote into the frame it "
+                    f"was given, so every comparison after it is against a frame "
+                    f"the term itself changed",
+                    checked, "mutation")
+
             mismatch = field_mismatch(term, raw)
             if mismatch is not None:
                 return TermVerdict(term.name, FAILED, f"schema: {mismatch}",
@@ -439,6 +500,16 @@ def verify_term(term: Term, bars: pd.DataFrame) -> TermVerdict:
                         f"args {args} row {i}: evaluating over the prefix raised "
                         f"{type(exc).__name__}: {exc}",
                         checked, "gate_error")
+                # After every call, not only after the first: a term that behaves
+                # on the whole frame and scribbles from inside the probe loop
+                # would walk past a check made once.
+                if _frame_fingerprint(bars) != untouched:
+                    return TermVerdict(
+                        term.name, FAILED,
+                        f"args {args} row {i}: the prefix call wrote into the "
+                        f"frame the gate is checking against, so the rows the "
+                        f"remaining probes read are the term's own work",
+                        checked, "mutation")
                 if not _agrees(want, prefix):
                     return TermVerdict(
                         term.name, FAILED,

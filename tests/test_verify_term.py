@@ -581,6 +581,67 @@ def test_a_term_returning_duplicate_column_names_is_a_verdict(bars):
     assert "TypeError" in verdict.reason
 
 
+def _mutating_bar_peeker(frame, a):
+    """Writes the next bar's close into `open`, then answers out of `open`.
+
+    The write is made once and marked, so every prefix the gate afterwards slices
+    out of the frame it handed over already carries the peek and agrees with it.
+    A term like this is not caught by comparing values, because both sides of the
+    comparison are reading the same poisoned column.
+    """
+    if "_poisoned" not in frame.columns:
+        frame["open"] = frame["close"].shift(-1)
+        frame["_poisoned"] = 1.0
+    return frame["open"]
+
+
+def test_a_term_that_writes_into_the_frame_it_was_given_is_failed(bars):
+    """Measured on the unguarded gate: CHECKED, with `open` holding row i+1's close.
+
+    The gate hands the term the original frame, exactly as frame_eval.py:251
+    does, and then slices every prefix out of that same object. A term that
+    scribbles on it is comparing against its own scribble.
+
+    The frame is copied here because the guard DETECTS the mutation rather than
+    defending against it: the write still lands, and the shared fixture must not
+    carry it into the tests that follow.
+    """
+    scratch = bars.copy()
+    term = Term("mutating_bar_peeker", "bar", {}, {}, _mutating_bar_peeker)
+
+    verdict = verify_term(term, scratch)
+    assert verdict.status == FAILED, "a term that poisons its input is not a pass"
+    assert verdict.cause == "mutation"
+    assert "wrote into the frame" in verdict.reason
+
+    assert "_poisoned" in scratch.columns, "the mutation is detected, not prevented"
+    assert scratch["open"].iloc[100] == bars["close"].iloc[101], (
+        "the counterexample no longer writes the future into the frame")
+
+
+def test_a_term_that_writes_into_the_frame_after_the_first_call_is_caught(bars):
+    """The fingerprint is re-checked after EVERY call, not only the first.
+
+    A term that behaves on the whole-frame call and scribbles from inside the
+    probe loop would walk past a check made once. This one keeps the frame it was
+    first handed and poisons it on the third call.
+    """
+    scratch = bars.copy()
+    seen = []
+
+    def late_mutator(frame, a):
+        seen.append(frame)
+        if len(seen) == 3:
+            seen[0]["open"] = seen[0]["close"].shift(-1)
+        return frame["close"]
+
+    verdict = verify_term(Term("late_mutator", "bar", {}, {}, late_mutator),
+                          scratch)
+    assert verdict.status == FAILED
+    assert verdict.cause == "mutation"
+    assert len(seen) >= 3, "the mutation must happen after the whole-frame call"
+
+
 def test_a_term_whose_schema_disagrees_with_its_columns_is_failed(bars):
     term = Term("under_declared", "frame", {"field": ("a",)}, {"field": "a"},
                 lambda s, a: pd.DataFrame({"a": s, "b": s.shift(-1)}))
