@@ -321,11 +321,24 @@ def arg_sets(term: Term) -> tuple[dict, ...]:
         seen.add(key)
         out.append(candidate)
 
+    # A declared range arg with no default, filled from its low bound.
+    # `vocabulary.py:96-101` checks only that every default names a declared arg,
+    # never the reverse, so a term may declare `n` and default nothing. The
+    # baseline set would then omit it, term.fn would raise KeyError, and the gate
+    # would reject a perfectly causal term as "uncallable" over an argument set
+    # its own schema never sanctioned. Node 02 generates terms from another
+    # library's signatures, where a required parameter with no library default is
+    # ordinary. Choice args need no such filling: the cross product supplies
+    # every one of them. The low bound costs nothing, because it is a mandated
+    # endpoint already and the baseline dedupes against it.
+    supplied = {name: rule[0] for name, rule in ranges.items()
+                if name not in term.defaults}
+
     combos = ((dict(zip(choices, values))
                for values in itertools.product(*choices.values()))
               if choices else iter([{}]))
     for combo in combos:
-        base = {**term.defaults, **combo}
+        base = {**supplied, **term.defaults, **combo}
         add(base)
         for name, rule in ranges.items():
             for value in (rule[0], rule[1]):
@@ -470,7 +483,7 @@ def verify_term(term: Term, bars: pd.DataFrame) -> TermVerdict:
             f"{type(exc).__name__}: {exc}",
             cause="gate_error")
 
-    checked = 0
+    checked, vacuous = 0, None
     for args in every_arg_set:
         try:
             raw = _raw_call(term, bars, args)
@@ -559,17 +572,22 @@ def verify_term(term: Term, bars: pd.DataFrame) -> TermVerdict:
                             checked, "schema")
                     prefix = _value_at(got, -1)
                 except Exception as exc:
-                    # "evaluating raised", not "the term raised": this call goes
-                    # through evaluate_term, which is the gate's own code, so a
-                    # bug in the gate must not read as the term's causality
-                    # failure. The row and the argument set are worth naming
-                    # here, which is why this sits inside the outer guard rather
-                    # than being folded into it.
+                    # "uncallable", the same cause the whole-frame call raising
+                    # gets, and NOT "gate_error". evaluate_term's only work
+                    # beyond _raw_call is a column selection, so an exception on
+                    # this path nearly always comes out of term.fn: a term
+                    # needing more history than a prefix supplies is the ordinary
+                    # case. gate_error means this module broke, and node 02
+                    # classifies rejects on this field, so labelling a term fault
+                    # as a gate fault sends it looking in the wrong repository.
+                    # The row and the argument set are worth naming here, which
+                    # is why this sits inside the outer guard rather than being
+                    # folded into it.
                     return TermVerdict(
                         term.name, FAILED,
-                        f"args {args} row {i}: evaluating over the prefix raised "
+                        f"args {args} row {i}: the prefix call raised "
                         f"{type(exc).__name__}: {exc}",
-                        checked, "gate_error")
+                        checked, "uncallable")
                 # After every call, not only after the first: a term that behaves
                 # on the whole frame and scribbles from inside the probe loop
                 # would walk past a check made once.
@@ -595,13 +613,23 @@ def verify_term(term: Term, bars: pd.DataFrame) -> TermVerdict:
                 checked, "gate_error")
 
         if not saw_a_number:
-            return TermVerdict(
-                term.name, VACUOUS,
-                f"args {args} are NaN at all {len(rows)} probe rows, so agreement "
-                f"proves nothing about this mandated argument set",
-                checked)
+            # Recorded and carried on from, not returned. Returning here exited
+            # the whole loop, so a LATER mandated set that reads the future was
+            # never evaluated: measured, a term vacuous at n=2 and peeking at
+            # n=500 came back VACUOUS naming n=2, and that reason points the
+            # operator at the fixture, which is the one place the answer is not.
+            # FAILED outranks VACUOUS, so the peek has to be looked for first.
+            if vacuous is None:
+                vacuous = args
+            continue
         checked += 1
 
+    if vacuous is not None:
+        return TermVerdict(
+            term.name, VACUOUS,
+            f"args {vacuous} are NaN at all {len(rows)} probe rows, so agreement "
+            f"proves nothing about this mandated argument set",
+            checked)
     return TermVerdict(term.name, CHECKED, "", checked)
 
 

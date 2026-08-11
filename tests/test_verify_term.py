@@ -346,6 +346,28 @@ def test_a_pair_of_booleans_is_still_refused_rather_than_read_as_1_to_0():
             arg_sets(term)
 
 
+def test_a_declared_argument_with_no_default_is_supplied_not_left_out(bars):
+    """The gate must not reject a term over an argument set its schema never sanctioned.
+
+    `vocabulary.py:96-101` checks only that every default names a declared arg,
+    never the reverse, so a term may declare `n` and default nothing. The
+    baseline set was `{**term.defaults, **combo}`, which then omits `n` entirely.
+    Measured: arg_sets returned ({}, {'n': 2}, {'n': 500}) and verify_term
+    answered FAILED with cause "uncallable" and reason "args {}: whole-frame call
+    raised 'n'", which is a fault the gate created.
+
+    Filling from the low bound costs nothing: that value is a mandated endpoint
+    already, so the baseline set dedupes against it rather than adding a set.
+    """
+    term = Term("no_default", "series", {"n": (2, 500)}, {},
+                lambda s, a: s.rolling(a["n"]).mean())
+
+    sets = arg_sets(term)
+    assert all("n" in s for s in sets), sets
+    assert {s["n"] for s in sets} == {2, 500}
+    assert verify_term(term, bars).status == CHECKED
+
+
 def test_no_core_term_exceeds_the_argument_set_cap():
     """Headroom, asserted explicitly, because arg_sets polices the cap itself.
 
@@ -819,6 +841,59 @@ def test_a_verdict_that_is_not_a_failure_carries_no_cause(bars):
                                lambda s, a: pd.Series(float("nan"), index=s.index)),
                           bars)
     assert vacuous.status == VACUOUS and vacuous.cause == ""
+
+
+def _vacuous_at_2_peeking_at_500(s, a):
+    if a["n"] == 2:
+        return pd.Series(float("nan"), index=s.index)
+    if a["n"] == 500:
+        return s.shift(-1)
+    return s
+
+
+def test_an_earlier_vacuous_argument_set_does_not_hide_a_later_peeking_one(bars):
+    """Every mandated set is evaluated, and FAILED outranks VACUOUS.
+
+    Measured: with the sets enumerated as ({'n': 20}, {'n': 2}, {'n': 500}), the
+    return on the first vacuous set exited the whole loop, so the look-ahead in
+    the n=500 set was never reached. The verdict read VACUOUS naming n=2, and
+    that reason points the operator at the fixture, which is the one place the
+    answer is not.
+    """
+    term = Term("vacuous_then_peeking", "series", {"n": (2, 500)}, {"n": 20},
+                _vacuous_at_2_peeking_at_500)
+    assert [s["n"] for s in arg_sets(term)] == [20, 2, 500], (
+        "the ordering this test is about has changed")
+
+    verdict = verify_term(term, bars)
+    assert verdict.status == FAILED, f"the peek outranks the vacuity: {verdict}"
+    assert verdict.cause == "lookahead"
+    assert "500" in verdict.reason
+
+
+def test_a_term_that_raises_only_over_a_prefix_is_uncallable_not_a_gate_error(bars):
+    """cause "gate_error" means THIS module broke, and node 02 classifies on it.
+
+    `evaluate_term`'s only work beyond `_raw_call` is a column selection, so an
+    exception on that path nearly always comes out of `term.fn`. Labelling it
+    gate_error tells node 02 its gate is broken when what happened is that a
+    batch of generated terms needs more history than a prefix supplies, which is
+    what "uncallable" already means and what the same exception on the whole
+    frame is labelled.
+
+    Measured: cause was "gate_error".
+    """
+    def needs_the_whole_frame(s, a):
+        if len(s) < 4000:
+            raise ValueError("needs 4000 bars")
+        return s
+
+    verdict = verify_term(
+        Term("short_raiser", "series", {}, {}, needs_the_whole_frame), bars)
+    assert verdict.status == FAILED
+    assert verdict.cause == "uncallable", (
+        f"the term raised, not the gate: {verdict.reason}")
+    assert "needs 4000 bars" in verdict.reason
 
 
 def test_a_rejection_reports_how_many_argument_sets_already_passed(bars):
