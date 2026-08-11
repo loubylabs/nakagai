@@ -116,7 +116,11 @@ def _frozen_json_value(value: object, *, field: str, depth: int) -> JSONValue:
         raise _fail("canonical_value_too_deep", "value nests too deeply", field=field)
     if isinstance(value, Enum):
         value = value.value
-    if value is None or isinstance(value, (bool, str, int)):
+    if value is None or isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return _require_encodable(value, field)
+    if isinstance(value, int):
         return value
     if isinstance(value, float):
         if not math.isfinite(value):
@@ -129,6 +133,7 @@ def _frozen_json_value(value: object, *, field: str, depth: int) -> JSONValue:
                 key = key.value
             if not isinstance(key, str) or isinstance(key, bool):
                 raise _fail("invalid_type", "JSON object keys must be strings", field=field)
+            _require_encodable(key, field)
             if key in _RESERVED_KEYS:
                 raise _fail(
                     "reserved_canonical_key", "the codec reserves this key",
@@ -155,6 +160,24 @@ def _frozen_json_value(value: object, *, field: str, depth: int) -> JSONValue:
 def _require_str(value: object, field: str) -> str:
     if not isinstance(value, str) or isinstance(value, Enum):
         raise _fail("invalid_type", "value must be a string", field=field)
+    return _require_encodable(value, field)
+
+
+def _require_encodable(value: str, field: str) -> str:
+    """Text that survives UTF-8, which a Python string does not guarantee.
+
+    A lone surrogate such as `"\\ud800"` is a legal JSON escape, so
+    `json.loads` produces one and it travels a worker transport intact. It has
+    no UTF-8 encoding, so it would reach `canonical_replay_bytes` and raise an
+    untyped `UnicodeEncodeError` out of the closed taxonomy. Refuse it at every
+    door instead.
+    """
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        raise _fail(
+            "invalid_value", "value is not encodable as UTF-8 text", field=field,
+        ) from None
     return value
 
 
@@ -922,7 +945,10 @@ class PortfolioSlice:
         _set_nonnegative(self, "gross_profit", "gross_loss", "fees")
         _set_binary64(self, "pre_cost_pnl", "net_pnl")
         _set_optional_binary64(self, "win_rate", "expectancy_r")
-        _require_cohort_nullability(self.trades, self.win_rate, self.expectancy_r)
+        _require_cohort_nullability(
+            self.trades, self.win_rate, self.expectancy_r,
+            self.gross_profit, self.gross_loss,
+        )
         _set(self, "ic", _canonical_ic(self.ic))
 
 
@@ -952,12 +978,18 @@ def _canonical_ic(value: object) -> tuple[IcEstimate, ...]:
 
 def _require_cohort_nullability(
     trades: int, win_rate: float | None, expectancy_r: float | None,
+    gross_profit: float, gross_loss: float,
 ) -> None:
-    """No trades means no rate and no expectancy, and any trade means both."""
+    """An empty cohort reports no rate, no expectancy, and two zero sums."""
     if trades == 0 and (win_rate is not None or expectancy_r is not None):
         raise _fail(
             "invalid_value", "an empty cohort reports no rate and no expectancy",
             field="win_rate",
+        )
+    if trades == 0 and (gross_profit != 0.0 or gross_loss != 0.0):
+        raise _fail(
+            "invalid_value", "an empty cohort sums no profit and no loss",
+            field="gross_profit",
         )
     if trades > 0 and (win_rate is None or expectancy_r is None):
         raise _fail(
@@ -998,7 +1030,10 @@ class TradeStats:
         ))
         if self.n_wins > self.n_trades:
             raise _fail("invalid_value", "wins cannot exceed trades", field="n_wins")
-        _require_cohort_nullability(self.n_trades, self.win_rate, self.expectancy_r)
+        _require_cohort_nullability(
+            self.n_trades, self.win_rate, self.expectancy_r,
+            self.gross_profit, self.gross_loss,
+        )
         if self.gross_loss > 0.0:
             expected = "finite"
         elif self.gross_profit > 0.0:

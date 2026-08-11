@@ -58,8 +58,15 @@ DEFINITION_BASE_B = "3b" * 32
 CALENDAR_VERSION = "exchange_calendars:4.5.6:nakagai-rth-v1"
 PLACEHOLDER_DIGEST = "0" * 64
 
-SESSION_ONE = date(2026, 8, 10)
-SESSION_TWO = date(2026, 8, 11)
+# Two real XNYS sessions around Thanksgiving 2026, chosen so the fixture is a
+# correct example for the ten tasks that build on it. 2026-11-26 is the
+# holiday and is simply absent, 2026-11-27 is the 13:00 Eastern early close,
+# and both dates are EST, so a full session is 14:30Z to 21:00Z and the half
+# day is 14:30Z to 18:00Z.
+SESSION_ONE = date(2026, 11, 25)
+SESSION_TWO = date(2026, 11, 27)
+SESSION_ONE_INTERVALS = 26
+SESSION_TWO_INTERVALS = 14
 
 PLAY_A_PARAMS = {"fast_n": 10, "slow_n": 30, "allow_short": False}
 PLAY_B_PARAMS = {"lookback": 20, "labels": ("z", "a"), "nested": {"z": 1.5, "a": None}}
@@ -71,11 +78,12 @@ def ts(text: str) -> pd.Timestamp:
 
 
 def base_window() -> ReplayWindow:
+    """Warm up on the full session, trade the half day that follows it."""
     return ReplayWindow(
-        train_start=ts("2026-08-10T13:30:00Z"),
-        train_end=ts("2026-08-11T13:30:00Z"),
-        test_start=ts("2026-08-11T13:30:00Z"),
-        test_end=ts("2026-08-11T20:00:00Z"),
+        train_start=ts("2026-11-25T14:30:00Z"),
+        train_end=ts("2026-11-27T14:30:00Z"),
+        test_start=ts("2026-11-27T14:30:00Z"),
+        test_end=ts("2026-11-27T18:00:00Z"),
     )
 
 
@@ -90,11 +98,15 @@ def base_identity(digest: str = PLACEHOLDER_DIGEST) -> ExchangeScheduleIdentity:
 
 
 def base_intervals() -> tuple[ScheduledBaseInterval, ...]:
-    """Two full regular sessions of 26 fifteen-minute intervals each."""
+    """One full session and one early close, with the holiday between absent."""
     built = []
-    for session, day in ((SESSION_ONE, "2026-08-10"), (SESSION_TWO, "2026-08-11")):
-        for ordinal in range(26):
-            open_ts = ts(f"{day}T13:30:00Z") + pd.Timedelta(minutes=15 * ordinal)
+    for session, count in (
+        (SESSION_ONE, SESSION_ONE_INTERVALS), (SESSION_TWO, SESSION_TWO_INTERVALS),
+    ):
+        for ordinal in range(count):
+            open_ts = ts(f"{session.isoformat()}T14:30:00Z") + pd.Timedelta(
+                minutes=15 * ordinal,
+            )
             built.append(ScheduledBaseInterval(
                 session_date=session,
                 interval_ordinal=ordinal,
@@ -107,53 +119,51 @@ def base_intervals() -> tuple[ScheduledBaseInterval, ...]:
 def base_context_bars() -> tuple[ScheduledContextBar, ...]:
     """One bar of every supported timeframe and source, ordered canonically.
 
-    The final daily bar has no freshness because no later session closes
-    inside this schedule, which is the nullable case the codec has to carry.
+    Each row follows the label semantics the architecture freezes. The hourly
+    bars use their cached UTC left edge and become fresh at the base close that
+    lands on their period end. The four-hour bar is the Eastern noon bucket of
+    the early close: it runs to 16:00 Eastern, which is three hours after the
+    half day ends, so no scheduled base close falls inside its freshness
+    window and it carries no `fresh_context_at`. The daily bar is available at
+    the next scheduled session open and fresh at that session's first base
+    close, which is why the final session has no daily bar at all: nothing
+    later in this schedule could make one available.
     """
     return (
         ScheduledContextBar(
             timeframe="1h", session_date=SESSION_ONE,
-            label_ts=ts("2026-08-10T13:00:00Z"),
-            period_start=ts("2026-08-10T13:00:00Z"),
-            period_end=ts("2026-08-10T14:00:00Z"),
-            available_at=ts("2026-08-10T14:00:00Z"),
-            fresh_context_at=ts("2026-08-10T14:00:00Z"),
+            label_ts=ts("2026-11-25T14:00:00Z"),
+            period_start=ts("2026-11-25T14:00:00Z"),
+            period_end=ts("2026-11-25T15:00:00Z"),
+            available_at=ts("2026-11-25T15:00:00Z"),
+            fresh_context_at=ts("2026-11-25T15:00:00Z"),
             source="fetched_left_edge",
         ),
         ScheduledContextBar(
             timeframe="1h", session_date=SESSION_TWO,
-            label_ts=ts("2026-08-11T13:00:00Z"),
-            period_start=ts("2026-08-11T13:00:00Z"),
-            period_end=ts("2026-08-11T14:00:00Z"),
-            available_at=ts("2026-08-11T14:00:00Z"),
-            fresh_context_at=ts("2026-08-11T14:00:00Z"),
+            label_ts=ts("2026-11-27T14:00:00Z"),
+            period_start=ts("2026-11-27T14:00:00Z"),
+            period_end=ts("2026-11-27T15:00:00Z"),
+            available_at=ts("2026-11-27T15:00:00Z"),
+            fresh_context_at=ts("2026-11-27T15:00:00Z"),
             source="fetched_left_edge",
         ),
         ScheduledContextBar(
             timeframe="4h", session_date=SESSION_TWO,
-            label_ts=ts("2026-08-11T16:00:00Z"),
-            period_start=ts("2026-08-11T16:00:00Z"),
-            period_end=ts("2026-08-11T20:00:00Z"),
-            available_at=ts("2026-08-11T20:00:00Z"),
-            fresh_context_at=ts("2026-08-11T20:00:00Z"),
+            label_ts=ts("2026-11-27T17:00:00Z"),
+            period_start=ts("2026-11-27T17:00:00Z"),
+            period_end=ts("2026-11-27T21:00:00Z"),
+            available_at=ts("2026-11-27T21:00:00Z"),
+            fresh_context_at=None,
             source="derived_1h_et_midnight",
         ),
         ScheduledContextBar(
             timeframe="1d", session_date=SESSION_ONE,
-            label_ts=ts("2026-08-10T04:00:00Z"),
-            period_start=ts("2026-08-10T13:30:00Z"),
-            period_end=ts("2026-08-10T20:00:00Z"),
-            available_at=ts("2026-08-11T13:30:00Z"),
-            fresh_context_at=ts("2026-08-11T13:45:00Z"),
-            source="session_aligned",
-        ),
-        ScheduledContextBar(
-            timeframe="1d", session_date=SESSION_TWO,
-            label_ts=ts("2026-08-11T04:00:00Z"),
-            period_start=ts("2026-08-11T13:30:00Z"),
-            period_end=ts("2026-08-11T20:00:00Z"),
-            available_at=ts("2026-08-11T20:00:00Z"),
-            fresh_context_at=None,
+            label_ts=ts("2026-11-25T05:00:00Z"),
+            period_start=ts("2026-11-25T14:30:00Z"),
+            period_end=ts("2026-11-25T21:00:00Z"),
+            available_at=ts("2026-11-27T14:30:00Z"),
+            fresh_context_at=ts("2026-11-27T14:45:00Z"),
             source="session_aligned",
         ),
     )
@@ -237,7 +247,7 @@ def base_request(**overrides) -> PortfolioReplayRequest:
         window=base_window(),
         schedule_identity=base_schedule().identity,
         ic_horizons=(1, 5, 20),
-        ic_tail_end=ts("2026-08-11T20:00:00Z"),
+        ic_tail_end=ts("2026-11-27T18:00:00Z"),
         account=base_account(),
         execution=base_execution(),
         benchmark=base_benchmark(),
@@ -259,10 +269,10 @@ def base_trade(request: PortfolioReplayRequest) -> PortfolioTrade:
         signal_ordinal=0,
         direction="long",
         qty=12,
-        signal_ts=ts("2026-08-11T14:00:00Z"),
-        entry_ts=ts("2026-08-11T14:00:00Z"),
+        signal_ts=ts("2026-11-27T15:00:00Z"),
+        entry_ts=ts("2026-11-27T15:00:00Z"),
         entry=100.5,
-        exit_ts=ts("2026-08-11T15:00:00Z"),
+        exit_ts=ts("2026-11-27T16:00:00Z"),
         exit=103.0,
         initial_stop=98.0,
         final_stop=99.5,
@@ -290,8 +300,8 @@ def base_rejection(request: PortfolioReplayRequest) -> ReplayRejection:
         strategy="donchian_break",
         symbol="QQQ",
         signal_ordinal=1,
-        signal_ts=ts("2026-08-11T14:00:00Z"),
-        event_ts=ts("2026-08-11T14:15:00Z"),
+        signal_ts=ts("2026-11-27T15:00:00Z"),
+        event_ts=ts("2026-11-27T15:15:00Z"),
         reason=RejectionReason.UNSETTLED_CASH,
         required_cash=1_212.0,
         available_cash=980.25,

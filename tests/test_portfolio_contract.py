@@ -64,6 +64,8 @@ from nakagai.engine.portfolio_types import (
     ScheduledBaseInterval,
     ScheduledContextBar,
     SlippageSpec,
+    StrategyOutputError,
+    StrategyRuntimeError,
     TradeStats,
 )
 from nakagai.strategies.base import Direction, Signal
@@ -88,19 +90,19 @@ CANDIDATE_GOLDEN = (
     "candidate:713c60c014a9506a8c7ecb7b8fa61e746192abc68f2b3747eaf23785efc89100"
 )
 REPLAY_GOLDEN = (
-    "replay:9a46d76a25e3365610f2d6991af425b2f797d549bfd3971831b64cf1d2d1d880"
+    "replay:5d4bc974357618a640b90ca8ef1f74d3d19871283d38240af7885f2892562595"
 )
 TRADE_GOLDEN = (
-    "trade:2dbbed2ef2c6cd82021c24c30c7f9a8bf35d1a3bec2c450eeb7c0eb99ac758cf"
+    "trade:1b2511d285e8c23d88289f6c17b198e9f400c0c3891febfde77c84ac6e8947f2"
 )
 REJECTION_GOLDEN = (
-    "rejection:0c91d77309ec363bc3285ccf4fa34c945ef89af18ad6211efce9bbd64ec0d3ab"
+    "rejection:3b96ef68973c6ef597935f8660a7ca363e5896d245c29dbe1ab3b6992889dfbb"
 )
 SCHEDULE_DIGEST_GOLDEN = (
-    "2089754cf3c357cd6b2ced5c3f3dbe9513c337d1c23e8c3bb6203df7638707b8"
+    "6a3a37dc10d6ba92955e7a840d2a4e5aa58a750b1164d3ef4bd432ce69d51c21"
 )
 RESULT_DIGEST_GOLDEN = (
-    "b8139f0d6c04810077262d510b91fcf60804754aa825485a180ad3f4db35cf22"
+    "d0e90f1dd5ffd1f4cbdff74878e27a9aad96afb065d01f22989ceda5ce547e1f"
 )
 
 EMPTY = inspect.Parameter.empty
@@ -407,6 +409,9 @@ CODEC_REFUSALS = {
     "duplicate_normalized_key": {_AliasKey.UNSETTLED_CASH: 1, "unsettled_cash": 2},
     "generator": (item for item in (1, 2)),
     "dataclass_instance": base_window(),
+    "lone_surrogate": "\ud800",
+    "lone_surrogate_in_object": {"note": "bad \udfff text"},
+    "lone_surrogate_key": {"\ud800": 1},
 }
 
 
@@ -414,6 +419,25 @@ CODEC_REFUSALS = {
 def test_canonical_codec_refuses_uncanonical_input(value):
     with pytest.raises(ReplayInputError):
         canonical_replay_bytes(value)
+
+
+def test_a_lone_surrogate_stays_inside_the_closed_taxonomy():
+    """`json.loads` produces one, and it has no UTF-8 encoding.
+
+    Every door has to refuse it: an untyped `UnicodeEncodeError` out of the
+    hasher would bypass the code platform branches on.
+    """
+    surrogate = json.loads('"\\ud800"')
+    with pytest.raises(ReplayInputError) as raised:
+        canonical_replay_bytes({"note": surrogate})
+    assert raised.value.code == "invalid_value"
+    with pytest.raises(ReplayInputError):
+        dataclasses.replace(base_plays()[0], strategy=surrogate)
+    with pytest.raises(ReplayInputError):
+        dataclasses.replace(base_plays()[0], params={"note": surrogate})
+    encoded = {**encode_replay_request(base_request()), "registry_digest": surrogate}
+    with pytest.raises(ReplayInputError):
+        decode_replay_request(encoded)
 
 
 def test_canonical_codec_refuses_unbounded_nesting():
@@ -453,13 +477,26 @@ def test_public_helper_signatures_match_the_contract(target):
     assert _signature(target) == PUBLIC_SIGNATURES[target]
 
 
-def test_replay_input_error_takes_a_required_code_message_and_details():
-    parameters = tuple(inspect.signature(ReplayInputError).parameters.values())
+REPLAY_ERRORS = {
+    ReplayInputError: ValueError,
+    StrategyOutputError: ValueError,
+    StrategyRuntimeError: RuntimeError,
+}
+
+
+@pytest.mark.parametrize("error", REPLAY_ERRORS, ids=lambda error: error.__name__)
+def test_replay_errors_take_a_required_code_message_and_details(error):
+    parameters = tuple(inspect.signature(error).parameters.values())
     assert tuple((p.name, p.annotation, p.default) for p in parameters) == (
         ("code", str, EMPTY),
         ("message", str, EMPTY),
         ("details", Mapping[str, JSONValue], EMPTY),
     )
+    assert issubclass(error, REPLAY_ERRORS[error])
+    raised = error("some_code", "some message", {"field": "risk_pct"})
+    assert (raised.code, raised.message) == ("some_code", "some message")
+    assert raised.details == {"field": "risk_pct"}
+    assert str(raised) == "some message"
 
 
 def test_replay_input_error_copies_and_freezes_its_details():
@@ -531,10 +568,10 @@ REQUEST_REFUSALS = {
     "boolean_request_version": {"request_version": True},
     "wrong_ic_horizons": {"ic_horizons": (1, 5, 10)},
     "short_ic_horizons": {"ic_horizons": (1, 5)},
-    "tail_before_test_end": {"ic_tail_end": ts("2026-08-11T19:45:00Z")},
-    "naive_tail": {"ic_tail_end": pd.Timestamp("2026-08-11T20:00:00")},
-    "sub_microsecond_tail": {"ic_tail_end": pd.Timestamp("2026-08-11T20:00:00.000000001Z")},
-    "date_for_timestamp": {"ic_tail_end": date(2026, 8, 11)},
+    "tail_before_test_end": {"ic_tail_end": ts("2026-11-27T17:45:00Z")},
+    "naive_tail": {"ic_tail_end": pd.Timestamp("2026-11-27T18:00:00")},
+    "sub_microsecond_tail": {"ic_tail_end": pd.Timestamp("2026-11-27T18:00:00.000000001Z")},
+    "date_for_timestamp": {"ic_tail_end": date(2026, 11, 27)},
     "short_registry_digest": {"registry_digest": "1f" * 31},
     "uppercase_registry_digest": {"registry_digest": "1F" * 32},
 }
@@ -594,11 +631,11 @@ def test_request_refuses_malformed_identifiers(override):
 
 
 WINDOW_REFUSALS = {
-    "train_after_test": {"train_start": ts("2026-08-11T13:45:00Z")},
-    "empty_train": {"train_start": ts("2026-08-11T13:30:00Z")},
-    "gap_between_train_and_test": {"train_end": ts("2026-08-11T13:15:00Z")},
-    "empty_test": {"test_end": ts("2026-08-11T13:30:00Z")},
-    "reversed_test": {"test_end": ts("2026-08-11T13:15:00Z")},
+    "train_after_test": {"train_start": ts("2026-11-27T14:45:00Z")},
+    "empty_train": {"train_start": ts("2026-11-27T14:30:00Z")},
+    "gap_between_train_and_test": {"train_end": ts("2026-11-27T14:15:00Z")},
+    "empty_test": {"test_end": ts("2026-11-27T14:30:00Z")},
+    "reversed_test": {"test_end": ts("2026-11-27T14:15:00Z")},
 }
 
 
@@ -689,6 +726,20 @@ def test_trade_stats_state_follows_its_gross_sums():
     assert finite.profit_factor == 2.0
 
 
+def test_an_empty_cohort_reports_no_rate_no_expectancy_and_two_zero_sums():
+    empty = base_metrics().short_trades
+    assert empty.n_trades == 0
+    for override in (
+        {"gross_profit": 5.0}, {"gross_loss": 5.0},
+        {"win_rate": 0.0}, {"expectancy_r": 0.0},
+    ):
+        with pytest.raises(ReplayInputError):
+            dataclasses.replace(empty, **override)
+    quiet_slice = next(row for row in base_result().slices if row.trades == 0)
+    with pytest.raises(ReplayInputError):
+        dataclasses.replace(quiet_slice, gross_profit=5.0)
+
+
 def test_metrics_refuse_pooled_statistics_below_sixty_daily_returns():
     metrics = base_metrics()
     assert metrics.daily_n < 60
@@ -756,18 +807,23 @@ def test_identifiers_carry_their_prefix_and_a_lowercase_sha256():
 
 
 def test_the_request_carries_the_identities_its_own_formulas_produce():
+    """Pinned constants, because the fixture derives both from these formulas.
+
+    Comparing the request against the same functions that filled it would
+    compare each function with itself and could never fail.
+    """
     request = base_request()
-    assert request.candidate_id == expected_candidate_id(request)
-    assert request.replay_id == expected_replay_id(request)
+    assert request.candidate_id == CANDIDATE_GOLDEN
+    assert request.replay_id == REPLAY_GOLDEN
 
 
 CANDIDATE_INVARIANT = {
     "batch_id": {"batch_id": "0198b1c2-3d4e-7f80-8123-000000000000"},
     "window": {"window": dataclasses.replace(
-        base_window(), train_start=ts("2026-08-10T13:45:00Z"),
+        base_window(), train_start=ts("2026-11-25T14:45:00Z"),
     )},
     "schedule_digest": {"schedule_identity": base_identity("9c" * 32)},
-    "ic_tail_end": {"ic_tail_end": ts("2026-08-11T20:15:00Z")},
+    "ic_tail_end": {"ic_tail_end": ts("2026-11-27T18:15:00Z")},
 }
 
 
@@ -961,10 +1017,13 @@ def test_result_round_trips_through_strict_json():
 
 def test_transport_encodes_dates_timestamps_enums_and_nulls_as_strict_json():
     encoded = encode_replay_schedule(base_schedule())
-    assert encoded["base_intervals"][0]["session_date"] == "2026-08-10"
-    assert encoded["base_intervals"][0]["open_ts"] == "2026-08-10T13:30:00.000000Z"
-    assert encoded["context_bars"][-1]["fresh_context_at"] is None
+    assert encoded["base_intervals"][0]["session_date"] == "2026-11-25"
+    assert encoded["base_intervals"][0]["open_ts"] == "2026-11-25T14:30:00.000000Z"
+    half_day_bucket = encoded["context_bars"][2]
+    assert half_day_bucket["timeframe"] == "4h"
+    assert half_day_bucket["fresh_context_at"] is None
     assert encoded["context_bars"][-1]["source"] == "session_aligned"
+    assert encoded["context_bars"][-1]["fresh_context_at"] == "2026-11-27T14:45:00.000000Z"
     trade = encode_replay_result(base_result())["trades"][0]
     assert trade["exit_reason"] == "target"
     assert trade["setup_tags"] == ["trend", "pullback"]
@@ -992,9 +1051,9 @@ def test_transport_decoding_refuses_unknown_and_missing_keys():
 
 
 TRANSPORT_REFUSALS = {
-    "offset_timestamp_text": {"ic_tail_end": "2026-08-11T16:00:00.000000-04:00"},
-    "second_precision_text": {"ic_tail_end": "2026-08-11T20:00:00Z"},
-    "nanosecond_text": {"ic_tail_end": "2026-08-11T20:00:00.000000001Z"},
+    "offset_timestamp_text": {"ic_tail_end": "2026-11-27T13:00:00.000000-05:00"},
+    "second_precision_text": {"ic_tail_end": "2026-11-27T18:00:00Z"},
+    "nanosecond_text": {"ic_tail_end": "2026-11-27T18:00:00.000000001Z"},
     "epoch_number": {"ic_tail_end": 1786809600},
     "float_for_int": {"request_version": 1.0},
     "string_for_int": {"request_version": "1"},

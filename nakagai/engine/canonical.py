@@ -50,6 +50,7 @@ from nakagai.engine.portfolio_types import (
     _fail,
     _MAX_JSON_DEPTH,
     _require_digest,
+    _require_encodable,
     _require_enum,
     _require_instance,
     _require_name,
@@ -89,7 +90,7 @@ def _canonical_value(value: object, *, path: str, depth: int = 0) -> object:
     if isinstance(value, Enum):
         return _enum_text(value, path)
     if isinstance(value, str):
-        return value
+        return _require_encodable(value, path)
     if isinstance(value, int):
         return value
     if isinstance(value, float):
@@ -137,7 +138,7 @@ def _canonical_key(key: object, path: str) -> str:
             "reserved_canonical_key", "the codec reserves this key for tagged scalars",
             field=path, key=key,
         )
-    return key
+    return _require_encodable(key, path)
 
 
 def _enum_text(value: Enum, path: str) -> str:
@@ -492,7 +493,7 @@ def _decode_int(value: object, path: str) -> int:
 def _decode_text(value: object, path: str) -> str:
     if not isinstance(value, str):
         raise _fail("invalid_type", "value must be a JSON string", field=path)
-    return value
+    return _require_encodable(value, path)
 
 
 def _decode_literal(value: object, path: str, allowed: tuple) -> object:
