@@ -1,0 +1,403 @@
+"""Shared builders for the portfolio replay tests.
+
+Every builder returns a complete, contract-valid value. A test that needs an
+invalid value asks for the valid one and replaces exactly the field under
+test, so one failure names one cause. Parent identities are derived here the
+way platform derives them: build the draft, ask core for the candidate
+identity, then ask core for the replay identity.
+
+Later Phase 1 tasks extend this module with bars, registries, and a replay
+helper. It stays a thin assembler over the real core values and never grows a
+second replay implementation.
+"""
+
+import dataclasses
+from datetime import date
+
+import pandas as pd
+
+from nakagai.engine.canonical import (
+    definition_digest,
+    expected_candidate_id,
+    expected_replay_id,
+    rejection_id,
+    result_digest,
+    schedule_digest,
+    trade_id,
+)
+from nakagai.engine.portfolio_types import (
+    AccountPolicy,
+    BenchmarkResult,
+    BenchmarkSpec,
+    EquityPoint,
+    ExchangeScheduleIdentity,
+    ExecutionPolicy,
+    ExitReason,
+    FeeSpec,
+    IcEstimate,
+    PlayRequest,
+    PortfolioMetrics,
+    PortfolioReplayRequest,
+    PortfolioReplayResult,
+    PortfolioSlice,
+    PortfolioTrade,
+    RejectionReason,
+    ReplayRejection,
+    ReplaySchedule,
+    ReplayWindow,
+    ScheduledBaseInterval,
+    ScheduledContextBar,
+    SlippageSpec,
+    TradeStats,
+)
+
+BATCH_ID = "0198b1c2-3d4e-7f80-8123-456789abcdef"
+REGISTRY_DIGEST = "1f" * 32
+DEFINITION_BASE_A = "2a" * 32
+DEFINITION_BASE_B = "3b" * 32
+CALENDAR_VERSION = "exchange_calendars:4.5.6:nakagai-rth-v1"
+PLACEHOLDER_DIGEST = "0" * 64
+
+SESSION_ONE = date(2026, 8, 10)
+SESSION_TWO = date(2026, 8, 11)
+
+PLAY_A_PARAMS = {"fast_n": 10, "slow_n": 30, "allow_short": False}
+PLAY_B_PARAMS = {"lookback": 20, "labels": ("z", "a"), "nested": {"z": 1.5, "a": None}}
+
+
+def ts(text: str) -> pd.Timestamp:
+    """One timestamp literal, so every fixture timestamp reads the same way."""
+    return pd.Timestamp(text)
+
+
+def base_window() -> ReplayWindow:
+    return ReplayWindow(
+        train_start=ts("2026-08-10T13:30:00Z"),
+        train_end=ts("2026-08-11T13:30:00Z"),
+        test_start=ts("2026-08-11T13:30:00Z"),
+        test_end=ts("2026-08-11T20:00:00Z"),
+    )
+
+
+def base_identity(digest: str = PLACEHOLDER_DIGEST) -> ExchangeScheduleIdentity:
+    return ExchangeScheduleIdentity(
+        calendar_id="XNYS",
+        calendar_version=CALENDAR_VERSION,
+        schedule_digest=digest,
+        timezone="America/New_York",
+        base_timeframe="15m",
+    )
+
+
+def base_intervals() -> tuple[ScheduledBaseInterval, ...]:
+    """Two full regular sessions of 26 fifteen-minute intervals each."""
+    built = []
+    for session, day in ((SESSION_ONE, "2026-08-10"), (SESSION_TWO, "2026-08-11")):
+        for ordinal in range(26):
+            open_ts = ts(f"{day}T13:30:00Z") + pd.Timedelta(minutes=15 * ordinal)
+            built.append(ScheduledBaseInterval(
+                session_date=session,
+                interval_ordinal=ordinal,
+                open_ts=open_ts,
+                close_ts=open_ts + pd.Timedelta(minutes=15),
+            ))
+    return tuple(built)
+
+
+def base_context_bars() -> tuple[ScheduledContextBar, ...]:
+    """One bar of every supported timeframe and source, ordered canonically.
+
+    The final daily bar has no freshness because no later session closes
+    inside this schedule, which is the nullable case the codec has to carry.
+    """
+    return (
+        ScheduledContextBar(
+            timeframe="1h", session_date=SESSION_ONE,
+            label_ts=ts("2026-08-10T13:00:00Z"),
+            period_start=ts("2026-08-10T13:00:00Z"),
+            period_end=ts("2026-08-10T14:00:00Z"),
+            available_at=ts("2026-08-10T14:00:00Z"),
+            fresh_context_at=ts("2026-08-10T14:00:00Z"),
+            source="fetched_left_edge",
+        ),
+        ScheduledContextBar(
+            timeframe="1h", session_date=SESSION_TWO,
+            label_ts=ts("2026-08-11T13:00:00Z"),
+            period_start=ts("2026-08-11T13:00:00Z"),
+            period_end=ts("2026-08-11T14:00:00Z"),
+            available_at=ts("2026-08-11T14:00:00Z"),
+            fresh_context_at=ts("2026-08-11T14:00:00Z"),
+            source="fetched_left_edge",
+        ),
+        ScheduledContextBar(
+            timeframe="4h", session_date=SESSION_TWO,
+            label_ts=ts("2026-08-11T16:00:00Z"),
+            period_start=ts("2026-08-11T16:00:00Z"),
+            period_end=ts("2026-08-11T20:00:00Z"),
+            available_at=ts("2026-08-11T20:00:00Z"),
+            fresh_context_at=ts("2026-08-11T20:00:00Z"),
+            source="derived_1h_et_midnight",
+        ),
+        ScheduledContextBar(
+            timeframe="1d", session_date=SESSION_ONE,
+            label_ts=ts("2026-08-10T04:00:00Z"),
+            period_start=ts("2026-08-10T13:30:00Z"),
+            period_end=ts("2026-08-10T20:00:00Z"),
+            available_at=ts("2026-08-11T13:30:00Z"),
+            fresh_context_at=ts("2026-08-11T13:45:00Z"),
+            source="session_aligned",
+        ),
+        ScheduledContextBar(
+            timeframe="1d", session_date=SESSION_TWO,
+            label_ts=ts("2026-08-11T04:00:00Z"),
+            period_start=ts("2026-08-11T13:30:00Z"),
+            period_end=ts("2026-08-11T20:00:00Z"),
+            available_at=ts("2026-08-11T20:00:00Z"),
+            fresh_context_at=None,
+            source="session_aligned",
+        ),
+    )
+
+
+def base_schedule() -> ReplaySchedule:
+    """A schedule whose identity carries its own recomputed digest."""
+    draft = ReplaySchedule(
+        identity=base_identity(),
+        base_intervals=base_intervals(),
+        context_bars=base_context_bars(),
+    )
+    return dataclasses.replace(draft, identity=base_identity(schedule_digest(draft)))
+
+
+def base_plays() -> tuple[PlayRequest, ...]:
+    """Deliberately supplied out of canonical order."""
+    return (
+        PlayRequest(
+            play_id="play-b",
+            strategy="donchian_break",
+            definition_digest=definition_digest(DEFINITION_BASE_B, PLAY_B_PARAMS),
+            params=PLAY_B_PARAMS,
+            priority=200,
+        ),
+        PlayRequest(
+            play_id="play-a",
+            strategy="sma_cross",
+            definition_digest=definition_digest(DEFINITION_BASE_A, PLAY_A_PARAMS),
+            params=PLAY_A_PARAMS,
+            priority=100,
+        ),
+    )
+
+
+def base_account() -> AccountPolicy:
+    return AccountPolicy(
+        starting_equity=100_000.0,
+        risk_pct=0.01,
+        max_open_positions=5,
+        max_positions_per_play_symbol=1,
+        settlement_model="cash_t1",
+    )
+
+
+def base_execution() -> ExecutionPolicy:
+    return ExecutionPolicy(
+        arithmetic_version="2",
+        fill_mode="pessimistic",
+        slippage=SlippageSpec(bps=2.0, min_per_share=0.01),
+        fees=FeeSpec(per_fill=1.0, per_share=0.005),
+        funding_order="play_priority_symbol_signal",
+        missing_bar_policy="strict",
+    )
+
+
+def base_benchmark() -> BenchmarkSpec:
+    return BenchmarkSpec(
+        kind="equal_weight_request_symbols",
+        symbol=None,
+        weighting="equal",
+        rebalance="never",
+    )
+
+
+def base_request(**overrides) -> PortfolioReplayRequest:
+    """A complete request whose parent identities match their own formulas.
+
+    Overrides apply before the identities are derived, so a varied request
+    stays self-consistent. A test that wants a mismatched identity replaces it
+    on the returned value.
+    """
+    draft = PortfolioReplayRequest(
+        request_version=1,
+        replay_id=f"replay:{PLACEHOLDER_DIGEST}",
+        candidate_id=f"candidate:{PLACEHOLDER_DIGEST}",
+        batch_id=BATCH_ID,
+        registry_digest=REGISTRY_DIGEST,
+        plays=base_plays(),
+        symbols=("qqq", "SPY"),
+        window=base_window(),
+        schedule_identity=base_schedule().identity,
+        ic_horizons=(1, 5, 20),
+        ic_tail_end=ts("2026-08-11T20:00:00Z"),
+        account=base_account(),
+        execution=base_execution(),
+        benchmark=base_benchmark(),
+    )
+    if overrides:
+        draft = dataclasses.replace(draft, **overrides)
+    named = dataclasses.replace(draft, candidate_id=expected_candidate_id(draft))
+    return dataclasses.replace(named, replay_id=expected_replay_id(named))
+
+
+def base_trade(request: PortfolioReplayRequest) -> PortfolioTrade:
+    return PortfolioTrade(
+        trade_id=trade_id(request.replay_id, "play-a", "SPY", 0),
+        replay_id=request.replay_id,
+        trade_ordinal=0,
+        play_id="play-a",
+        strategy="sma_cross",
+        symbol="SPY",
+        signal_ordinal=0,
+        direction="long",
+        qty=12,
+        signal_ts=ts("2026-08-11T14:00:00Z"),
+        entry_ts=ts("2026-08-11T14:00:00Z"),
+        entry=100.5,
+        exit_ts=ts("2026-08-11T15:00:00Z"),
+        exit=103.0,
+        initial_stop=98.0,
+        final_stop=99.5,
+        initial_target=106.0,
+        final_target=106.0,
+        gross_pnl=30.0,
+        fees=2.0,
+        net_pnl=28.0,
+        r_multiple=1.12,
+        mae=0.4,
+        mfe=1.6,
+        setup_tags=("trend", "pullback"),
+        exit_reason=ExitReason.TARGET,
+    )
+
+
+def base_rejection(request: PortfolioReplayRequest) -> ReplayRejection:
+    return ReplayRejection(
+        rejection_id=rejection_id(
+            request.replay_id, "play-b", "QQQ", 1, RejectionReason.UNSETTLED_CASH,
+        ),
+        replay_id=request.replay_id,
+        rejection_ordinal=0,
+        play_id="play-b",
+        strategy="donchian_break",
+        symbol="QQQ",
+        signal_ordinal=1,
+        signal_ts=ts("2026-08-11T14:00:00Z"),
+        event_ts=ts("2026-08-11T14:15:00Z"),
+        reason=RejectionReason.UNSETTLED_CASH,
+        required_cash=1_212.0,
+        available_cash=980.25,
+        open_positions=1,
+    )
+
+
+def base_equity(request: PortfolioReplayRequest) -> tuple[EquityPoint, ...]:
+    return (
+        EquityPoint(
+            replay_id=request.replay_id, ts=request.window.test_start, point_ordinal=0,
+            settled_cash=100_000.0, unsettled_cash=0.0, short_collateral=0.0,
+            positions_liquidation_value=0.0, portfolio_equity=100_000.0,
+            gross_exposure=0.0, open_positions=0, benchmark_equity=100_000.0,
+        ),
+        EquityPoint(
+            replay_id=request.replay_id, ts=request.window.test_end, point_ordinal=1,
+            settled_cash=99_774.0, unsettled_cash=254.0, short_collateral=0.0,
+            positions_liquidation_value=0.0, portfolio_equity=100_028.0,
+            gross_exposure=0.0, open_positions=0, benchmark_equity=100_120.0,
+        ),
+    )
+
+
+def _slice_for(
+    request: PortfolioReplayRequest, play_id: str, strategy: str, symbol: str,
+    *, signals: int, trades: int, rejection_counts: dict, net_pnl: float,
+) -> PortfolioSlice:
+    traded = trades > 0
+    return PortfolioSlice(
+        replay_id=request.replay_id,
+        play_id=play_id,
+        strategy=strategy,
+        symbol=symbol,
+        signals=signals,
+        trades=trades,
+        rejection_counts=rejection_counts,
+        gross_profit=net_pnl if net_pnl > 0 else 0.0,
+        gross_loss=-net_pnl if net_pnl < 0 else 0.0,
+        pre_cost_pnl=net_pnl + (2.0 if traded else 0.0),
+        net_pnl=net_pnl,
+        fees=2.0 if traded else 0.0,
+        win_rate=1.0 if traded else None,
+        expectancy_r=1.12 if traded else None,
+        ic=(
+            IcEstimate(horizon_bars=1, correlation=0.1234, observations=12),
+            IcEstimate(horizon_bars=5, correlation=None, observations=4),
+            IcEstimate(horizon_bars=20, correlation=None, observations=0),
+        ),
+    )
+
+
+def base_slices(request: PortfolioReplayRequest) -> tuple[PortfolioSlice, ...]:
+    strategies = {"play-a": "sma_cross", "play-b": "donchian_break"}
+    built = []
+    for play in request.plays:
+        for symbol in request.symbols:
+            traded = play.play_id == "play-a" and symbol == "SPY"
+            rejected = play.play_id == "play-b" and symbol == "QQQ"
+            built.append(_slice_for(
+                request, play.play_id, strategies[play.play_id], symbol,
+                signals=1 if traded or rejected else 0,
+                trades=1 if traded else 0,
+                rejection_counts={RejectionReason.UNSETTLED_CASH: 1} if rejected else {},
+                net_pnl=28.0 if traded else 0.0,
+            ))
+    return tuple(built)
+
+
+def base_metrics() -> PortfolioMetrics:
+    winner = TradeStats(
+        n_trades=1, n_wins=1, win_rate=1.0, gross_profit=28.0, gross_loss=0.0,
+        profit_factor=None, profit_factor_state="infinite", expectancy_r=1.12,
+    )
+    empty = TradeStats(
+        n_trades=0, n_wins=0, win_rate=None, gross_profit=0.0, gross_loss=0.0,
+        profit_factor=None, profit_factor_state="unavailable", expectancy_r=None,
+    )
+    return PortfolioMetrics(
+        all_trades=winner, long_trades=winner, short_trades=empty,
+        n_rejections=1, pre_cost_pnl=30.0, fees=2.0, net_pnl=28.0,
+        starting_equity=100_000.0, ending_equity=100_028.0,
+        total_return=0.00028, benchmark_return=0.0012,
+        max_drawdown=0.0004, ulcer_index=0.0002, cagr=0.1, calmar=250.0,
+        exposure_pct=0.15, avg_holding_hours=1.0,
+        daily_n=1, daily_sum=0.00028, daily_sum_sq=7.84e-08,
+        daily_sum_sq_down=0.0, daily_sum_cube=2.1952e-11,
+        daily_sum_fourth=6.14656e-15,
+        sharpe=None, sortino=None, psr=None, skew=None, kurtosis=None,
+    )
+
+
+def base_result(request: PortfolioReplayRequest | None = None) -> PortfolioReplayResult:
+    """A complete result whose digest field carries its own recomputed digest."""
+    request = base_request() if request is None else request
+    draft = PortfolioReplayResult(
+        request=request,
+        arithmetic_version="2",
+        fill_mode="pessimistic",
+        schedule_identity=request.schedule_identity,
+        result_digest=PLACEHOLDER_DIGEST,
+        trades=(base_trade(request),),
+        rejections=(base_rejection(request),),
+        equity=base_equity(request),
+        slices=base_slices(request),
+        benchmark=BenchmarkResult(spec=request.benchmark, total_return=0.0012),
+        metrics=base_metrics(),
+    )
+    return dataclasses.replace(draft, result_digest=result_digest(draft))
