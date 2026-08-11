@@ -39,6 +39,7 @@ TermVerdict carrying a status and a reason.
 import itertools
 import json
 import numbers
+import operator
 from dataclasses import dataclass
 
 import numpy as np
@@ -130,12 +131,21 @@ def exemption_reason(term: Term) -> str | None:
     per-prefix loop and the comparison would fail an honest term.
     """
     if term.end_anchored:
+        # "causal by construction" is load-bearing and it is not free. It holds
+        # because end_anchored_series calls term.fn on bars[:i+1] AND because
+        # every value the term reads is cut to that prefix, including the mask a
+        # condition-typed arg's injected callback returns. This gate exempts the
+        # whole class, so nothing here would notice if that second half stopped
+        # being true; frame_eval.py's injection carries the guard for it, and
+        # test_an_end_anchored_primitive_gets_the_evaluator_injected_too is what
+        # reddens when it lapses.
         return ("end_anchored: term.fn returns a scalar for a frame, not a "
                 "series, so there is no whole-frame value at row i to compare a "
                 "prefix against and the comparison would fail an honest term; "
                 "the evaluator runs these through "
                 "primitives.end_anchored_series, which is causal by "
-                "construction")
+                "construction so long as everything it hands the term is cut to "
+                "the prefix, the injected condition mask included")
     return None
 
 
@@ -173,6 +183,24 @@ def field_mismatch(term: Term, out) -> str | None:
     return "; ".join(parts)
 
 
+def _synthetic_mask(cond: dict, bars: pd.DataFrame) -> pd.Series:
+    """`cond` evaluated row-locally, with no grammar evaluator involved.
+
+    Deliberately the smallest reader that can answer SYNTHETIC_CONDITION's
+    shape, rather than a call into FrameEval: this module verifies causality,
+    so a gate that leaned on the evaluator would be asking the subject of the
+    experiment to certify itself. Two column reads and one comparison cannot
+    shift, roll, or reach past their own row whatever the constant says.
+
+    Anything outside that shape raises rather than degrading, so a constant
+    edited into something this cannot read fails here and names itself instead
+    of quietly verifying every term against a mask nobody chose.
+    """
+    ops = {">": operator.gt, "<": operator.lt,
+           ">=": operator.ge, "<=": operator.le}
+    return ops[cond["op"]](bars[cond["lhs"]["src"]], bars[cond["rhs"]["src"]])
+
+
 def _raw_call(term: Term, bars: pd.DataFrame, args: dict):
     """One term's output over `bars`, before any narrowing.
 
@@ -189,13 +217,19 @@ def _raw_call(term: Term, bars: pd.DataFrame, args: dict):
     A condition-typed arg additionally needs an evaluator callback, which is
     injected HERE rather than at either call site, so verify_term's whole-frame
     pass and evaluate_term's per-prefix pass cannot receive different ones. It
-    reads SYNTHETIC_CONDITION off the frame it is handed, which is row-local, so
-    the callback cannot introduce a peek of its own. Keyed on the arg's declared
-    type, exactly as `frame_eval.py:281` keys the real injection, so a term
-    registered outside core reaches it the same way.
+    reads the condition it is HANDED off the frame it is handed, which is
+    row-local, so the callback cannot introduce a peek of its own. Keyed on the
+    arg's declared type, exactly as `frame_eval.py:281` keys the real injection,
+    so a term registered outside core reaches it the same way.
+
+    It reads `cond` rather than restating it. An earlier draft hard-coded
+    `b["close"] > b["open"]` here while SYNTHETIC_CONDITION said the same thing
+    twenty lines up, which made the constant inert: editing it to widen or
+    tighten the gate's mask changed nothing, and no test could go red, because
+    every candidate still carried a mask the callback had already decided.
     """
     if any(is_condition_rule(rule) for rule in term.args.values()):
-        args = {**args, "eval_fn": lambda cond, b: b["close"] > b["open"]}
+        args = {**args, "eval_fn": _synthetic_mask}
     if term.kind == "primitive":
         return term.fn(None, bars, **args)
     if term.kind == "bar":

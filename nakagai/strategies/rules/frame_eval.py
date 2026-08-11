@@ -281,7 +281,19 @@ class FrameEval:
             # nowhere else, so an end-anchored primitive declaring one is
             # constructible and validates; injecting only below here left it
             # raising at evaluation time instead.
-            a["eval_fn"] = lambda cond, b: self.condition_series(cond, src_tf)
+            #
+            # CUT TO THE FRAME THE TERM WAS HANDED, which is what makes that
+            # placement safe rather than merely non-raising. end_anchored_series
+            # calls term.fn on bars[:i+1], so a callback answering over the
+            # whole frame hands row i a mask that includes rows after it: a term
+            # summing it reads [4, 4, 4, 4] where the causal answer is
+            # [1, 2, 3, 4]. That is a lookahead in the one node whose hard rule
+            # 1 is causality, and verify_term cannot catch it, because it
+            # exempts every end_anchored term. `.loc` rather than `.reindex`:
+            # `b` is always a prefix of this same frame, so a missing label is a
+            # miswiring and should raise here rather than become a silent NaN.
+            a["eval_fn"] = (lambda cond, b:
+                            self.condition_series(cond, src_tf).loc[b.index])
         if term.end_anchored:
             # Exactly the span, with no warm-up margin in front of it. Row i is
             # the scalar function called on bars[:i+1], which does its own

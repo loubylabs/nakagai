@@ -186,7 +186,8 @@ def test_a_condition_typed_arg_gets_the_evaluator_injected_by_type(
 
 
 def test_an_end_anchored_primitive_gets_the_evaluator_injected_too(make_bars):
-    """The injection has to sit ABOVE frame_eval's end_anchored branch.
+    """The injection has to sit ABOVE frame_eval's end_anchored branch, and
+    the callback it injects has to answer for the frame it is handed.
 
     N3-D13 refuses a condition-typed arg outside kind 'primitive' and nowhere
     else, so an end-anchored primitive that declares one is constructible and
@@ -194,6 +195,14 @@ def test_an_end_anchored_primitive_gets_the_evaluator_injected_too(make_bars):
     returns before the injection block, so the term is called without the
     evaluator it declared it needs and raises at evaluation. The term needs
     the callback regardless of which dispatch it takes.
+
+    `count_end` deliberately does NOT re-slice what the callback returns. An
+    earlier draft wrote `.loc[bars.index]` inside the term, which clipped what
+    the callback had failed to clip, so the assertion below passed against a
+    callback that answered over the whole frame: the guard compensated for the
+    defect it existed to catch. A term written the natural way is the only one
+    that can tell the two apart, and nothing obliges a term registered outside
+    core to write the defensive version.
     """
 
     def count_end(ctx, bars, when, eval_fn=None):
@@ -201,7 +210,7 @@ def test_an_end_anchored_primitive_gets_the_evaluator_injected_too(make_bars):
         # end_anchored means: the count of qualifying bars in the prefix.
         if eval_fn is None:
             raise RuntimeError("missing eval_fn")
-        return float(eval_fn(when, bars).loc[bars.index].sum())
+        return float(eval_fn(when, bars).sum())
 
     vocab = core_vocabulary().with_terms(
         Term("count_end", "primitive", {"when": CONDITION_ARG}, {}, count_end,

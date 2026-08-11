@@ -280,6 +280,44 @@ def test_arg_sets_supplies_a_condition_arg():
     assert all(s.get("cond") == verify_module.SYNTHETIC_CONDITION for s in sets), sets
 
 
+def test_the_gates_mask_follows_the_condition_it_is_handed(bars, monkeypatch):
+    """SYNTHETIC_CONDITION is live, not decorative.
+
+    The callback used to restate the constant as `b["close"] > b["open"]` and
+    ignore the `cond` it was passed. Both statements agreed, so nothing was
+    wrong today and nothing could ever go wrong loudly: editing the constant to
+    widen the gate's mask changed no mask, no verdict, and no test, so a future
+    change intended to tighten causality checking would have been a no-op with
+    a green suite behind it.
+
+    Flipping the operand is the smallest edit that tells a live constant from an
+    inert one. The two masks are near-complements on this frame, so a callback
+    reading `cond` cannot return the same count for both, and one restating the
+    constant cannot return anything else.
+    """
+    def echo_mask(ctx, frame, cond, eval_fn=None):
+        """Its whole output is the mask's size, so the mask is observable."""
+        return pd.Series(float(eval_fn(cond, frame).sum()), index=frame.index)
+
+    term = Term("echo_mask", "primitive", {"cond": CONDITION_ARG}, {}, echo_mask)
+
+    def count_under(condition):
+        # The whole chain, not one link of it: the constant is what arg_sets
+        # puts on every candidate, and _raw_call is what injects the callback.
+        monkeypatch.setattr(verify_module, "SYNTHETIC_CONDITION", condition)
+        (args,) = arg_sets(term)
+        return _raw_call(term, bars, args).iloc[0]
+
+    rising = count_under({"lhs": {"src": "close"}, "op": ">",
+                          "rhs": {"src": "open"}})
+    falling = count_under({"lhs": {"src": "close"}, "op": "<",
+                           "rhs": {"src": "open"}})
+    assert rising and falling, (rising, falling)
+    assert rising != falling, (
+        f"the mask counts {rising} under both conditions, so the callback is "
+        f"restating SYNTHETIC_CONDITION rather than reading it")
+
+
 def test_arg_sets_of_a_term_with_no_args_is_one_empty_set():
     assert arg_sets(core_vocabulary().primitives["gap_pct"]) == ({},)
 
