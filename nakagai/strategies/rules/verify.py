@@ -35,6 +35,7 @@ TermVerdict carrying a status and a reason.
 """
 
 import itertools
+import numbers
 from dataclasses import dataclass
 
 import numpy as np
@@ -238,12 +239,22 @@ def _frame_fingerprint(bars: pd.DataFrame) -> tuple:
 def _is_range_rule(rule) -> bool:
     """The other half of the ArgRule union: a low and a high, both numbers.
 
+    `numbers.Real` rather than `(int, float)`, because that pair splits the numpy
+    scalars arbitrarily: np.float64 subclasses float and passed, np.int64
+    subclasses nothing in that pair and failed, so the same schema enumerated
+    with float bounds and was refused as unenumerable with integer ones. Node 02
+    generates schemas from another library's signatures, which is exactly where
+    numpy scalars arrive.
+
     Booleans are excluded even though bool subclasses int, so a rule of
     (True, False) is refused rather than read as the range 1 to 0. The same
     exclusion guards the vocabulary's own search for the widest sessions bound.
+    np.bool_ needs no clause of its own: it registers as neither bool nor
+    numbers.Real, so it is refused by the predicate rather than by the exclusion.
     """
     return (isinstance(rule, tuple) and len(rule) == 2
-            and all(isinstance(value, (int, float)) and not isinstance(value, bool)
+            and all(isinstance(value, numbers.Real)
+                    and not isinstance(value, bool)
                     for value in rule))
 
 

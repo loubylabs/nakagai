@@ -1,6 +1,7 @@
 # tests/test_verify_term.py
 """The per-term causality gate, and its honesty about what it cannot test."""
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -307,6 +308,41 @@ def test_arg_sets_refuses_a_list_of_choices_rather_than_testing_two_of_three(bar
     verdict = verify_term(term, bars)
     assert verdict.status == FAILED, "an unusable schema is a rejection, not a crash"
     assert verdict.cause == "unenumerable"
+
+
+def test_a_range_rule_with_numpy_bounds_is_read_as_a_range_whichever_shape(bars):
+    """isinstance(value, (int, float)) split the numpy scalars arbitrarily.
+
+    Measured: np.float64 subclasses float and passed, np.int64 does not subclass
+    int and failed, so the same schema enumerated with float bounds and came back
+    FAILED as unenumerable with integer bounds. The refusal is loud, and no core
+    term is affected, but node 02 generates schemas from another library's
+    signatures, which is exactly where numpy scalars arrive.
+    """
+    ints = Term("numpy_int_bounds", "series",
+                {"n": (np.int64(2), np.int64(100))}, {"n": np.int64(20)},
+                lambda s, a: s)
+    assert {int(s["n"]) for s in arg_sets(ints)} == {2, 20, 100}
+    assert verify_term(ints, bars).status == CHECKED
+
+    floats = Term("numpy_float_bounds", "series",
+                  {"f": (np.float64(0.0), np.float64(1.0))},
+                  {"f": np.float64(0.5)}, lambda s, a: s)
+    assert {float(s["f"]) for s in arg_sets(floats)} == {0.0, 0.5, 1.0}
+
+
+def test_a_pair_of_booleans_is_still_refused_rather_than_read_as_1_to_0():
+    """The exclusion that has to survive the widening, in both bool shapes.
+
+    bool subclasses int, so (True, False) would read as the range 1 to 0 without
+    it. np.bool_ subclasses neither bool nor numbers.Real, so it is refused by
+    the same predicate for a different reason; asserted here so a later widening
+    that admits it reddens.
+    """
+    for pair in ((True, False), (np.bool_(True), np.bool_(False))):
+        term = Term("flagged", "series", {"flag": pair}, {}, lambda s, a: s)
+        with pytest.raises(ValueError, match="flag"):
+            arg_sets(term)
 
 
 def test_no_core_term_exceeds_the_argument_set_cap():
