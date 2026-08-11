@@ -406,6 +406,70 @@ def test_a_term_whose_schema_generates_no_argument_sets_is_failed(bars):
     assert verdict.arg_sets_checked == 0
 
 
+# The four term shapes that escaped verify_term as tracebacks, one test each.
+# Crash safety was applied to the whole-frame call and the prefix call and to
+# nothing between them, so the narrowing, the field lookup and the value
+# extraction on the whole-frame side were unguarded while the identical
+# extraction on the prefix side was guarded. A traceback out of verify_term
+# takes down a whole node 02 batch of 100-plus terms over one malformed one,
+# which is the outcome the module's own words at the enumeration step refuse.
+
+
+def test_a_term_returning_a_frame_with_no_field_declared_is_a_verdict(bars):
+    """Escaped as KeyError 'field' from the narrowing step.
+
+    Declaring no `field` while returning a DataFrame passes field_mismatch,
+    because nothing declared equals nothing produced, and then there is no
+    field to narrow by.
+    """
+    term = Term("empty_frame", "series", {}, {}, lambda s, a: pd.DataFrame())
+    verdict = verify_term(term, bars)
+    assert verdict.status == FAILED
+    assert verdict.cause == "gate_error"
+    assert "KeyError" in verdict.reason
+
+
+def test_a_term_returning_a_non_numeric_series_is_a_verdict(bars):
+    """Escaped as ValueError: could not convert string to float."""
+    term = Term("stringly", "series", {}, {},
+                lambda s, a: pd.Series("x", index=s.index))
+    verdict = verify_term(term, bars)
+    assert verdict.status == FAILED
+    assert verdict.cause == "gate_error"
+    assert "ValueError" in verdict.reason
+
+
+def test_a_term_returning_fewer_rows_than_the_frame_is_a_shape_failure(bars):
+    """Escaped as IndexError: single positional indexer is out-of-bounds.
+
+    This one is not reported as gate_error. A returned Series that does not line
+    up with the frame cannot be probed by position at all, and if the lengths
+    happened to line up far enough to index, the mismatch would read as "row i
+    read a row after itself" and blame a term for a peek it never made. So the
+    length is checked before probing and reported as the shape problem it is.
+    """
+    term = Term("truncated", "series", {}, {}, lambda s, a: s.iloc[:10])
+    verdict = verify_term(term, bars)
+    assert verdict.status == FAILED
+    assert verdict.cause == "schema"
+    assert "10" in verdict.reason and str(len(bars)) in verdict.reason
+    assert "read a row after itself" not in verdict.reason
+
+
+def test_a_term_returning_duplicate_column_names_is_a_verdict(bars):
+    """Escaped as TypeError: float() argument must be ... not 'DataFrame'.
+
+    Two columns named "a" satisfy field_mismatch, which compares sets, and then
+    narrowing by "a" returns a DataFrame rather than a Series.
+    """
+    term = Term("duplicated", "frame", {"field": ("a",)}, {"field": "a"},
+                lambda s, a: pd.concat([s.rename("a"), s.rename("a")], axis=1))
+    verdict = verify_term(term, bars)
+    assert verdict.status == FAILED
+    assert verdict.cause == "gate_error"
+    assert "TypeError" in verdict.reason
+
+
 def test_a_term_whose_schema_disagrees_with_its_columns_is_failed(bars):
     term = Term("under_declared", "frame", {"field": ("a",)}, {"field": "a"},
                 lambda s, a: pd.DataFrame({"a": s, "b": s.shift(-1)}))

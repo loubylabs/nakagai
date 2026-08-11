@@ -292,36 +292,71 @@ def verify_term(term: Term, bars: pd.DataFrame) -> TermVerdict:
             return TermVerdict(term.name, FAILED,
                                f"args {args}: whole-frame call raised {exc}",
                                checked, "uncallable")
-        mismatch = field_mismatch(term, raw)
-        if mismatch is not None:
-            return TermVerdict(term.name, FAILED, f"schema: {mismatch}",
-                               checked, "schema")
+        # Everything from here to the end of the argument set is inside one
+        # guard, for the same reason the enumeration above is: a term the gate
+        # cannot make sense of is a rejection, not an exception out of
+        # verify_term that takes down a node 02 batch of 100+ terms. Reading
+        # the whole-frame result is four steps, not one, and each of them has
+        # been measured escaping as a traceback on a malformed return: the
+        # field check, the narrowing, the field lookup and the extraction.
+        try:
+            mismatch = field_mismatch(term, raw)
+            if mismatch is not None:
+                return TermVerdict(term.name, FAILED, f"schema: {mismatch}",
+                                   checked, "schema")
 
-        # Reuse the call already made rather than calling term.fn a second time
-        # on the whole frame. evaluate_term's only step beyond the raw dispatch
-        # is this same narrowing, and node 02 multiplies the saving by 100+.
-        whole = raw[args["field"]] if isinstance(raw, pd.DataFrame) else raw
-        saw_a_number = False
-        for i in rows:
-            want = _value_at(whole, i)
-            try:
-                prefix = _value_at(evaluate_term(term, bars.iloc[:i + 1], args), -1)
-            except Exception as exc:                   # noqa: BLE001
-                # "evaluating raised", not "the term raised": this call goes
-                # through evaluate_term, which is the gate's own code, so a bug
-                # in the gate must not read as the term's causality failure.
+            # Reuse the call already made rather than calling term.fn a second
+            # time on the whole frame. evaluate_term's only step beyond the raw
+            # dispatch is this same narrowing, and node 02 multiplies the
+            # saving by 100+.
+            whole = raw[args["field"]] if isinstance(raw, pd.DataFrame) else raw
+
+            # A return that does not line up with the frame is a shape problem,
+            # reported as one. Probing it by position either raises, which says
+            # nothing about causality, or, if the lengths line up far enough to
+            # index, compares row i against some other row and reports the term
+            # for a peek it never made. Cause "schema" rather than "gate_error"
+            # because the disagreement is the term's, not this module's.
+            if isinstance(whole, pd.Series) and len(whole) != len(bars):
                 return TermVerdict(
                     term.name, FAILED,
-                    f"args {args} row {i}: evaluating over the prefix raised "
-                    f"{type(exc).__name__}: {exc}",
-                    checked, "gate_error")
-            if not _agrees(want, prefix):
-                return TermVerdict(
-                    term.name, FAILED,
-                    f"args {args} row {i}: whole-frame {want!r} != prefix "
-                    f"{prefix!r}, so row {i} read a row after itself",
-                    checked, "lookahead")
-            saw_a_number = saw_a_number or not pd.isna(want)
+                    f"args {args}: returned {len(whole)} rows for a frame of "
+                    f"{len(bars)}, so its values cannot be lined up with the "
+                    f"rows they would describe",
+                    checked, "schema")
+
+            saw_a_number = False
+            for i in rows:
+                want = _value_at(whole, i)
+                try:
+                    prefix = _value_at(
+                        evaluate_term(term, bars.iloc[:i + 1], args), -1)
+                except Exception as exc:
+                    # "evaluating raised", not "the term raised": this call goes
+                    # through evaluate_term, which is the gate's own code, so a
+                    # bug in the gate must not read as the term's causality
+                    # failure. The row and the argument set are worth naming
+                    # here, which is why this sits inside the outer guard rather
+                    # than being folded into it.
+                    return TermVerdict(
+                        term.name, FAILED,
+                        f"args {args} row {i}: evaluating over the prefix raised "
+                        f"{type(exc).__name__}: {exc}",
+                        checked, "gate_error")
+                if not _agrees(want, prefix):
+                    return TermVerdict(
+                        term.name, FAILED,
+                        f"args {args} row {i}: whole-frame {want!r} != prefix "
+                        f"{prefix!r}, so row {i} read a row after itself",
+                        checked, "lookahead")
+                saw_a_number = saw_a_number or not pd.isna(want)
+        except Exception as exc:
+            return TermVerdict(
+                term.name, FAILED,
+                f"args {args}: reading the whole-frame result raised "
+                f"{type(exc).__name__}: {exc}",
+                checked, "gate_error")
+
         if not saw_a_number:
             return TermVerdict(
                 term.name, VACUOUS,
