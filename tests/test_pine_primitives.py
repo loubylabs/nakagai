@@ -425,6 +425,29 @@ def test_bars_since_lowers_the_condition_it_is_handed():
             in program.calculations)
 
 
+def test_a_condition_arg_named_anything_else_still_reaches_the_pine_walk(
+        count_where_vocab):
+    """The Pine walk keys its condition handling on the arg's declared TYPE.
+
+    _term gated on the literal key "cond" twice: once to keep the condition
+    out of the generic args merge, and once to decide whether to lower it into
+    call.source. A condition-taking term whose arg is named anything else
+    therefore reached its emit with source='' and a raw condition dict sitting
+    in call.args, which is silent: the emit writes an empty call rather than
+    refusing, so the artifact renders and the chart reads nothing.
+    """
+    spec = {"version": 2, "name": "probe", "timeframe": "15m",
+            "long": {"all": [{"lhs": {"prim": "count_where",
+                                      "when": CLOSE_OVER_OPEN},
+                              "op": ">", "rhs": 0}]}}
+    program = lower_pine(spec, count_where_vocab)
+    assert ("nk_count_where_1 = nk_bars_since(close > open)"
+            in program.calculations)
+    # and the condition did not ALSO land in the args merge, where it would
+    # have become an input the settings dialog cannot render
+    assert not any("when" in inp.name for inp in program.inputs)
+
+
 def test_a_gap_exists_only_once_its_third_candle_has_closed():
     # find_fvgs: the imbalance at i is read off i, i-1 and i-2, so the gap is
     # created only once its third candle has closed and never reaches forward
