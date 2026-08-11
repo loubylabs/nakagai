@@ -113,6 +113,49 @@ def _keys_in(spec):
     return set(_key_counts(spec))
 
 
+def _group_depth(node, depth=0):
+    """The deepest chain of nested group keys under `node`."""
+    from nakagai.strategies.rules.spec import GROUP_KEYS
+    if not isinstance(node, dict):
+        return depth
+    for key in GROUP_KEYS:
+        if key in node:
+            val = node[key]
+            items = val if isinstance(val, list) else [val]
+            return max([_group_depth(i, depth + 1) for i in items] or [depth + 1])
+    return depth
+
+
+def _has_condition_arg(node):
+    """True where any primitive in the tree carries a condition-typed arg."""
+    from nakagai.strategies.rules.vocabulary import is_condition_rule
+    if isinstance(node, list):
+        return any(_has_condition_arg(i) for i in node)
+    if not isinstance(node, dict):
+        return False
+    if "prim" in node:
+        term = core_vocabulary().primitives[node["prim"]]
+        if any(is_condition_rule(r) for a, r in term.args.items() if a in node):
+            return True
+    return any(_has_condition_arg(v) for v in node.values())
+
+
+# What a name token CLAIMS, for the tokens that are not group keys. One row per
+# word the corpus names shapes with, never one per entry: adding an entry that
+# reuses a word needs no row here, which is what keeps this from becoming the
+# second description of the corpus that a per-entry table would be. An unknown
+# token is refused below rather than ignored, so a new entry cannot claim
+# nothing by being named something nobody taught this test to read.
+_NAME_CLAIMS = {
+    "short": lambda s: bool(s.get("short")),
+    "exits": lambda s: bool(s.get("exits", {}).get("exit")),
+    "condition": lambda s: _has_condition_arg(s),
+    "nested": lambda s: max(_group_depth(s.get(side))
+                            for side in ("long", "short")) >= 2,
+}
+_NAME_FILLER = {"side", "arg", "group"}
+
+
 def test_every_grammar_shape_is_in_the_fingerprint_corpus():
     """The corpus is the coverage claim, so it is asserted rather than
     trusted: a shape added to the grammar and forgotten here would leave the
@@ -155,8 +198,12 @@ def test_every_grammar_shape_is_in_the_fingerprint_corpus():
         f"{sorted(k for k, v in structures.items() if v in dupes)}")
     assert len(SHAPE_CORPUS) == 9
 
-    # Each entry carries at least the group keys its own name claims, counted,
-    # so `not-not` needs two negations rather than one.
+    # Each entry carries what its own name claims: group keys counted, so
+    # `not-not` needs two negations rather than one, and every other naming
+    # word held to _NAME_CLAIMS. A token nobody taught this test to read is
+    # refused rather than skipped, because a token that claims nothing is how
+    # the group-key version of this floor still let `short-side` move to the
+    # long side with every assertion green.
     for shape, spec in SHAPE_CORPUS.items():
         counts = _key_counts(spec)
         for key in GROUP_KEYS:
@@ -165,6 +212,16 @@ def test_every_grammar_shape_is_in_the_fingerprint_corpus():
                 f"{shape!r} names {key!r} {claimed} time(s) and carries it "
                 f"{counts[key]}: the entry is no longer the shape it is "
                 f"named for")
+        for token in shape.split("-"):
+            if token in GROUP_KEYS or token in _NAME_FILLER:
+                continue
+            assert token in _NAME_CLAIMS, (
+                f"{shape!r} contains the name token {token!r}, which claims "
+                f"nothing: add it to _NAME_CLAIMS with what it asserts, or to "
+                f"_NAME_FILLER if it is only a connecting word")
+            assert _NAME_CLAIMS[token](spec), (
+                f"{shape!r} names {token!r} and does not carry it: the entry "
+                f"is no longer the shape it is named for")
 
     assert set().union(*(_keys_in(s) for s in SHAPE_CORPUS.values())) == set(GROUP_KEYS)
 
