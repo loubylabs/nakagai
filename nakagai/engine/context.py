@@ -170,11 +170,16 @@ def build_scheduled_context(prepared: _ValidatedPortfolioBars, symbol: str,
     cut is a prefix because a prepared frame's labels ARE the schedule's
     labels, in the schedule's order.
 
+    `now` must be a scheduled base close inside the test range. The schedule
+    runs on to `ic_tail_end`, and those tail closes are scheduled closes too,
+    but tail bars belong to the IC lens after the trading replay finishes and
+    no strategy, management call, order, benchmark, or equity point may read
+    them. This is the only door that hands bars to a strategy, so it is where
+    that rule is enforced.
+
     The prefixes are views rather than copies, which is safe and deliberate.
-    Under copy-on-write, writing into one of them copies first, so a strategy
-    that mutates `ctx.bars[tf]` changes its own view and never the engine's
-    frame. Copying per bar per timeframe would cost a replay dearly for a
-    guarantee pandas already gives.
+    Copying per bar per timeframe would cost a replay dearly for a guarantee
+    pandas already gives.
     """
     from nakagai.strategies.rules.frame_eval import FrameEval
     _require_instance(prepared, "prepared", _ValidatedPortfolioBars)
@@ -183,12 +188,20 @@ def build_scheduled_context(prepared: _ValidatedPortfolioBars, symbol: str,
     symbol = _require_symbol(symbol, "symbol")
     now = _require_timestamp(now, "now")
     closed = schedule.closed_base_count(now)
-    if not closed or schedule.base_intervals[closed - 1].close_ts != now:
+    if (not closed or schedule.base_intervals[closed - 1].close_ts != now
+            or now > schedule.request.window.test_end):
         raise ReplayInputError(
             "invalid_context_time",
-            "a context is built at a scheduled base interval close",
+            "a context is built at a scheduled base interval close inside the "
+            "test range",
             {"field": "now", "now": now.isoformat()},
         )
+    # These slices ALIAS the engine's frames. What makes that safe is the
+    # `pandas>=3` floor in pyproject.toml: copy-on-write is unconditional
+    # there, so a strategy writing into one of them copies first and the
+    # engine's own prices cannot move. Do not lower that floor, and do not
+    # let this become a plain `.iloc` on a frame the engine still trusts
+    # under an older pandas.
     bars = {
         tf: prepared.frame(symbol, tf).iloc[:(
             closed if tf == BASE_TIMEFRAME

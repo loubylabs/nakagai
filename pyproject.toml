@@ -21,7 +21,13 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Information Analysis",
 ]
 dependencies = [
-    "pandas>=2.2",
+    # Not >=2.2 any more, and the floor is load-bearing rather than tidy.
+    # Copy-on-write is opt-in in 2.x and unconditional from 3.0, and
+    # engine/context.build_scheduled_context hands strategies zero-copy
+    # prefixes of engine-owned frames. Under 2.x without CoW a strategy
+    # writing into ctx.bars[tf] would write through into the replay's own
+    # prices. Lowering this floor reintroduces that.
+    "pandas>=3",
     "numpy>=1.26",
     "pyarrow>=16",
     "httpx>=0.27",

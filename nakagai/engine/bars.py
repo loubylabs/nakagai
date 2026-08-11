@@ -195,6 +195,19 @@ def prepare_portfolio_bars(
             "invalid_value", "the schedule was validated for another request",
             field="schedule",
         )
+    for timeframe in dependencies.timeframes:
+        if timeframe != BASE_TIMEFRAME and not schedule.context_bars(timeframe):
+            # Exactness against the schedule is only as strong as the
+            # schedule. A play that declares a timeframe the schedule never
+            # materialized would otherwise be handed a permanently empty frame
+            # and emit nothing, which is the silent-missing-timeframe failure
+            # one level up. Keyed on the schedule rather than on a symbol's
+            # label set, so a symbol whose boundary precedes the only label of
+            # a timeframe the schedule does carry stays legitimate.
+            raise _refuse(
+                "a declared timeframe has no scheduled context bars at all",
+                "timeframe", timeframe=timeframe,
+            )
     required = _required_labels(request, schedule, dependencies)
     owned = bars._engine_copy()
     prepared: dict[tuple[str, str], pd.DataFrame] = {}
@@ -205,9 +218,9 @@ def prepare_portfolio_bars(
                 "a declared frame is absent", "frame",
                 symbol=key[0], timeframe=key[1],
             )
-        _validate_frame(frame, key)
-        _require_scheduled_labels(frame, key, required[key])
-        prepared[key] = frame
+        normalized = _normalized_frame(frame, key)
+        _require_scheduled_labels(normalized, key, required[key])
+        prepared[key] = normalized
     surplus = sorted(key for key in owned if key not in required)
     if surplus:
         raise _refuse(
@@ -249,8 +262,19 @@ def _scheduled_labels(
                  if row.label_ts < boundary)
 
 
-def _validate_frame(frame: pd.DataFrame, key: tuple[str, str]) -> None:
-    """A UTC monotonic unique index and five finite binary64 OHLCV columns."""
+def _normalized_frame(frame: pd.DataFrame, key: tuple[str, str]) -> pd.DataFrame:
+    """The five OHLCV columns as finite binary64, on a UTC bar index.
+
+    Selected by name and cast, rather than demanded in one order and one
+    dtype. That is what `nakagai.data.schema.validate_bars` already does at
+    core's other door for the same data, and a real provider parquet
+    legitimately arrives with `trade_count` and `vwap` beside the five and an
+    integer volume. Rejecting those would report a shape convention as though
+    it were a data defect.
+
+    Booleans are refused where a number is required, so the numeric test is on
+    the dtype's kind rather than on `is_numeric_dtype`, which admits `bool`.
+    """
     symbol, timeframe = key
     index = frame.index
     # A missing label needs no clause of its own: an index carrying NaT is
@@ -262,19 +286,34 @@ def _validate_frame(frame: pd.DataFrame, key: tuple[str, str]) -> None:
             "a frame is indexed by unique, increasing, UTC timestamps", "index",
             symbol=symbol, timeframe=timeframe,
         )
-    if list(frame.columns) != BAR_COLUMNS:
+    if not frame.columns.is_unique:
         raise _refuse(
-            f"a frame carries exactly {', '.join(BAR_COLUMNS)}", "columns",
+            "a frame names each of its columns once", "columns",
             symbol=symbol, timeframe=timeframe,
-            columns=tuple(str(column) for column in frame.columns),
+        )
+    absent = tuple(column for column in BAR_COLUMNS if column not in frame.columns)
+    if absent:
+        raise _refuse(
+            f"a frame carries {', '.join(BAR_COLUMNS)}", "columns",
+            symbol=symbol, timeframe=timeframe, absent=absent,
         )
     for column in BAR_COLUMNS:
-        if frame[column].dtype != np.float64:
+        if frame[column].dtype.kind not in "iuf":
             raise _refuse(
-                "every bar column is binary64", "dtype",
+                "every bar column is a number that casts to binary64", "dtype",
                 symbol=symbol, timeframe=timeframe, column=column,
             )
-    values = {column: frame[column].to_numpy() for column in BAR_COLUMNS}
+    try:
+        selected = frame[BAR_COLUMNS].astype("float64")
+    except (TypeError, ValueError):
+        # A masked or arrow-backed column can carry a value with no binary64
+        # spelling. Refuse it here rather than let an untyped cast error out
+        # of the closed replay taxonomy.
+        raise _refuse(
+            "every bar column is a number that casts to binary64", "dtype",
+            symbol=symbol, timeframe=timeframe,
+        ) from None
+    values = {column: selected[column].to_numpy() for column in BAR_COLUMNS}
     for column, series in values.items():
         if not np.isfinite(series).all():
             raise _refuse(
@@ -297,12 +336,22 @@ def _validate_frame(frame: pd.DataFrame, key: tuple[str, str]) -> None:
             "bar volume is never negative", "volume",
             symbol=symbol, timeframe=timeframe,
         )
+    return selected
 
 
 def _require_scheduled_labels(
     frame: pd.DataFrame, key: tuple[str, str], labels: tuple[pd.Timestamp, ...],
 ) -> None:
-    """The index is exactly the schedule's labels, in order, and nothing else."""
+    """The index is exactly the schedule's labels, in order, and nothing else.
+
+    Equality, not containment, and in both directions. A frame carrying
+    history from before `train_start`, or one interval past the symbol's own
+    boundary, is refused exactly like one missing a scheduled bar, so platform
+    hydration has to slice each frame to that symbol's boundary rather than
+    ship whatever the cache happens to hold. The prefix cut in
+    `build_scheduled_context` depends on it: row `i` of a prepared frame is
+    scheduled label `i`, or the cut would silently show the wrong bars.
+    """
     expected = pd.DatetimeIndex(list(labels), tz="UTC")
     if frame.index.equals(expected):
         return

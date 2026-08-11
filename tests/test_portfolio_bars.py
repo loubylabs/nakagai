@@ -7,6 +7,9 @@ any missing, malformed, mislabeled, or surplus frame, before a strategy could
 have been constructed.
 """
 
+import tomllib
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -25,12 +28,14 @@ from nakagai.engine.portfolio_types import (
 from nakagai.engine.schedule import validate_schedule
 from tests.portfolio_fixtures import (
     bar_frame,
+    base_context_bars,
     base_dependencies,
     base_frames,
     base_request,
     base_schedule,
     base_validated_schedule,
     frames_for,
+    schedule_with,
     scheduled_labels,
     ts,
     without_pair,
@@ -280,6 +285,28 @@ def test_a_trading_symbol_covers_the_tail_and_a_context_symbol_stops_at_test_end
     assert prepared.frame("IWM", "15m").index[-1] == ts("2026-11-27T16:45:00Z")
 
 
+def test_a_declared_timeframe_the_schedule_never_materialized_refuses():
+    # The exactness of the label check is only as strong as the schedule
+    # behind it. A play declaring 4h against a schedule with no 4h bars would
+    # otherwise be handed an empty frame for the whole replay and emit
+    # nothing, refusing nothing.
+    schedule = schedule_with(context_bars=tuple(
+        row for row in base_context_bars() if row.timeframe != "4h"))
+    request = base_request(schedule_identity=schedule.identity)
+    dependencies = ReplayDependencies(
+        timeframes=("15m", "4h"), external_symbols=(),
+    )
+    frames = frames_for(request, schedule, dependencies)
+    with pytest.raises(ReplayInputError) as raised:
+        prepare_portfolio_bars(
+            request, PortfolioBars(frames), validate_schedule(request, schedule),
+            dependencies,
+        )
+    assert (raised.value.code, raised.value.details["field"]) == (
+        "missing_required_bar", "timeframe")
+    assert raised.value.details["timeframe"] == "4h"
+
+
 def test_a_context_bar_that_could_never_become_available_is_not_required():
     # The only scheduled four-hour bucket is labeled at `test_end`, so a
     # context-only symbol can never read it. Its frame is present and empty
@@ -375,7 +402,6 @@ def test_a_frame_with_a_broken_index_refuses(index):
     ("column", "values", "field"),
     [
         pytest.param("open", None, "columns", id="missing column"),
-        pytest.param("adjusted", 1.0, "columns", id="surplus column"),
         pytest.param("close", np.nan, "close", id="not a number"),
         pytest.param("close", np.inf, "close", id="infinite"),
         pytest.param("volume", -1.0, "volume", id="negative volume"),
@@ -391,13 +417,49 @@ def test_a_frame_with_malformed_columns_refuses(column, values, field):
     assert (error.code, error.details["field"]) == ("missing_required_bar", field)
 
 
-@pytest.mark.parametrize("dtype", ["int64", "bool", "object"])
-def test_a_frame_that_is_not_binary64_refuses(dtype):
+def test_a_frame_naming_one_column_twice_refuses():
+    frames = base_frames()
+    frame = frames[SPY_15M]
+    doubled = pd.concat([frame, frame[["open"]]], axis=1)
+    error = refuse({**frames, SPY_15M: doubled})
+    assert (error.code, error.details["field"]) == ("missing_required_bar", "columns")
+
+
+@pytest.mark.parametrize("dtype", ["bool", "object", "str"])
+def test_a_frame_column_that_is_not_a_number_refuses(dtype):
     frames = base_frames()
     frame = frames[SPY_15M].copy(deep=True)
     frame["volume"] = frame["volume"].astype(dtype)
     error = refuse({**frames, SPY_15M: frame})
     assert (error.code, error.details["field"]) == ("missing_required_bar", "dtype")
+
+
+def test_a_provider_frame_prepares_as_binary64_ohlcv():
+    # What an Alpaca-written parquet actually looks like: the five columns in
+    # provider order, an integer volume, and two columns core does not read.
+    frames = base_frames()
+    frame = frames[SPY_15M]
+    provider = pd.DataFrame(
+        {
+            "volume": frame["volume"].astype("int64"),
+            "trade_count": np.arange(len(frame), dtype="int64"),
+            "close": frame["close"],
+            "high": frame["high"],
+            "low": frame["low"],
+            "open": frame["open"],
+            "vwap": frame["close"],
+        },
+        index=frame.index,
+    )
+    prepared = prepare_portfolio_bars(
+        base_request(), PortfolioBars({**frames, SPY_15M: provider}),
+        base_validated_schedule(), base_dependencies(),
+    )
+    owned = prepared.frame("SPY", "15m")
+    assert list(owned.columns) == ["open", "high", "low", "close", "volume"]
+    assert set(owned.dtypes) == {np.dtype("float64")}
+    assert owned["open"].iloc[0] == 100.0
+    assert owned["volume"].iloc[0] == 1000.0
 
 
 @pytest.mark.parametrize(
@@ -483,6 +545,26 @@ def test_a_context_cannot_be_built_off_a_scheduled_close():
     assert raised.value.code == "invalid_context_time"
 
 
+def test_a_context_cannot_be_built_inside_the_ic_tail():
+    # The tail closes are scheduled base closes too, so being a real close is
+    # not enough: tail bars belong to the IC lens after the replay, and no
+    # strategy may see them.
+    request = tail_request()
+    schedule = validate_schedule(request, base_schedule())
+    dependencies = ReplayDependencies(timeframes=("15m",), external_symbols=())
+    prepared = prepare_portfolio_bars(
+        request, PortfolioBars(frames_for(request, base_schedule(), dependencies)),
+        schedule, dependencies,
+    )
+    last_test_close = build_scheduled_context(
+        prepared, "SPY", request.window.test_end, schedule, dependencies)
+    assert len(last_test_close.bars["15m"]) == SCHEDULED_INTERVALS - 4
+    with pytest.raises(ReplayInputError) as raised:
+        build_scheduled_context(
+            prepared, "SPY", ts("2026-11-27T18:00:00Z"), schedule, dependencies)
+    assert raised.value.code == "invalid_context_time"
+
+
 def test_mutating_a_context_frame_cannot_reach_the_prepared_frame():
     prepared = prepared_base()
     context = build_scheduled_context(
@@ -495,6 +577,20 @@ def test_mutating_a_context_frame_cannot_reach_the_prepared_frame():
     assert prepared.frame("SPY", "15m").iloc[0, 0] == 100.0
     assert prepared.frame("SPY", "15m")["close"].iloc[0] == 100.05
     assert prepared.frame("SPY", "1d").iloc[0, 0] == 100.0
+
+
+def test_the_declared_pandas_floor_is_what_keeps_the_context_views_safe():
+    # The two mutation regressions above pass because copy-on-write is
+    # unconditional from pandas 3.0. It is opt-in in 2.x, and a lock file does
+    # not travel to a consumer that pins this repo by revision, so the
+    # DECLARED floor is the whole guarantee: under an installed 2.x a strategy
+    # writing into ctx.bars[tf] would write through into the replay's prices.
+    manifest = tomllib.loads(
+        (Path(__file__).resolve().parents[1] / "pyproject.toml").read_bytes().decode())
+    declared = [name for name in manifest["project"]["dependencies"]
+                if name.startswith("pandas")]
+    assert declared == ["pandas>=3"]
+    assert int(pd.__version__.split(".")[0]) >= 3
 
 
 def test_a_context_frame_hands_out_no_writable_array():
