@@ -245,6 +245,18 @@ def verify_term(term: Term, bars: pd.DataFrame) -> TermVerdict:
         return TermVerdict(term.name, FAILED,
                            f"cannot enumerate this term's arguments: {exc}")
 
+    # Nothing to call is a refusal, not a pass. is_choice_rule(()) is True,
+    # because all() over an empty tuple is True, so an enum arg that resolves to
+    # nothing partitions as a choice, the cross product is empty and the loop
+    # below never runs. Falling through would return CHECKED for a term the gate
+    # never called, which is precisely what a status vocabulary exists to
+    # prevent. FAILED rather than VACUOUS: VACUOUS means the term was called and
+    # taught us nothing, and here it was not called at all.
+    if not every_arg_set:
+        return TermVerdict(term.name, FAILED,
+                           "schema generates no argument sets, so nothing was "
+                           "called")
+
     checked = 0
     for args in every_arg_set:
         try:

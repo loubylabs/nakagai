@@ -386,6 +386,26 @@ def test_a_term_the_gate_cannot_enumerate_is_a_verdict_not_a_crash(bars):
     assert str(MAX_ARG_SETS) in verdict.reason, "the reason must name the cap"
 
 
+def test_a_term_whose_schema_generates_no_argument_sets_is_failed(bars):
+    """CHECKED after zero calls is the one verdict that must never be reachable.
+
+    `is_choice_rule(())` is True, because all() over an empty tuple is True, so
+    an enum arg that resolves to nothing partitions as a choice, the cross
+    product is empty, and the probe loop never runs. The body here reads one row
+    into the future, so CHECKED would admit a peeking term the gate never called.
+    Node 02 generates schemas from another library's signatures, where an enum
+    arg resolving empty is ordinary rather than exotic.
+    """
+    term = Term("empty_choice", "series", {"mode": ()}, {},
+                lambda s, a: s.shift(-1))
+    assert arg_sets(term) == (), "the shape this test is about has changed"
+
+    verdict = verify_term(term, bars)
+    assert verdict.status == FAILED
+    assert verdict.reason, "a refusal must say why nothing was called"
+    assert verdict.arg_sets_checked == 0
+
+
 def test_a_term_whose_schema_disagrees_with_its_columns_is_failed(bars):
     term = Term("under_declared", "frame", {"field": ("a",)}, {"field": "a"},
                 lambda s, a: pd.DataFrame({"a": s, "b": s.shift(-1)}))
