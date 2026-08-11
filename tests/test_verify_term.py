@@ -400,3 +400,47 @@ def test_a_term_whose_schema_disagrees_with_its_columns_is_failed(bars):
 def test_every_shipped_indicator_shape_is_checked_and_passes(name, bars):
     verdict = verify_term(core_vocabulary().indicators[name], bars)
     assert verdict.status == CHECKED, f"{name}: {verdict.reason}"
+
+
+@pytest.mark.parametrize("name", ["fvg_nearest", "order_block"])
+def test_an_honest_end_anchored_term_would_fail_without_the_exemption(name, bars, monkeypatch):
+    """The exemption is load-bearing: prove what happens when it is not there.
+
+    These two terms are honest. The gate reports them FAILED with the exemption
+    removed, because term.fn returns a float for a frame and the comparison is
+    therefore not a causality test at all. That is the false failure the exemption
+    exists to prevent, and asserting it is what makes the exemption more than a
+    comment.
+    """
+    term = core_vocabulary().primitives[name]
+    assert verify_term(term, bars).status == EXEMPT
+
+    monkeypatch.setattr(verify_module, "exemption_reason", lambda _term: None)
+    assert verify_term(term, bars).status == FAILED
+
+
+def test_an_end_anchored_term_returns_a_scalar_not_a_series(bars):
+    """The structural fact underneath the exemption, asserted rather than assumed."""
+    term = core_vocabulary().primitives["fvg_nearest"]
+    out = term.fn(None, bars, **dict(term.defaults))
+    assert isinstance(out, float)
+    assert not isinstance(out, pd.Series)
+
+
+def test_an_exempt_term_is_never_reported_as_checked_or_failed(bars):
+    """One assertion that can fail on its own, not a restatement of EXEMPT."""
+    statuses = {name: verify_term(core_vocabulary().primitives[name], bars).status
+                for name in ("fvg_nearest", "order_block", "bars_since")}
+    assert set(statuses.values()) == {EXEMPT}, statuses
+
+
+def test_an_exempt_verdict_names_the_term_and_gives_a_reason(bars):
+    """arg_sets_checked is the dataclass default, so assert what the code sets."""
+    verdict = verify_term(core_vocabulary().primitives["bars_since"], bars)
+    assert verdict.name == "bars_since"
+    assert "condition" in verdict.reason and "evaluator" in verdict.reason
+
+
+def test_a_condition_taking_term_is_exempt_rather_than_raising(bars):
+    """bars_since cannot be called without eval_fn, so the gate refuses it early."""
+    assert verify_term(core_vocabulary().primitives["bars_since"], bars).status == EXEMPT
