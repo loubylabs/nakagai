@@ -505,6 +505,68 @@ def test_a_term_returning_fewer_rows_than_the_frame_is_a_shape_failure(bars):
     assert "read a row after itself" not in verdict.reason
 
 
+def _shifted_index_peeker(s, a):
+    """Honest values, relabelled one row early, which is a peek BY LABEL.
+
+    Positionally this agrees with the prefix at every probe row, because the
+    values are an ordinary causal rolling mean. The index is the defect: position
+    i carries the label of row i-1, so the value published for row i-1 is the one
+    computed over rows through i.
+
+    `frame_eval.py:215` returns a term's own Series unchanged when the term's
+    timeframe is the driving one, so this index is what production reads by.
+    """
+    honest = s.rolling(3).mean()
+    step = s.index[1] - s.index[0]
+    return pd.Series(honest.to_numpy(),
+                     index=s.index[:-1].insert(0, s.index[0] - step))
+
+
+def test_a_term_returning_a_shifted_index_is_a_shape_failure_not_a_pass(bars):
+    """Measured on the unguarded gate: CHECKED, with the label reading row i+1.
+
+    Length alone said nothing here: this term returns exactly as many rows as it
+    was given, and the gate read them by position, so the shift the index carries
+    was invisible to it.
+    """
+    term = Term("shifted_index_peeker", "series", {}, {}, _shifted_index_peeker)
+
+    out = _shifted_index_peeker(bars["close"], {})
+    honest = bars["close"].rolling(3).mean()
+    assert not out.index.equals(bars.index), "this term is meant to relabel"
+    assert out.loc[bars.index[100]] == honest.iloc[101], (
+        "the counterexample no longer reads the future by label")
+
+    verdict = verify_term(term, bars)
+    assert verdict.status == FAILED, "a relabelled return is not a pass"
+    assert verdict.cause == "schema"
+    assert "index" in verdict.reason
+    assert "read a row after itself" not in verdict.reason
+
+
+def test_a_prefix_result_that_does_not_carry_the_prefix_index_is_a_failure(bars):
+    """Lining up with the whole frame does not mean lining up with a prefix.
+
+    This term always labels its output with the LAST rows of the full frame, so
+    the whole-frame call is indistinguishable from an honest one and only the
+    prefix calls are mislabelled. Checking the whole-frame index alone would pass
+    it, and its values are honest, so the value comparison passes too.
+    """
+    full = bars.index
+
+    def relabels_only_a_prefix(s, a):
+        return pd.Series(s.to_numpy(), index=full[len(full) - len(s):])
+
+    term = Term("relabels_a_prefix", "series", {}, {}, relabels_only_a_prefix)
+    assert relabels_only_a_prefix(bars["close"], {}).index.equals(bars.index), (
+        "the whole-frame call must look honest for this test to mean anything")
+
+    verdict = verify_term(term, bars)
+    assert verdict.status == FAILED
+    assert verdict.cause == "schema"
+    assert "index" in verdict.reason
+
+
 def test_a_term_returning_duplicate_column_names_is_a_verdict(bars):
     """Escaped as TypeError: float() argument must be ... not 'DataFrame'.
 

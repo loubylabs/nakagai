@@ -390,12 +390,43 @@ def verify_term(term: Term, bars: pd.DataFrame) -> TermVerdict:
                     f"rows they would describe",
                     checked, "schema")
 
+            # The same length is not the same rows. This gate reads the return
+            # by POSITION, and `frame_eval.py:215` publishes the term's own
+            # Series unchanged on its native timeframe, so a return that keeps
+            # the row count while carrying a different index is read one way
+            # here and another way in production. Measured: a term returning an
+            # honest rolling mean relabelled one row early passed as CHECKED
+            # while the value published at row i was computed over rows through
+            # i+1. That is the one outcome this gate cannot afford, so the index
+            # is compared and not merely counted.
+            if isinstance(whole, pd.Series) and not whole.index.equals(bars.index):
+                return TermVerdict(
+                    term.name, FAILED,
+                    f"args {args}: returned an index that is not the frame's, "
+                    f"so its values would be published against rows other than "
+                    f"the ones they were computed from",
+                    checked, "schema")
+
             saw_a_number = False
             for i in rows:
                 want = _value_at(whole, i)
+                window = bars.iloc[:i + 1]
                 try:
-                    prefix = _value_at(
-                        evaluate_term(term, bars.iloc[:i + 1], args), -1)
+                    got = evaluate_term(term, window, args)
+                    # The prefix answer is read by position too, and lining up
+                    # with the whole frame does not mean lining up with a prefix
+                    # of it: a term labelling its output with the frame's LAST
+                    # rows is indistinguishable from an honest one on the whole
+                    # frame and wrong on every prefix.
+                    if (isinstance(got, pd.Series)
+                            and not got.index.equals(window.index)):
+                        return TermVerdict(
+                            term.name, FAILED,
+                            f"args {args} row {i}: over the prefix it returned "
+                            f"an index that is not the prefix's, so the two "
+                            f"sides of this comparison describe different rows",
+                            checked, "schema")
+                    prefix = _value_at(got, -1)
                 except Exception as exc:
                     # "evaluating raised", not "the term raised": this call goes
                     # through evaluate_term, which is the gate's own code, so a
