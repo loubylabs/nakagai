@@ -19,6 +19,12 @@ a float bit-for-bit, and the sha256 is not truncated, because the requirement
 is byte-identical trades: a rounded price and a shortened digest both admit a
 change this test exists to refuse.
 
+Digesting at full precision buys that strictness at a price, and the price is
+paid in `_ohlcv`: every operation that builds the frame has to be bit-identical
+on every machine, or the table records the architecture that derived it rather
+than the behaviour it claims to pin. `np.sin` is not, which is what made this
+proof pass locally and fail in CI on all nine specs at once.
+
 Nothing is excluded from the digest, including the four identity fields
 `PortfolioTrade` gained in Phase 1. That is a measured fact rather than a
 convenience, and `test_the_identities_are_derived_and_never_generated` is what
@@ -97,7 +103,7 @@ SESSION_INTERVALS = 26  # 09:30 to 16:00 Eastern, on the 15-minute base clock
 # The test range is sized to make every spec fire, and not beyond it. A
 # regression in the grammar shows up on the FIRST bar it touches, so a longer
 # run buys more trades rather than more discrimination, and the nine replays
-# below already compare 442 of them field by field. Doubling the range triples
+# below already compare 434 of them field by field. Doubling the range triples
 # this module's runtime, because every evaluation re-reads its own prefix.
 SESSIONS = 340
 TRAIN_SESSIONS = 210
@@ -241,10 +247,32 @@ def _ohlcv(idx, seed, trend_amp=3.0, vol_spike_every=40, displacement_every=14,
     that reverses (fires bars_since / turnaround-style users), and periodic
     displacement moves sharp enough to leave real 3-candle FVGs and order
     blocks (both need a genuine gap between non-adjacent candles, which a
-    smooth random walk essentially never produces on its own)."""
+    smooth random walk essentially never produces on its own).
+
+    Every operation here is bit-identical on every platform, and that is a
+    requirement rather than a nicety: the golden table below is a committed
+    digest of full-precision floats, so an input that differs in its last bit
+    between two machines makes the table a fingerprint of the machine that
+    derived it rather than of the engine's behaviour.
+
+    The trend was `np.sin` and is now a triangular wave, because `np.sin` is
+    the one operation in this function that is NOT bit-portable: it goes to the
+    platform's libm. Measured on numpy 2.5.1, the same call over 8840 points
+    hashes 6f814b7b on arm64 Darwin and 88014336 on x86_64 Linux, while
+    `linspace`, `cumsum` and every `default_rng` draw hash identically on both.
+    That one difference reached every price, and CI went red on all nine specs
+    with every trade COUNT matching, which is the signature of an input that
+    moved under the arithmetic rather than a spec that changed.
+
+    A triangle is +, -, * and floor on values a binary float represents
+    exactly, so it rounds the same way everywhere. It reverses as often as the
+    sine did and turns harder, which is if anything a better fixture for the
+    turnaround-style users this frame exists to fire."""
     rng = np.random.default_rng(seed)
     n = len(idx)
-    trend = np.sin(np.linspace(0, cycles * np.pi, n)) * trend_amp
+    # Two reversals a cycle, matching what `cycles * pi` of sine gave.
+    phase = np.arange(n, dtype="float64") * (cycles / (2.0 * n))
+    trend = (4.0 * np.abs(phase - np.floor(phase) - 0.5) - 1.0) * trend_amp
     steps = rng.normal(0, 0.15, n)
     disp_rows = np.arange(displacement_every // 2, n, displacement_every)
     for row in disp_rows:
@@ -504,6 +532,10 @@ def test_the_identities_are_derived_and_never_generated(market):
 # is what makes the table a measurement of "this node moved no trade" rather
 # than a stamp of "this node produced these numbers".
 #
+# It is also re-derived on a SECOND ARCHITECTURE. Every operation building the
+# frame is bit-identical everywhere, so these digests hold on x86_64 Linux and
+# on arm64 Darwin alike; `_ohlcv` says why that took work.
+#
 # The counts are not carried over from the table this file held before engine
 # Phase 1. That engine replayed each spec on its own timeframe with no account
 # between the signal and the trade; this one drives a 15-minute base clock,
@@ -511,15 +543,15 @@ def test_the_identities_are_derived_and_never_generated(market):
 # numbers moved because the replay model moved, and the baseline run above is
 # what attributes that rather than assuming it.
 GOLDEN = {
-    "catalog:macd_trend": (65, "da47b163f57e00fa10b9b7862e3ad422fca7e8a5d0abfbc10c3868db56e5b515"),
-    "catalog:rsi_reversion": (4, "493b6c0a7b7bb3943150994d6b63cc989d78ba64b993a047a7e5016d57cc6950"),
-    "catalog:sma_cross": (45, "efd6ebbf285e4ff09f89126986a0b896e02715a3bf04670d64a035d7d5a0b1f4"),
-    "fixture:bollinger_breakout": (2, "a071d23ac35e834d2a5b3694093760fb11efa1825e76469cdb84f6caa7eb81ad"),
-    "fixture:discount_pullback": (19, "9ee81fb8862f974d1286a0e13626f4c9647bf45070be10f6087de49e39551079"),
-    "fixture:ifvg_reversal": (70, "a3312c485ff1c8ace511c60257475b29e8f8d103d97f42392a26536b04d0943d"),
-    "fixture:ob_bounce": (58, "f7d0365f68909a59bdd5f8e8a5251c8e9d0a3c587d29ae49fa1cd6a03d2fd3fa"),
-    "fixture:orb": (134, "2ed7aa5998d4f4d1a3a9fac4cce83619d145bdd4aa6e864d88339bbd0b6ad0f1"),
-    "fixture:sma_cross": (45, "efd6ebbf285e4ff09f89126986a0b896e02715a3bf04670d64a035d7d5a0b1f4"),
+    "catalog:macd_trend": (65, "1145523650f4f26ae7626224775c7f0173756f4c6d68c4d72457672210f69043"),
+    "catalog:rsi_reversion": (7, "d25b3bcb6d1b3d8db0351fce1d12ccd229350088a772dee558df78ccbda026b3"),
+    "catalog:sma_cross": (40, "c749f03f0a1165501fe89bde5578e9d7dfd5f7dfcc7b605fdb1c7d99d34496c9"),
+    "fixture:bollinger_breakout": (4, "9de47e1009343fc8bd6bce9fb36d37e83248bdf3e0748dbf86947de5d2c3a1fb"),
+    "fixture:discount_pullback": (23, "af178fedb4997a0bf36b62a427fcf5e0abc206cc6266d1bf2b196dc34b016489"),
+    "fixture:ifvg_reversal": (65, "e55d9aa48c2cda2c7ccb382923b59b1d2e8f6dd59f762381d247db2c7cb4938d"),
+    "fixture:ob_bounce": (55, "ba01cd1a8f70d51fdcfba4c70d7f5fb8d048c778f5f308942e7e91767cb24c7d"),
+    "fixture:orb": (135, "d0c95a30dc43690f5f176cc65e1a68263305860983c2536bdffea481a9dbccad"),
+    "fixture:sma_cross": (40, "c749f03f0a1165501fe89bde5578e9d7dfd5f7dfcc7b605fdb1c7d99d34496c9"),
 }
 
 
