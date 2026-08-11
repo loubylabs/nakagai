@@ -1,12 +1,11 @@
 # tests/test_verify_term.py
 """The per-term causality gate, and its honesty about what it cannot test."""
 
-import itertools
-
 import numpy as np
 import pandas as pd
 import pytest
 
+import nakagai.strategies.rules.verify as verify_module
 from nakagai.strategies.rules.vocabulary import Term, core_vocabulary
 from nakagai.strategies.rules.verify import (
     CONDITION_ARG, MAX_ARG_SETS, TermVerdict, arg_sets, evaluate_term,
@@ -283,4 +282,27 @@ def test_a_term_over_the_cap_is_refused_loudly_not_sampled():
                 {f"c{i}": "x" for i in range(6)},
                 lambda s, a: s)
     with pytest.raises(ValueError, match="argument sets"):
+        arg_sets(term)
+
+
+def test_the_cap_counts_what_the_term_produces_not_the_formula(monkeypatch):
+    """A default sitting on its own range endpoint must not cost a refusal.
+
+    The combinatorial formula says 2 choices times (1 + 2 ranges) = 6, but
+    offset's default IS its own lower endpoint, so two of those six collapse and
+    the term really produces 4. Counting the formula would refuse this term at a
+    cap of 4 or 5 for sets it never generates. Node 02 generates terms from
+    another library's signatures, where a default on a bound is ordinary.
+    """
+    term = Term("default_on_a_bound", "series",
+                {"mode": ("safe", "fast"), "offset": (0.0, 1.0)},
+                {"mode": "safe", "offset": 0.0},
+                lambda s, a: s)
+    assert len(arg_sets(term)) == 4
+
+    monkeypatch.setattr(verify_module, "MAX_ARG_SETS", 4)
+    assert len(arg_sets(term)) == 4, "the real count fits the cap and must pass"
+
+    monkeypatch.setattr(verify_module, "MAX_ARG_SETS", 3)
+    with pytest.raises(ValueError, match="more than 3"):
         arg_sets(term)

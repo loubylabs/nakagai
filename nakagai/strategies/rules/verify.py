@@ -136,25 +136,37 @@ def arg_sets(term: Term) -> tuple[dict, ...]:
             continue
         (choices if is_choice_rule(rule) else ranges)[name] = rule
 
-    total = (len(list(itertools.product(*choices.values()))) if choices else 1)
-    total *= 1 + 2 * len(ranges)
-    if total > MAX_ARG_SETS:
-        raise ValueError(
-            f"term {term.name!r} generates {total} argument sets, over the "
-            f"{MAX_ARG_SETS} cap; widen the cap deliberately or narrow the "
-            f"schema, but do not sample it silently")
-
     out, seen = [], set()
 
     def add(candidate: dict) -> None:
-        key = tuple(sorted(candidate.items()))
-        if key not in seen:
-            seen.add(key)
-            out.append(candidate)
+        """Keep a new candidate, and refuse once the REAL count passes the cap.
 
-    combos = ([dict(zip(choices, values))
-               for values in itertools.product(*choices.values())]
-              if choices else [{}])
+        Counted after deduplication, not from the combinatorial formula. A
+        default that coincides with one of its own range endpoints collapses two
+        candidates into one, so the formula overstates what the term produces and
+        would refuse a term that fits. That direction is safe but still wrong,
+        and it stops being hypothetical at node 02, where terms are generated
+        from another library's signatures and a default sitting on a bound is
+        ordinary rather than exotic.
+
+        Raising from inside the loop also bounds the work: the walk stops at the
+        cap instead of materializing a pathological schema's whole cross product
+        first.
+        """
+        key = tuple(sorted(candidate.items()))
+        if key in seen:
+            return
+        if len(seen) >= MAX_ARG_SETS:
+            raise ValueError(
+                f"term {term.name!r} generates more than {MAX_ARG_SETS} "
+                f"argument sets, over the cap; widen the cap deliberately or "
+                f"narrow the schema, but do not sample it silently")
+        seen.add(key)
+        out.append(candidate)
+
+    combos = ((dict(zip(choices, values))
+               for values in itertools.product(*choices.values()))
+              if choices else iter([{}]))
     for combo in combos:
         base = {**term.defaults, **combo}
         add(base)
