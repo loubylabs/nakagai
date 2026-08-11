@@ -146,3 +146,36 @@ def test_screen_spec_inherits_not_in_validation_and_readback():
     assert describe_screen(spec) == (
         "Screen on 1d bars, matching symbols where NOT ANY of:\n"
         "  - rsi(14) is below 30")
+
+
+def _section(prompt: str, header: str) -> str:
+    """One "#" section of the rendered screen prompt, its header line included.
+
+    Same reason as its twin in test_rules_vocabulary.py: an unscoped substring
+    search over a prompt this large passes for the wrong reason routinely.
+    """
+    return prompt.split(header, 1)[1].split("\n#", 1)[0]
+
+
+def test_screen_prompt_renders_a_condition_typed_arg_readably():
+    prompt = render_screen_prompt()
+    assert "- bars_since(cond={lhs,op,rhs})" in prompt.splitlines()
+    assert "cond=condition" not in prompt
+
+
+def test_screen_prompt_describes_a_second_condition_taking_term_generically(
+        count_where_vocab):
+    prompt = render_screen_prompt(count_where_vocab)
+    assert "- count_where(when={lhs,op,rhs}, n=(1, 50))" in prompt.splitlines()
+
+
+def test_the_screen_primitives_header_states_the_prohibition_generically():
+    header = _section(render_screen_prompt(), "# Primitives").split("\n- ", 1)[0]
+    assert "bars_since" not in header
+    assert "cross" in header
+
+
+def test_screen_prompt_documents_not_in_the_grammar_paragraph():
+    schema = _section(render_screen_prompt(), "# Schema")
+    assert '{"not":' in schema
+    assert '{"not": {"all":' in schema

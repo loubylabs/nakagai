@@ -7,7 +7,8 @@ import json
 from nakagai.strategies.composite.spec import (
     DEFAULT_WINDOW_BARS, MAX_BLOCKS, WINDOW_BARS_BOUNDS)
 from nakagai.strategies.rules import spec as g
-from nakagai.strategies.rules.vocabulary import Vocabulary, resolve_vocabulary
+from nakagai.strategies.rules.vocabulary import (
+    Vocabulary, is_condition_rule, resolve_vocabulary)
 
 _EXAMPLES = """\
 Description: "buy the dip when rsi 14 recovers above 30"
@@ -46,7 +47,14 @@ Description: "combine the donchian breakout with the adx pullback, both have to 
 
 
 def _bounds(schema: dict) -> str:
-    return ", ".join(f"{k}={v}" for k, v in schema.items()) or "no args"
+    # A condition-typed arg renders its real shape, {lhs,op,rhs}, rather than
+    # the schema's bare string "condition": the model needs to know it is
+    # building a nested condition there, not passing a scalar. Read off the
+    # arg's declared type, so a term added to the vocabulary is described
+    # without anyone editing this prompt.
+    return ", ".join(
+        f"{k}={{lhs,op,rhs}}" if is_condition_rule(v) else f"{k}={v}"
+        for k, v in schema.items()) or "no args"
 
 
 def _composite_section(members: dict) -> str:
@@ -105,8 +113,11 @@ or {{"not_expressible": "<one-sentence reason>"}}. Always include "kind".
 A spec: {{"version": 2, "name": str, "timeframe": one of {g.TIMEFRAMES},
 "long"/"short": condition groups, "exits"?: {{...}}, "risk": {{...}}}}.
 Conditions: {{"lhs": <expr>, "op": one of {g.OPS}, "rhs": <expr>}} inside
-nested {{"all": [...]}} / {{"any": [...]}} groups. The lhs of a cross must be
-a series expression, never a number.
+nested {{"all": [...]}} / {{"any": [...]}} groups. A group may be negated with
+{{"not": <group>}}: it takes a group, never a bare condition, so "RSI is not
+above 70" is {{"not": {{"all": [{{"lhs": {{"ind": "rsi", "n": 14}}, "op": ">",
+"rhs": 70}}]}}}}. The lhs of a cross must be a series expression, never a
+number.
 
 Expressions are numbers or objects:
 - series leaf: {{"src": one of {g.SOURCES}, "tf"?: one of {g.TIMEFRAMES}}}
@@ -117,7 +128,8 @@ Expressions are numbers or objects:
 # Indicators (name(arg=bounds or choices))
 {ind_lines}
 
-# Primitives (session/state aware; bars_since takes cond={{lhs,op,rhs}} with comparison ops only)
+# Primitives (session/state aware; an arg shown as {{lhs,op,rhs}} is a nested
+condition and takes comparison ops only, never a cross)
 {prim_lines}
 
 # Exits (all optional)

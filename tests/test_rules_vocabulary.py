@@ -266,6 +266,49 @@ def test_the_retired_exprs_module_is_gone():
         importlib.import_module("nakagai.strategies.rules.exprs")
 
 
+def _section(prompt: str, header: str) -> str:
+    """One "#" section of a rendered prompt, its header line included.
+
+    Scoped rather than searched whole, because a bare `x in prompt` over a
+    prompt this large passes for the wrong reason routinely: a term name
+    appears in an example, a word appears in unrelated prose, and the
+    assertion says nothing about the paragraph it claims to be about.
+    """
+    return prompt.split(header, 1)[1].split("\n#", 1)[0]
+
+
+def test_prompt_renders_a_condition_typed_arg_readably():
+    prompt = render_system_prompt()
+    # The rendered LIST line, whole: prose elsewhere mentioning the shape must
+    # not be able to satisfy this.
+    assert "- bars_since(cond={lhs,op,rhs})" in prompt.splitlines()
+    assert "cond=condition" not in prompt
+
+
+def test_prompt_describes_a_second_condition_taking_term_with_no_new_prose(
+        count_where_vocab):
+    """Why _bounds reads the arg's declared type rather than a name: a term
+    registered outside core is described correctly with nobody editing the
+    prompt's text, which is what node 02's generated terms need."""
+    prompt = render_system_prompt(None, vocabulary=count_where_vocab)
+    assert "- count_where(when={lhs,op,rhs}, n=(1, 50))" in prompt.splitlines()
+
+
+def test_the_primitives_header_states_the_cross_prohibition_generically():
+    # The header block only, up to the first rendered term line.
+    header = _section(render_system_prompt(), "# Primitives").split("\n- ", 1)[0]
+    assert "bars_since" not in header  # not hand-written for one term
+    assert "cross" in header  # and the prohibition it carried is not lost
+
+
+def test_prompt_documents_not_in_the_grammar_paragraph():
+    grammar = _section(render_system_prompt(), "# Grammar")
+    assert '{"not":' in grammar
+    # and the worked example shows its argument as a GROUP, the only shape
+    # _check_group accepts.
+    assert '{"not": {"all":' in grammar
+
+
 def test_canon_group_handles_not_without_iterating_its_dict_as_a_list():
     """canon.py's _canon_group: `for i in g[key]` over a dict (not's value)
     iterates the dict's KEY STRINGS rather than raising a shape error, and
