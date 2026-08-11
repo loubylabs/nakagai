@@ -352,6 +352,37 @@ def test_an_exit_fill_refuses_a_direction_outside_the_contract():
         ledger.exit_fill("flat", 100.0)
 
 
+def test_an_exit_fee_refuses_anything_that_is_not_a_share_count():
+    """The fee model takes the magnitude of what it is given, so a float or a
+    negative count would price a plausible fee instead of refusing."""
+    ledger = funded_ledger(100_000.0, execution=base_execution())
+
+    with pytest.raises(ReplayInputError):
+        ledger.exit_fee(-200)
+    with pytest.raises(ReplayInputError):
+        ledger.exit_fee(200.0)
+    assert ledger.exit_fee(200) == pytest.approx(2.0)
+
+
+def test_a_direction_outside_the_contract_never_becomes_a_position():
+    """A signal validates at the strategy boundary and an intent checks only
+    its symbol, so the entry path is where the ledger has to learn that a
+    direction is one of the two it knows. Without this the short geometry
+    branch passes, the short pricing branch sells to open, cash leaves, and
+    the fill posts no collateral at all."""
+    ledger = funded_ledger(100_000.0)
+    intent = entry_intent(
+        ledger, "SPY", direction="sell_short", stop=101.4, target=96.0,
+    )
+
+    with pytest.raises(ReplayInputError) as exc:
+        ledger.propose(intent, 100.0, 100_000.0)
+
+    assert exc.value.code == "invalid_value"
+    assert ledger.settled_cash == 100_000.0
+    assert ledger.open_positions == 0
+
+
 def test_settling_the_same_session_twice_does_not_double_count():
     ledger = funded_ledger(100_000.0)
     key, _ = opened_position(ledger, frozen_equity=1000.0)
@@ -415,6 +446,52 @@ def test_a_short_gapping_below_its_target_fills_at_the_open():
     hit = ledger.protective_exit(key, 95.0, 95.5, 94.0)
 
     assert hit == (95.0, ExitReason.TARGET_GAP)
+
+
+def test_a_long_gapping_past_its_target_is_a_gap_even_when_the_stop_is_reachable():
+    """The precedence that separates causality from pessimism. This bar opens
+    above the target AND trades below the stop, so the pessimistic rule would
+    take the stop. It cannot: the open is the first print of the bar and the
+    position was gone at 106 before 94 was ever available."""
+    closed = replay_ambiguous_long(
+        stop=95.0, target=105.0, low=94.0, high=108.0, gap_open=106.0,
+    )
+    assert closed.exit_reason == ExitReason.TARGET_GAP
+    assert closed.exit == 106.0
+
+
+def test_a_long_gapping_past_its_stop_is_a_gap_even_when_the_target_is_reachable():
+    """The mirror, where causality and pessimism agree on the stop but not on
+    the price. Filling at 95 rather than 94 would model the gap as free."""
+    closed = replay_ambiguous_long(
+        stop=95.0, target=105.0, low=92.0, high=106.0, gap_open=94.0,
+    )
+    assert closed.exit_reason == ExitReason.STOP_GAP
+    assert closed.exit == 94.0
+
+
+def test_a_short_gapping_past_its_target_is_a_gap_even_when_the_stop_is_reachable():
+    ledger = funded_ledger(100_000.0)
+    key, _ = opened_position(
+        ledger, frozen_equity=1000.0, direction="short",
+        stop=101.4, target=96.0,
+    )
+
+    hit = ledger.protective_exit(key, 95.0, 102.0, 94.0)
+
+    assert hit == (95.0, ExitReason.TARGET_GAP)
+
+
+def test_a_short_gapping_past_its_stop_is_a_gap_even_when_the_target_is_reachable():
+    ledger = funded_ledger(100_000.0)
+    key, _ = opened_position(
+        ledger, frozen_equity=1000.0, direction="short",
+        stop=101.4, target=96.0,
+    )
+
+    hit = ledger.protective_exit(key, 102.0, 103.0, 95.0)
+
+    assert hit == (102.0, ExitReason.STOP_GAP)
 
 
 def test_an_intrabar_stop_fills_at_the_level_and_not_the_extreme():
@@ -541,6 +618,42 @@ def test_slippage_moves_the_entry_and_the_exit_in_opposite_directions():
     assert proposal.fill == pytest.approx(100.02)
     assert trade.exit == pytest.approx(100.9798)
     assert trade.gross_pnl == pytest.approx(675.6992)
+
+
+def test_a_gap_exit_credits_only_the_open_it_filled_at():
+    """The one print between the fill and the exit is the open. Folding the
+    bar's full range would credit a position with an excursion it was no
+    longer open for, which is how a favorable extreme flatters a trade that
+    had already gone."""
+    closed = replay_ambiguous_long(
+        stop=95.0, target=105.0, low=90.0, high=110.0, gap_open=94.0,
+    )
+
+    assert closed.exit_reason == ExitReason.STOP_GAP
+    assert closed.mae == pytest.approx(1.2)
+    assert closed.mfe == 0.0
+
+
+def test_a_stop_exit_does_not_credit_the_favorable_extreme():
+    """OHLC cannot prove the high came before the stop, and pessimistic
+    ordering already assumed it did not."""
+    closed = replay_ambiguous_long(
+        stop=95.0, target=110.0, low=90.0, high=108.0,
+    )
+
+    assert closed.exit_reason == ExitReason.STOP
+    assert closed.mae == 1.0
+    assert closed.mfe == 0.0
+
+
+def test_a_target_exit_credits_the_adverse_extreme_it_survived():
+    closed = replay_ambiguous_long(
+        stop=90.0, target=105.0, low=96.0, high=112.0,
+    )
+
+    assert closed.exit_reason == ExitReason.TARGET
+    assert closed.mae == pytest.approx(0.4)
+    assert closed.mfe == pytest.approx(0.5)
 
 
 def test_excursion_is_reported_in_r_against_the_initial_stop():

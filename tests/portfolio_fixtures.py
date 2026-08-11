@@ -899,10 +899,38 @@ def replay_ambiguous_long(
         ledger, raw_open=raw_open, entry_ref=raw_open, stop=stop, target=target,
     )
     bar_open = raw_open if gap_open is None else gap_open
-    ledger.observe(key, high, low)
     hit = ledger.protective_exit(key, bar_open, high, low)
     assert hit is not None, "the fixture bar reaches no protective level"
     fill, reason = hit
+    _fold_exit_excursion(
+        ledger, key, reason, bar_open=bar_open, low=low, stop=stop, target=target,
+    )
     return ledger.close(
         key, fill, CLOSE_TS, reason, ledger.exit_fee(ledger.view(key).qty),
     )
+
+
+def _fold_exit_excursion(
+    ledger: _Ledger, key: tuple[str, str], reason: ExitReason, *,
+    bar_open: float, low: float, stop: float, target: float,
+) -> None:
+    """What one long exit is allowed to have observed, for this bar.
+
+    The rules are the architecture's, and they are causal rather than
+    generous. A gap exit folds only the raw open, because that print is the
+    first and last observation before the position left. A stop exit folds the
+    open and the stop and never the favorable extreme, because OHLC cannot
+    prove that extreme came first, and that holds whether or not the target
+    was also inside the bar. Only a target exit folds an extreme, the adverse
+    one, because pessimistic ordering already assumed it came first.
+
+    A surviving position is the other case entirely: it folds the bar's full
+    high and low, through `_Ledger.observe`, because it was live throughout.
+    That belongs to the replay chronology rather than here.
+    """
+    ledger.observe(key, bar_open, bar_open)
+    if reason is ExitReason.STOP:
+        ledger.observe(key, stop, stop)
+    elif reason is ExitReason.TARGET:
+        ledger.observe(key, target, target)
+        ledger.observe(key, low, low)

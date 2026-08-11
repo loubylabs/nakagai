@@ -52,6 +52,7 @@ from nakagai.engine.portfolio_types import (
     _require_optional_binary64,
     _require_ordinal,
     _require_positive,
+    _require_positive_int,
     _require_timestamp,
     _set,
     _set_binary64,
@@ -142,6 +143,12 @@ class EntryProposal:
     equity it is given and refuses anything that does not match, so a
     candidate sized against post-fill equity cannot reach the cash pool by
     being handed over beside the earlier number.
+
+    This is also where the ledger's entry path learns that a direction is one
+    of the two it knows. A `Signal` deliberately does not validate itself and
+    an `EntryIntent` checks only its symbol, so without this every direction
+    test downstream would be reading an unchecked string, and the one that
+    decides whether a fill posts collateral would silently answer "long".
     """
 
     intent: EntryIntent
@@ -153,6 +160,7 @@ class EntryProposal:
 
     def __post_init__(self) -> None:
         _require_instance(self.intent, "intent", EntryIntent)
+        _require_choice(self.intent.signal.direction, "direction", DIRECTIONS)
         _set_positive(self, "raw_open", "fill")
         _set(self, "quantity", _require_ordinal(self.quantity, "quantity"))
         _set_nonnegative(self, "entry_fee", "required_cash")
@@ -450,8 +458,15 @@ class _Ledger:
         )
 
     def exit_fee(self, qty: int) -> float:
-        """What one closing fill of `qty` shares costs."""
-        return _require_binary64(self._fees.charge(qty), "exit_fee")
+        """What one closing fill of `qty` shares costs.
+
+        `FeeModel.charge` takes the magnitude of what it is given, so a float
+        or a negative share count would price a plausible fee rather than
+        refuse. The quantity is a whole positive number of shares here.
+        """
+        return _require_binary64(
+            self._fees.charge(_require_positive_int(qty, "qty")), "exit_fee",
+        )
 
     def protective_exit(
         self, key: PositionKey, open_price: float, high: float, low: float,
@@ -462,6 +477,12 @@ class _Ledger:
         stop that exits. The raw open, high, and low decide whether a level
         was crossed; slippage prices the reference afterwards and never moves
         the test.
+
+        This answers for the whole bar, so it collapses two separate steps of
+        the replay chronology into one predicate. A caller applying open-gap
+        exits to positions carried into an interval (step 3) must filter the
+        result to `STOP_GAP` and `TARGET_GAP` and act on nothing else; the
+        intrabar reasons belong to step 7, after this interval's fills.
         """
         position = self._require_position(key)
         hit = _protective_exit(
@@ -550,11 +571,13 @@ class _Ledger:
         # not leave the account holding cash against a position it never got.
         stamp = _require_timestamp(entry_ts, "entry_ts")
         del self._reserved[key]
-        collateral = 0.0
-        if proposal.direction == "short":
-            collateral = _require_binary64(
-                proposal.quantity * proposal.fill, "short_collateral",
-            )
+        # Partitioned on "long", the way every other direction test in this
+        # module is. Asking whether a direction is short instead would make
+        # this the one site that reads an unrecognized value as a long, and
+        # the failure would be a short holding no collateral at all.
+        collateral = 0.0 if proposal.direction == "long" else _require_binary64(
+            proposal.quantity * proposal.fill, "short_collateral",
+        )
         signal = proposal.intent.signal
         self._positions[key] = _Position(
             intent=proposal.intent,
