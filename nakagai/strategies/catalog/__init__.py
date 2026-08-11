@@ -18,6 +18,9 @@ import json
 from functools import cache
 from pathlib import Path
 
+from nakagai.engine.registry import (
+    StrategyDefinition, rules_definition, spec_definition_digest,
+)
 from nakagai.strategies.rules import (
     RuleStrategy, VocabularyFactory, validate_spec,
 )
@@ -35,6 +38,31 @@ def load_entries(specs_dir: Path,
             raise ValueError(f"catalog spec {path.name} invalid: {'; '.join(errs)}")
         out[entry["spec"]["name"]] = entry
     return out
+
+
+def catalog_definitions(specs_dir: Path,
+                        vocabulary_factory: VocabularyFactory
+                        ) -> tuple[StrategyDefinition, ...]:
+    """One frozen definition per shipped spec, ready to enter a bundle.
+
+    No minted subclass and no class attribute: the definition carries the
+    name, binds the immutable spec, and builds a plain RuleStrategy fresh for
+    every candidate. The base digest covers the spec AND the vocabulary it is
+    read under, because one spec under two grammars is two strategies, which
+    is the same reason both loaders below demand a vocabulary rather than
+    guessing one.
+
+    Deliberately not cached. These are values, so two calls give two equal
+    bundles rather than two disagreeing ones, and there is no class identity
+    left for a second cache entry to split.
+    """
+    return tuple(
+        rules_definition(
+            name, spec_definition_digest(entry["spec"], vocabulary_factory),
+            spec=entry["spec"], vocabulary_factory=vocabulary_factory,
+        )
+        for name, entry in load_entries(specs_dir, vocabulary_factory).items()
+    )
 
 
 @cache

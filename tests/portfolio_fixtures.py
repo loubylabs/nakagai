@@ -12,6 +12,8 @@ second replay implementation.
 """
 
 import dataclasses
+from collections.abc import Callable, Mapping
+from dataclasses import field
 from datetime import date
 
 import pandas as pd
@@ -51,12 +53,20 @@ from nakagai.engine.portfolio_types import (
     SlippageSpec,
     TradeStats,
 )
+from nakagai.engine.registry import (
+    FrozenStrategyRegistry,
+    StrategyDefinition,
+    composite_definition,
+    rules_definition,
+)
 from nakagai.engine.schedule import ValidatedSchedule, validate_schedule
 
 BATCH_ID = "0198b1c2-3d4e-7f80-8123-456789abcdef"
 REGISTRY_DIGEST = "1f" * 32
 DEFINITION_BASE_A = "2a" * 32
 DEFINITION_BASE_B = "3b" * 32
+DEFINITION_BASE_C = "4c" * 32
+DEFINITION_BASE_D = "5d" * 32
 CALENDAR_VERSION = "exchange_calendars:4.5.6:nakagai-rth-v1"
 PLACEHOLDER_DIGEST = "0" * 64
 
@@ -655,3 +665,111 @@ def without_pair(frames: dict, symbol: str, timeframe: str) -> dict:
     kept = dict(frames)
     del kept[(symbol, timeframe)]
     return kept
+
+
+# -------------------------------------------------------- registry fixtures
+
+# Real RuleSpecs, not stubs. A definition whose factory cannot build a working
+# strategy would let a registry test pass while the replay it feeds cannot
+# run, and every timeframe below is one a dependency test then has to find.
+SMA_CROSS_SPEC = {
+    "version": 2, "name": "sma_cross", "timeframe": "1h",
+    "long": {"all": [{"lhs": {"ind": "sma", "n": 10}, "op": "crosses_above",
+                      "rhs": {"ind": "sma", "n": 30}}]},
+    "risk": {"stop": {"kind": "atr", "n": 14, "mult": 2.0},
+             "target": {"kind": "rr", "rr": 2.0}},
+}
+
+DONCHIAN_SPEC = {
+    "version": 2, "name": "donchian_break", "timeframe": "1d",
+    "long": {"all": [{"lhs": {"src": "close"}, "op": ">",
+                      "rhs": {"ind": "highest", "n": 20}}]},
+    "risk": {"stop": {"kind": "atr", "n": 14, "mult": 2.0},
+             "target": {"kind": "rr", "rr": 2.0}},
+}
+
+# A private play: the spec travels in params rather than being bound to the
+# definition, and it reads a second timeframe through a node `tf`, so its
+# declared dependencies cannot come from `timeframe` alone.
+PRIVATE_RULES_SPEC = {
+    "version": 2, "name": "private_rules", "timeframe": "1h",
+    "long": {"all": [{"lhs": {"src": "close", "tf": "4h"}, "op": ">",
+                      "rhs": {"ind": "sma", "n": 20}}]},
+    "risk": {"stop": {"kind": "atr", "n": 14, "mult": 2.0},
+             "target": {"kind": "rr", "rr": 2.0}},
+}
+
+PRIVATE_RULES_PARAMS = {"spec": PRIVATE_RULES_SPEC}
+
+# Block ids out of alphabetical order on purpose: members are built and voted
+# in declared block order, never in sorted order.
+COMPOSITE_PARAMS = {
+    "spec": {
+        "version": 1, "name": "combo",
+        "blocks": {
+            "b": {"strategy": "private_rules", "params": PRIVATE_RULES_PARAMS},
+            "a": {"strategy": "sma_cross", "params": {}},
+        },
+        "long": {"all": ["a", "b"]},
+        "risk": {"stop": {"kind": "atr", "n": 14, "mult": 2.0},
+                 "target": {"kind": "rr", "rr": 2.0}},
+    },
+}
+
+
+def base_definitions(
+    wrap: Callable[[StrategyDefinition], StrategyDefinition] | None = None,
+) -> tuple[StrategyDefinition, ...]:
+    """The bundle the portfolio tests replay, supplied out of canonical order.
+
+    `wrap` decorates every definition as it is built, so a caller that wants
+    counting or spying gets it on the composite's members too. Wrapping after
+    the fact could not: the composite captures its member definitions when it
+    is built, so a later replacement would never reach the members it builds.
+    """
+    hook = (lambda definition: definition) if wrap is None else wrap
+    sma = hook(rules_definition("sma_cross", DEFINITION_BASE_A, spec=SMA_CROSS_SPEC))
+    donchian = hook(rules_definition(
+        "donchian_break", DEFINITION_BASE_B, spec=DONCHIAN_SPEC))
+    private = hook(rules_definition("private_rules", DEFINITION_BASE_D))
+    combo = hook(composite_definition(
+        "combo", DEFINITION_BASE_C,
+        members={"sma_cross": sma, "private_rules": private},
+    ))
+    return (donchian, combo, private, sma)
+
+
+def strategy_registry() -> FrozenStrategyRegistry:
+    return FrozenStrategyRegistry.from_definitions(base_definitions())
+
+
+@dataclasses.dataclass
+class FactoryCalls:
+    """What the registry asked of the definitions, and what it got back."""
+
+    factory_count: int = 0
+    dependency_count: int = 0
+    built: list = field(default_factory=list)
+
+
+def counting_registry() -> tuple[FrozenStrategyRegistry, FactoryCalls]:
+    """The base bundle with every factory and dependency call counted."""
+    calls = FactoryCalls()
+    definitions = base_definitions(lambda item: _counted(item, calls))
+    return (FrozenStrategyRegistry.from_definitions(definitions), calls)
+
+
+def _counted(definition: StrategyDefinition,
+             calls: FactoryCalls) -> StrategyDefinition:
+    def factory(params: Mapping):
+        calls.factory_count += 1
+        built = definition.factory(params)
+        calls.built.append(built)
+        return built
+
+    def dependencies(params: Mapping):
+        calls.dependency_count += 1
+        return definition.dependencies(params)
+
+    return dataclasses.replace(
+        definition, factory=factory, dependencies=dependencies)

@@ -1,0 +1,534 @@
+"""The frozen registry: a closed bundle, pure dependencies, fresh runtimes.
+
+A registry is a value. It is built once from a complete set of definitions,
+sorted by `definition_digest` so the order a caller supplied them in can never
+reach the digest, and it answers exactly two questions afterwards: what is this
+bundle, and what is the definition behind this name.
+
+Three properties make that safe to hash and to replay.
+
+- **Closed.** Every member a definition lowers onto is itself in the bundle,
+  under its own name and its own digest, and no member tree reaches back into
+  itself. Both are proven when the registry is built, before any factory runs,
+  so a replay never discovers a missing member halfway through a symbol.
+- **Pure.** `dependencies(params)` answers what a play reads without building
+  the thing that reads it. A composite asks its members and returns the union.
+  Nothing here constructs a strategy, opens a cache, or resolves a workspace.
+- **Fresh.** `factory(params)` is a constructor, never a cache. Every call
+  builds a new strategy, and a composite call rebuilds its whole member tree,
+  so two candidates over one definition share no object and therefore no
+  votes, no memo, and no ratchet.
+
+Core knows definitions and nothing else. There is no adapter kind, manifest
+bundle, workspace, saved play, or module path here: the platform resolves all
+of that before it builds a bundle, and hands core the resulting values.
+"""
+
+from collections.abc import Callable, Iterable, Mapping
+from dataclasses import dataclass
+from functools import cache
+from types import MappingProxyType
+from typing import Protocol, TypeAlias, runtime_checkable
+
+from nakagai.engine.bars import BAR_TIMEFRAMES, BASE_TIMEFRAME, _require_timeframe
+from nakagai.engine.canonical import _digest
+from nakagai.engine.portfolio_types import (
+    JSONValue,
+    _fail,
+    _require_digest,
+    _require_instance,
+    _require_items,
+    _require_name,
+    _require_params,
+    _require_symbol,
+    _set,
+)
+from nakagai.strategies.base import Strategy
+from nakagai.strategies.composite.strategy import CompositeStrategy, member_blocks
+from nakagai.strategies.rules.strategy import RuleStrategy, spec_timeframes
+from nakagai.strategies.rules.vocabulary import (
+    Term,
+    VocabularyFactory,
+    core_vocabulary,
+)
+
+# Bumped when the shape of a registry changes rather than its contents, so a
+# candidate identity moves when the contract under it moves.
+REGISTRY_CONTRACT_VERSION = "1"
+
+# The graded factor: params, symbol, a read-only causal view clipped at
+# `test_end`, and the observation timestamps, returning one finite or null
+# margin per timestamp in the same order. The view type arrives with the IC
+# lens, so the parameters stay unconstrained here rather than being named
+# after a type this module would have to invent.
+IcFactor: TypeAlias = Callable[..., tuple[float | None, ...]]
+
+
+@dataclass(frozen=True)
+class StrategyDependencies:
+    """Everything one play reads beyond its own traded symbol's base bars.
+
+    Timeframes deduplicate into the fixed order `15m`, `1h`, `4h`, `1d`, and
+    external symbols uppercase, deduplicate, and sort lexically, so two
+    declarations of one data closure are one value. A blank or unsupported
+    entry is refused here, which is before a manifest could publish it.
+
+    Normalization runs through the same `_require_timeframe`, `_require_symbol`
+    and `BAR_TIMEFRAMES` the bar boundary uses. Two independent spellings of
+    one rule drift; one spelling cannot.
+    """
+
+    timeframes: tuple[str, ...]
+    external_symbols: tuple[str, ...]
+    vocabulary_digest: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.timeframes, tuple):
+            raise _fail("invalid_type", "value must be a tuple", field="timeframes")
+        if not isinstance(self.external_symbols, tuple):
+            raise _fail("invalid_type", "value must be a tuple", field="external_symbols")
+        declared = {_require_timeframe(value, "timeframes") for value in self.timeframes}
+        if not declared:
+            # A definition that declares no frame at all reads nothing, so
+            # nothing would be hydrated for it and it could only ever emit
+            # nothing. That is the silent-missing-timeframe failure, one level
+            # up from the bar boundary, so it is a refusal here too.
+            raise _fail(
+                "invalid_value", "a definition declares at least one timeframe",
+                field="timeframes",
+            )
+        symbols = {_require_symbol(value, "external_symbols")
+                   for value in self.external_symbols}
+        _set(self, "timeframes",
+             tuple(value for value in BAR_TIMEFRAMES if value in declared))
+        _set(self, "external_symbols", tuple(sorted(symbols)))
+        _set(self, "vocabulary_digest",
+             _require_digest(self.vocabulary_digest, "vocabulary_digest"))
+
+
+@dataclass(frozen=True)
+class StrategyDefinition:
+    """One strategy the bundle can build, as an immutable value.
+
+    `members` is the lowered tree: a composite carries the resolved
+    definitions of the strategies it votes over, a leaf carries none. It is
+    the tree its factory builds from, so the registry can prove the closure is
+    complete and acyclic without calling anything.
+    """
+
+    name: str
+    definition_digest: str
+    dependencies: Callable[[Mapping[str, JSONValue]], StrategyDependencies]
+    factory: Callable[[Mapping[str, JSONValue]], Strategy]
+    ic_factor: IcFactor | None
+    members: tuple["StrategyDefinition", ...] = ()
+
+    def __post_init__(self) -> None:
+        _set(self, "name", _require_name(self.name, "name"))
+        _set(self, "definition_digest",
+             _require_digest(self.definition_digest, "definition_digest"))
+        for field in ("dependencies", "factory"):
+            if not callable(getattr(self, field)):
+                raise _fail("invalid_type", "value must be callable", field=field)
+        if self.ic_factor is not None and not callable(self.ic_factor):
+            raise _fail("invalid_type", "value must be callable", field="ic_factor")
+        _require_items(self.members, "members", StrategyDefinition)
+
+
+@runtime_checkable
+class StrategyRegistry(Protocol):
+    registry_digest: str
+
+    def resolve(self, name: str) -> StrategyDefinition: ...
+
+
+class FrozenStrategyRegistry:
+    """The one registry core replays against. Built through `from_definitions`.
+
+    Nothing mutates after construction and nothing is lazy: the bundle, its
+    order, and its digest are all decided before the first caller sees it.
+    """
+
+    __slots__ = ("_definitions", "_by_name", "_registry_digest")
+
+    def __init__(self, definitions: Iterable[StrategyDefinition]) -> None:
+        """Freeze a complete bundle, or refuse it.
+
+        The whole pipeline lives here rather than behind the classmethod
+        below, because Python has no private constructor: a validating
+        `from_definitions` beside a bare `__init__` would leave an unchecked
+        way to build a registry that cannot answer `resolve`.
+
+        The sort is on `definition_digest` alone, which is total because two
+        definitions may not share one: a repeated digest would make a play's
+        `definition_digest` name two different strategies.
+        """
+        ordered = tuple(sorted(_require_definitions(definitions),
+                               key=lambda item: item.definition_digest))
+        registered = _validate_definition_digests(ordered)
+        _require_acyclic_and_closed(_definition_graph(ordered, registered))
+        self._definitions = ordered
+        self._by_name = MappingProxyType(registered)
+        self._registry_digest = _bundle_digest(ordered)
+
+    @classmethod
+    def from_definitions(
+        cls, definitions: Iterable[StrategyDefinition],
+    ) -> "FrozenStrategyRegistry":
+        """The named door platform and the fixtures build a bundle through."""
+        return cls(definitions)
+
+    @property
+    def registry_digest(self) -> str:
+        return self._registry_digest
+
+    @property
+    def definitions(self) -> tuple[StrategyDefinition, ...]:
+        """The bundle in canonical order: sorted by `definition_digest`."""
+        return self._definitions
+
+    def resolve(self, name: str) -> StrategyDefinition:
+        definition = self._by_name.get(_require_name(name, "strategy"))
+        if definition is None:
+            raise _fail(
+                "unknown_strategy", "this bundle registers no such definition",
+                field="strategy", strategy=name,
+            )
+        return definition
+
+
+def _require_definitions(value: object) -> tuple[StrategyDefinition, ...]:
+    if isinstance(value, (str, bytes, bytearray)) or not isinstance(value, Iterable):
+        raise _fail(
+            "invalid_type", "definitions must be an iterable of definitions",
+            field="definitions", seen=type(value).__name__,
+        )
+    return _require_items(tuple(value), "definitions", StrategyDefinition)
+
+
+def _validate_definition_digests(
+    definitions: tuple[StrategyDefinition, ...],
+) -> Mapping[str, StrategyDefinition]:
+    """One definition per name and one name per digest, or no bundle at all."""
+    registered: dict[str, StrategyDefinition] = {}
+    by_digest: dict[str, str] = {}
+    for definition in definitions:
+        if definition.name in registered:
+            raise _fail(
+                "duplicate_value", "two definitions share one name",
+                field="name", name=definition.name,
+            )
+        claimed = by_digest.get(definition.definition_digest)
+        if claimed is not None:
+            raise _fail(
+                "duplicate_value", "two definitions share one digest",
+                field="definition_digest", name=definition.name, other=claimed,
+            )
+        registered[definition.name] = definition
+        by_digest[definition.definition_digest] = definition.name
+    return registered
+
+
+def _definition_graph(
+    definitions: tuple[StrategyDefinition, ...],
+    registered: Mapping[str, StrategyDefinition],
+) -> Mapping[str, frozenset[str]]:
+    """Every member edge in the bundle, keyed by name, closure proven complete.
+
+    The walk descends into captured members rather than reading only the top
+    level, because a member is itself a definition and may lower onto members
+    of its own. Every one of them must be the definition this bundle registers
+    under that name, judged by digest: a tree whose leaf disagrees with the
+    bundle would replay something the registry digest does not describe.
+
+    The `seen` guard is on object identity, so a tree knotted back into itself
+    terminates the walk here instead of exhausting the stack, and the name
+    cycle it produces is refused by `_require_acyclic_and_closed`.
+    """
+    edges: dict[str, set[str]] = {}
+    seen: dict[int, StrategyDefinition] = {}
+    stack = list(definitions)
+    while stack:
+        definition = stack.pop()
+        if id(definition) in seen:
+            continue
+        seen[id(definition)] = definition
+        edges.setdefault(definition.name, set())
+        for member in definition.members:
+            known = registered.get(member.name)
+            if known is None:
+                raise _fail(
+                    "unknown_member", "a member is absent from the bundle",
+                    field="members", name=definition.name, member=member.name,
+                )
+            if known.definition_digest != member.definition_digest:
+                raise _fail(
+                    "member_digest_mismatch",
+                    "a member disagrees with the definition of that name",
+                    field="members", name=definition.name, member=member.name,
+                )
+            edges[definition.name].add(member.name)
+            stack.append(member)
+    return {name: frozenset(members) for name, members in edges.items()}
+
+
+def _require_acyclic_and_closed(graph: Mapping[str, frozenset[str]]) -> None:
+    """No definition reaches itself through its members.
+
+    Completeness was proven while the graph was built, since an unregistered
+    member never becomes an edge. What is left is the cycle, and it matters
+    before anything is constructed: a member tree that reaches back into
+    itself has no finite runtime, so a factory would recurse until the
+    interpreter stopped it, one symbol into a replay.
+
+    Iterative, not recursive, so a long chain of definitions raises the
+    contract's own refusal rather than a `RecursionError` from outside it.
+    """
+    finished: set[str] = set()
+    for root in sorted(graph):
+        if root in finished:
+            continue
+        on_path: set[str] = set()
+        stack: list[tuple[str, bool]] = [(root, False)]
+        while stack:
+            name, leaving = stack.pop()
+            if leaving:
+                on_path.discard(name)
+                finished.add(name)
+                continue
+            if name in finished:
+                continue
+            if name in on_path:
+                raise _fail(
+                    "member_cycle", "a definition reaches back into itself",
+                    field="members", name=name,
+                )
+            on_path.add(name)
+            stack.append((name, True))
+            for member in sorted(graph.get(name, ())):
+                stack.append((member, False))
+
+
+def _bundle_digest(definitions: tuple[StrategyDefinition, ...]) -> str:
+    """Names, digests, the core vocabulary, and the contract version.
+
+    Param-dependent outputs stay out on purpose: they belong to a candidate's
+    identity, not to the bundle's. Two workers holding the same code and the
+    same definitions agree here whatever order they were handed.
+    """
+    return _digest({
+        "registry_contract_version": REGISTRY_CONTRACT_VERSION,
+        "core_vocabulary_digest": vocabulary_digest(core_vocabulary),
+        "definitions": [
+            {"name": item.name, "definition_digest": item.definition_digest}
+            for item in definitions
+        ],
+    })
+
+
+# --------------------------------------------------------- vocabulary digests
+
+
+@cache
+def vocabulary_digest(vocabulary_factory: VocabularyFactory) -> str:
+    """The digest of the grammar a definition is read under.
+
+    Keyed on the FACTORY and never on the Vocabulary. A Vocabulary holds two
+    mappings, so it is unhashable and a cache keyed on one fails at call time
+    rather than at import; the catalog loaders take a factory for the same
+    reason.
+
+    A term function has no canonical encoding, so this covers what a term
+    DECLARES: its name, kind, argument schema, defaults, and the three causal
+    flags. A change to what a declared term computes does not move the digest,
+    which is why core is version pinned rather than digest pinned.
+    """
+    vocabulary = vocabulary_factory()
+    return _digest({
+        "indicators": [_term_projection(term)
+                       for term in sorted(vocabulary.indicators.values(),
+                                          key=lambda item: item.name)],
+        "primitives": [_term_projection(term)
+                       for term in sorted(vocabulary.primitives.values(),
+                                          key=lambda item: item.name)],
+    })
+
+
+def _term_projection(term: Term) -> dict:
+    return {
+        "name": term.name,
+        "kind": term.kind,
+        "args": dict(term.args),
+        "defaults": dict(term.defaults),
+        "end_anchored": term.end_anchored,
+        "session_scoped": term.session_scoped,
+        "driving_frame_intraday": term.driving_frame_intraday,
+    }
+
+
+def spec_definition_digest(
+    spec: Mapping[str, JSONValue],
+    vocabulary_factory: VocabularyFactory = core_vocabulary,
+) -> str:
+    """The base digest of a definition whose body is one immutable spec.
+
+    The vocabulary participates because one spec read under two grammars is
+    two strategies. `definition_digest(base, params)` in the canonical codec
+    then binds this to one play's params.
+    """
+    return _digest((_require_params(spec, "spec"),
+                    vocabulary_digest(vocabulary_factory)))
+
+
+# ------------------------------------------------------------- the two bodies
+
+
+def rules_definition(
+    name: str,
+    definition_digest: str,
+    *,
+    spec: Mapping[str, JSONValue] | None = None,
+    vocabulary_factory: VocabularyFactory = core_vocabulary,
+    ic_factor: IcFactor | None = None,
+) -> StrategyDefinition:
+    """A definition over one RuleSpec.
+
+    `spec` is bound here for a catalog or published play, and left None for a
+    private play whose spec travels in `params`. Supplying both is refused at
+    the factory rather than merged: a play that could replace the spec its
+    digest was taken over would replay something the digest does not describe.
+    """
+    bound = None if spec is None else _require_params(spec, "spec")
+    digest = vocabulary_digest(vocabulary_factory)
+
+    def dependencies(params: Mapping[str, JSONValue]) -> StrategyDependencies:
+        effective = _rules_params(bound, params)
+        # The base timeframe is always read: `on_bar` decides on the driving
+        # frame whatever frame the spec's conditions are evaluated on.
+        declared = (BASE_TIMEFRAME, *spec_timeframes(effective.get("spec") or {}))
+        return StrategyDependencies(
+            timeframes=declared, external_symbols=(), vocabulary_digest=digest,
+        )
+
+    def factory(params: Mapping[str, JSONValue]) -> Strategy:
+        return RuleStrategy(_rules_params(bound, params),
+                            vocabulary=vocabulary_factory(), name=name)
+
+    return StrategyDefinition(
+        name=name, definition_digest=definition_digest,
+        dependencies=dependencies, factory=factory, ic_factor=ic_factor,
+    )
+
+
+def composite_definition(
+    name: str,
+    definition_digest: str,
+    *,
+    members: Mapping[str, StrategyDefinition],
+    vocabulary_factory: VocabularyFactory = core_vocabulary,
+) -> StrategyDefinition:
+    """A definition over a lowered composite tree.
+
+    `members` are already resolved definitions, so a composite is a value like
+    any other: its factory captures them and rebuilds the whole tree for every
+    candidate, and its dependency function asks each member what it reads
+    without building anything.
+
+    The graded factor is null in Phase 1, for a composite specifically: its
+    members' margins are not one series, and inventing one would report a
+    correlation nothing computed.
+    """
+    resolved = _require_members(members)
+    digest = vocabulary_digest(vocabulary_factory)
+    factories = MappingProxyType(
+        {key: item.factory for key, item in resolved.items()})
+
+    def dependencies(params: Mapping[str, JSONValue]) -> StrategyDependencies:
+        spec = _plain(_require_params(params, "params")).get("spec") or {}
+        timeframes: list[object] = [BASE_TIMEFRAME]
+        symbols: list[object] = []
+        for block, strategy, block_params in member_blocks(spec):
+            # The block id identifies the offender, never the value it holds:
+            # an unbound `strategy` is whatever the params carried, and a
+            # value with no canonical encoding would raise out of the closed
+            # taxonomy on its way into the refusal details.
+            member = resolved.get(strategy) if isinstance(strategy, str) else None
+            if member is None:
+                raise _fail(
+                    "unknown_member", "a block names a strategy this tree never bound",
+                    field="blocks", name=name, block=block,
+                )
+            declared = member.dependencies(block_params)
+            if declared.vocabulary_digest != digest:
+                raise _fail(
+                    "invalid_value", "a member is read under another vocabulary",
+                    field="vocabulary_digest", name=name, member=member.name,
+                )
+            timeframes.extend(declared.timeframes)
+            symbols.extend(declared.external_symbols)
+        return StrategyDependencies(
+            timeframes=tuple(timeframes), external_symbols=tuple(symbols),
+            vocabulary_digest=digest,
+        )
+
+    def factory(params: Mapping[str, JSONValue]) -> Strategy:
+        return CompositeStrategy(_plain(_require_params(params, "params")),
+                                 members=factories, name=name)
+
+    return StrategyDefinition(
+        name=name, definition_digest=definition_digest,
+        dependencies=dependencies, factory=factory, ic_factor=None,
+        members=tuple(resolved[key] for key in sorted(resolved)),
+    )
+
+
+def _require_members(
+    members: object,
+) -> Mapping[str, StrategyDefinition]:
+    if not isinstance(members, Mapping):
+        raise _fail("invalid_type", "members must be a mapping", field="members")
+    resolved: dict[str, StrategyDefinition] = {}
+    for key, item in members.items():
+        member = _require_name(key, "members")
+        _require_instance(item, f"members.{member}", StrategyDefinition)
+        if item.name != member:
+            raise _fail(
+                "invalid_value", "a member is bound under another name",
+                field="members", key=member, name=item.name,
+            )
+        resolved[member] = item
+    return resolved
+
+
+def _rules_params(
+    bound: Mapping[str, JSONValue] | None, params: Mapping[str, JSONValue],
+) -> dict:
+    given = _plain(_require_params(params, "params"))
+    if bound is None:
+        return given
+    if "spec" in given:
+        raise _fail(
+            "invalid_value", "this definition already binds its rule spec",
+            field="params.spec",
+        )
+    return {"spec": _plain(bound), **given}
+
+
+def _plain(value: object) -> object:
+    """A fresh, plain-JSON copy of a canonical value.
+
+    Params reach core frozen: `_require_params` turns every object into a
+    `MappingProxyType` and every array into a tuple. The rule and composite
+    grammars test `isinstance(node, dict)` and `isinstance(items, list)`
+    exactly, so a frozen spec would fail validation on its own shape.
+
+    Thawing per call is also what keeps two runtimes apart. Each call rebuilds
+    the whole structure, so no two strategies hold one spec object and a
+    strategy that writes into its own params cannot reach the definition, the
+    caller's mapping, or its sibling.
+    """
+    if isinstance(value, Mapping):
+        return {key: _plain(item) for key, item in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [_plain(item) for item in value]
+    return value

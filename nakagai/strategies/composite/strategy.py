@@ -6,6 +6,7 @@ spec it is inert; the scanner can instantiate it harmlessly. The engine only
 accepts self-contained specs; config refs must be resolved by the API first.
 """
 
+from collections.abc import Callable, Mapping
 from typing import ClassVar
 
 import pandas as pd
@@ -18,6 +19,35 @@ from nakagai.strategies.rules.spec import DEFAULT_RISK
 from nakagai.strategies.rules.vocabulary import core_vocabulary
 from nakagai.strategies.util import rr_signal
 
+# What a member is, to everything that builds one: params in, a fresh strategy
+# out. A registry definition's factory and a plain strategy class both satisfy
+# it, so membership has one shape whoever supplied it.
+MemberFactory = Callable[[dict], Strategy]
+
+
+def member_blocks(spec: Mapping) -> tuple[tuple[str, object, Mapping], ...]:
+    """Every buildable block of a composite spec, in DECLARED order.
+
+    Declared order, never sorted, because it is the order members are built
+    and evaluated in: a member that raises aborts the replay, so which one is
+    reached first is observable. It cannot become part of a play's identity,
+    since the canonical codec sorts object keys and two specs differing only
+    in block order therefore carry one digest. Reading them in the order the
+    spec lists them is what keeps that promise true.
+
+    A block still holding a saved-config ref is absent rather than an error
+    here. The platform inlines those before a spec reaches core, and the
+    construction door refuses the ones that arrive unresolved.
+    """
+    blocks = spec.get("blocks") if isinstance(spec, Mapping) else None
+    if not isinstance(blocks, Mapping):
+        return ()
+    return tuple(
+        (str(bid), block.get("strategy"), block.get("params") or {})
+        for bid, block in blocks.items()
+        if isinstance(block, Mapping) and "config" not in block
+    )
+
 
 class CompositeStrategy(Strategy):
     name = "composite"
@@ -29,29 +59,41 @@ class CompositeStrategy(Strategy):
     tags = ("custom", "composite")
     DEFAULT_PARAMS = {}
 
-    # The strategies a block may reference. Bound per registry via bound();
-    # the base class knows no catalog, so an unbound composite only accepts
-    # an empty (inert) spec.
+    # The strategies a block may reference on the retired singleton path,
+    # bound per registry via bound(). The canonical path passes member
+    # factories to __init__ instead, so nothing about a composite's membership
+    # lives on a class there. Either way, a composite that was handed no
+    # membership only accepts an empty (inert) spec.
     MEMBERS: ClassVar[dict[str, type[Strategy]]] = {}
 
     @classmethod
     def bound(cls, members: dict[str, type[Strategy]]) -> type["CompositeStrategy"]:
         return type("BoundCompositeStrategy", (cls,), {"MEMBERS": dict(members)})
 
-    def __init__(self, params: dict | None = None):
+    def __init__(self, params: dict | None = None, *,
+                 members: Mapping[str, MemberFactory] | None = None,
+                 name: str | None = None):
         super().__init__(params)
+        if name is not None:
+            # A registry definition names its own runtime; the assignment
+            # shadows the class attribute on this instance alone.
+            self.name = name
         self.spec = self.params.get("spec") or {}
         self._members: dict[str, Strategy] = {}
         # Bad specs fail loudly at construction (backtest submission), not
         # silently per bar. Empty spec = intentionally inert.
         if self.spec:
-            members = type(self).MEMBERS
-            errs = cspec.validate_composite_spec(self.spec, members,
+            builders = type(self).MEMBERS if members is None else members
+            errs = cspec.validate_composite_spec(self.spec, builders,
                                                  allow_refs=False)
             if errs:
                 raise ValueError("; ".join(errs))
-            self._members = {bid: members[b["strategy"]](b.get("params", {}))
-                             for bid, b in self.spec["blocks"].items()}
+            # One fresh member per block, every construction. Nothing is
+            # cached and nothing is shared: a registry definition hands over
+            # member FACTORIES, so this composite's members are its own.
+            self._members = {bid: builders[strategy](block_params)
+                             for bid, strategy, block_params
+                             in member_blocks(self.spec)}
         # engine.py resolves a strategy's vocabulary as
         # getattr(self.strategy, "vocabulary", core_vocabulary()). RuleStrategy
         # carries one through bound(); a composite did not, so the Engine

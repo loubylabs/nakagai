@@ -5,8 +5,10 @@ through the existing backtest/scan machinery unchanged: params = {"spec": {...}}
 With no spec it is inert; the scanner can instantiate it harmlessly.
 """
 
-import pandas as pd
+from collections.abc import Mapping
 from typing import ClassVar
+
+import pandas as pd
 
 from nakagai.engine.portfolio_types import ManagementDecision, PositionView, Signal
 from nakagai.strategies import indicators as ind
@@ -20,6 +22,40 @@ from nakagai.strategies.rules.vocabulary import (
     Vocabulary, VocabularyFactory, core_vocabulary, resolve_vocabulary,
 )
 from nakagai.strategies.util import fresh_bar, first_bar_of_session, rr_signal
+
+# The frame a spec is evaluated on when it names none. One spelling, because
+# the dependency walk and the evaluator have to agree about which frames a
+# spec reads: a walk that guessed a different default would declare a frame
+# nobody hydrates, or omit one the evaluator then asks for.
+SPEC_TIMEFRAME_DEFAULT = "1h"
+
+
+def spec_timeframes(spec: Mapping) -> tuple:
+    """Every timeframe a RuleSpec reads, unvalidated and possibly repeated.
+
+    Two sources, and both are frames the replay has to prepare: the spec's own
+    `timeframe`, which its conditions are evaluated on, and any node's `tf`,
+    which moves that node's children onto another frame. An empty spec reads
+    neither, because an inert strategy returns before it touches a frame.
+
+    Values travel out exactly as the spec spelled them, so a caller building
+    `StrategyDependencies` refuses an unsupported one through the same door
+    every other timeframe goes through. Keep this in step with `_bars_for` and
+    `_group_at`: a frame this misses is a frame nobody hydrates.
+    """
+    if not isinstance(spec, Mapping) or not spec:
+        return ()
+    found = [spec.get("timeframe", SPEC_TIMEFRAME_DEFAULT)]
+    stack: list = [spec]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, Mapping):
+            if "tf" in node:
+                found.append(node["tf"])
+            stack.extend(node.values())
+        elif isinstance(node, (tuple, list)):
+            stack.extend(node)
+    return tuple(found)
 
 
 class RuleStrategy(Strategy):
@@ -39,8 +75,16 @@ class RuleStrategy(Strategy):
                     {"VOCABULARY_FACTORY": vocabulary_factory})
 
     def __init__(self, params: dict | None = None,
-                 vocabulary: Vocabulary | None = None):
+                 vocabulary: Vocabulary | None = None, *,
+                 name: str | None = None):
         super().__init__(params)
+        if name is not None:
+            # A registry definition names its own runtime. The assignment
+            # shadows the class attribute on this instance alone, so one
+            # immutable definition can build a play called `sma_cross` without
+            # minting a subclass per catalog entry, which is the mutable
+            # class binding the canonical path does not use.
+            self.name = name
         self.vocabulary = resolve_vocabulary(
             vocabulary if vocabulary is not None
             else type(self).VOCABULARY_FACTORY())
@@ -52,10 +96,10 @@ class RuleStrategy(Strategy):
             raise ValueError("; ".join(errors))
 
     def _bars_for(self, ctx: MarketContext) -> pd.DataFrame:
-        return ctx.bars[self.spec.get("timeframe", "1h")]
+        return ctx.bars[self.spec.get("timeframe", SPEC_TIMEFRAME_DEFAULT)]
 
     def _fresh(self, ctx: MarketContext) -> bool:
-        tf = self.spec.get("timeframe", "1h")
+        tf = self.spec.get("timeframe", SPEC_TIMEFRAME_DEFAULT)
         if tf == ctx.tfs.driving:
             return True
         if tf in ctx.tfs.session_aligned:
@@ -75,7 +119,7 @@ class RuleStrategy(Strategy):
         the resulting boolean is lifted onto the driving index, where the
         cursor reads it.
         """
-        tf = self.spec.get("timeframe", "1h")
+        tf = self.spec.get("timeframe", SPEC_TIMEFRAME_DEFAULT)
         i = ctx.cursor.get(ctx.tfs.driving, -1)
         if i < 0:
             return False
@@ -93,7 +137,7 @@ class RuleStrategy(Strategy):
                 stop, target, rr = self._stop_target(ctx, bars, direction)
                 sig = rr_signal(ctx, direction, stop, rr, ("rules", name),
                                 f"{name}: {side} rules matched on "
-                                f"{self.spec.get('timeframe', '1h')}",
+                                f"{self.spec.get('timeframe', SPEC_TIMEFRAME_DEFAULT)}",
                                 confidence=0.5, target=target)
                 if sig:
                     return (sig,)

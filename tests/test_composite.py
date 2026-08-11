@@ -12,6 +12,7 @@ from nakagai.engine.portfolio_types import (
 from nakagai.strategies.base import MarketContext, Strategy
 from nakagai.strategies.catalog import load_catalog
 from nakagai.strategies.composite import CompositeStrategy, validate_composite_spec
+from nakagai.strategies.composite.strategy import member_blocks
 from nakagai.strategies.rules import RuleStrategy, core_vocabulary
 from nakagai.strategies.rules.vocabulary import Term
 
@@ -233,3 +234,54 @@ def test_a_member_signal_outside_the_contract_aborts_the_run():
 
 def test_an_inert_composite_returns_an_empty_tuple():
     assert CompositeStrategy({}).on_bar(_ctx()) == ()
+
+
+# --------------------------------------------------- membership as factories
+
+
+def test_member_blocks_reads_declared_order_and_skips_unresolved_refs():
+    spec = {"blocks": {"z": {"strategy": "bare_play"},
+                       "a": {"strategy": "rules", "params": {"spec": _LEG_SPEC}},
+                       "r": {"config": "saved-elsewhere"}}}
+    assert [block for block, _, _ in member_blocks(spec)] == ["z", "a"]
+    assert [strategy for _, strategy, _ in member_blocks(spec)] == ["bare_play",
+                                                                   "rules"]
+    assert member_blocks({}) == ()
+
+
+def test_a_composite_builds_members_from_supplied_factories():
+    """The canonical membership door: params in, a fresh member out.
+
+    Nothing about this composite's members lives on a class, so two
+    composites over one spec share no member instance, and the name the
+    registry definition gave it travels with the runtime.
+    """
+    calls = []
+
+    def build_bare(params):
+        calls.append(params)
+        return _Bare(params)
+
+    spec = _two_member_spec()
+    spec["blocks"] = {"a": {"strategy": "bare_play", "params": {}}}
+    spec["long"] = {"all": ["a"]}
+    first = CompositeStrategy({"spec": spec}, members={"bare_play": build_bare},
+                              name="combo")
+    second = CompositeStrategy({"spec": spec}, members={"bare_play": build_bare},
+                               name="combo")
+    assert first.name == second.name == "combo"
+    assert first._members["a"] is not second._members["a"]
+    assert len(calls) == 2
+
+
+def test_supplied_membership_replaces_the_class_binding():
+    bound = CompositeStrategy.bound({"bare_play": _Bare})
+    spec = {"version": 1, "name": "c", "blocks": {"a": {"strategy": "rules",
+                                                       "params": {"spec": _LEG_SPEC}}},
+            "long": {"all": ["a"]}}
+    # The bound class knows only bare_play, so this spec is refused unless the
+    # membership passed in is the one that decides.
+    with pytest.raises(ValueError):
+        bound({"spec": spec})
+    built = bound({"spec": spec}, members={"rules": RuleStrategy})
+    assert isinstance(built._members["a"], RuleStrategy)
