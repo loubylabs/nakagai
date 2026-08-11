@@ -165,10 +165,22 @@ def test_spec_margin_ranks_a_not_group_top_level_and_nested():
 
     margins.py recognized only all/any, so a top-level `not` reached
     condition_margin and raised AttributeError on cond["lhs"], and a nested
-    one raised KeyError. Neither was visible: engine/runner.py catches
-    Exception around window_icir and substitutes empty_ic_fields, so the
-    backtest wrote ic_1/ic_5/ic_20 as None with zero observations, which reads
-    exactly like a legitimate ICIR abstention.
+    one raised KeyError.
+
+    What that costs is an availability failure and not a wrong number, which
+    is worth stating precisely because it used to be the other way round. The
+    IC lens calls this through `strategy_operation` (engine/ic.py:249), and
+    that door swallows nothing: the AttributeError arrives as
+    StrategyRuntimeError("strategy_raised", "ic_factor raised AttributeError")
+    naming the play and the symbol, no `except` anywhere under nakagai/engine
+    catches it, and `run_portfolio` refuses the whole replay. Measured on this
+    branch by reverting margins.py alone and replaying one negated spec.
+
+    So without this walker every backtest of a negated spec dies, loudly. The
+    pre-Phase-1 engine substituted empty IC fields for any exception here, and
+    the same crash wrote null correlations over zero observations instead,
+    which read exactly like a legitimate abstention. That silent reading is
+    gone with the engine that produced it; see chrvsd/nakagai#411.
     """
     b = _bars(np.linspace(100, 120, 40))
     fe = _fe(b)
