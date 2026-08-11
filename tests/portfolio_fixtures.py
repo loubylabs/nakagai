@@ -1727,29 +1727,37 @@ def ic_plays(*, timeframe: str = "15m",
 
 @dataclasses.dataclass(frozen=True)
 class ReplayIc:
-    """One replay, its accumulators, its IC map, and the frozen slices.
+    """One replay, its accumulators, its frozen slices, and its inputs.
 
-    The same drive as `replay_metrics`, read at the IC lens instead: the map
-    and the slices come off the finished result, and the accumulators are the
-    one value a result does not carry.
+    The same drive as `replay_metrics`, read at the IC lens instead. The slices
+    come off the finished result and the accumulators are the one value a
+    result does not carry.
+
+    `slice_ic` is named for what it IS: the estimates read back off those
+    slices, keyed for convenience. It is NOT an independent measurement, and a
+    test that compares a slice against it is comparing a value with itself. Use
+    it to build a well-shaped map to perturb; to check that a slice carries the
+    estimates the lens measured for its own pair, call `_ic_map` over
+    `schedule`, `prepared`, and `registry`, which is why all three travel here.
     """
 
     request: PortfolioReplayRequest
     schedule: ValidatedSchedule
     prepared: _ValidatedPortfolioBars
+    registry: FrozenStrategyRegistry
     events: ReplayEvents
     totals: Mapping[PositionKey, object]
-    ic: Mapping[PositionKey, tuple[IcEstimate, IcEstimate, IcEstimate]]
+    slice_ic: Mapping[PositionKey, tuple[IcEstimate, IcEstimate, IcEstimate]]
     slices: tuple[PortfolioSlice, ...]
 
 
 def replay_ic(**overrides) -> ReplayIc:
-    """The IC map and the frozen slices the finished result carries.
+    """The frozen slices the finished result carries, plus what produced them.
 
-    The map is read back off the slices rather than measured a second time. A
-    second `_ic_map` would call every graded factor again, which would double
-    the recorded factor calls a test counts and would measure the lens twice to
-    report it once.
+    Nothing here measures the lens a second time: a second `_ic_map` would call
+    every graded factor again, which would double the factor calls a test
+    counts. A test that wants an independent measurement asks for one itself,
+    over the `schedule`, `prepared`, and `registry` returned here.
     """
     parts = replay_parts(**overrides)
     slices = parts.result.slices
@@ -1757,9 +1765,10 @@ def replay_ic(**overrides) -> ReplayIc:
         request=parts.request,
         schedule=parts.schedule,
         prepared=parts.prepared,
+        registry=parts.registry,
         events=parts.events,
         totals=_slice_accumulators(parts.events, parts.schedule),
-        ic={(row.play_id, row.symbol): row.ic for row in slices},
+        slice_ic={(row.play_id, row.symbol): row.ic for row in slices},
         slices=slices,
     )
 

@@ -47,12 +47,9 @@ from nakagai.engine.canonical import (
 )
 from nakagai.engine.execution import ReplayEvents, _PortfolioRuntime
 from nakagai.engine.ic import _ic_map, _portfolio_slices
-from nakagai.engine.metrics import (
-    ARITHMETIC_VERSION,
-    _portfolio_metrics,
-    _slice_accumulators,
-)
+from nakagai.engine.metrics import _portfolio_metrics, _slice_accumulators
 from nakagai.engine.portfolio_types import (
+    ARITHMETIC_VERSION,
     PortfolioReplayRequest,
     PortfolioReplayResult,
     ReplaySchedule,

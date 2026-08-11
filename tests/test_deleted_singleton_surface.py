@@ -85,10 +85,12 @@ RETIRED_NAMES = (
     "proving_trades",
 )
 
-# One exact path each, and both earn it. The release notes are a record of what
-# earlier versions did, so removing the names from them would make the history
-# wrong rather than the codebase clean; this file has to write the vocabulary
-# down in order to search for it.
+# One excluded path, named exactly: this file has to write the vocabulary down
+# in order to search for it. The README is NOT excluded. Its release notes are a
+# record of what earlier versions did, so removing the retired names from them
+# would make the history wrong rather than the codebase clean; `searchable_text`
+# truncates the file at that heading instead, which leaves every line of live
+# documentation above it inside the search.
 EXCLUDED = ("tests/test_deleted_singleton_surface.py",)
 RELEASE_NOTES_HEADING = "## Release notes"
 

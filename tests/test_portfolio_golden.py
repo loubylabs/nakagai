@@ -257,7 +257,8 @@ def test_a_schedule_that_disagrees_with_its_own_digest_builds_no_strategy():
     assert calls.factory_count == 0
 
 
-def test_a_definition_digest_binds_the_params_the_play_actually_carries():
+@pytest.mark.parametrize("position", (0, 1))
+def test_a_definition_digest_binds_the_params_the_play_actually_carries(position):
     """The one check that stops a play naming any params under any definition.
 
     `PlayRequest.definition_digest` is the SHA-256 of the canonical pair
@@ -266,19 +267,28 @@ def test_a_definition_digest_binds_the_params_the_play_actually_carries():
     are untouched and only the PARAMS move, which nothing else in the request
     can see: the registry digest deliberately covers names and base digests,
     and the candidate identity re-derives around whatever the play carries.
+
+    Run against EVERY play in the request rather than the first one, because a
+    check that stopped after one play would refuse the same fixture and pass
+    this test for a reason it never names. The request sorts its plays by
+    `(priority, play_id)`, so `position` selects a real second play rather than
+    a supply order.
     """
     plays = base_request().plays
-    swapped = dataclasses.replace(
-        plays[0], params={**dict(plays[0].params), "fast_n": 11})
+    edited = dataclasses.replace(
+        plays[position],
+        params={**dict(plays[position].params), "extra_param": 11})
+    swapped = tuple(edited if index == position else play
+                    for index, play in enumerate(plays))
 
     with pytest.raises(ReplayInputError) as raised:
-        run_portfolio(base_request(plays=(swapped, plays[1])),
+        run_portfolio(base_request(plays=swapped),
                       PortfolioBars(catalog_frames()), strategy_registry(),
                       base_schedule())
 
     assert raised.value.code == "definition_digest_mismatch"
-    assert raised.value.details["play_id"] == swapped.play_id
-    assert raised.value.details["actual"] == plays[0].definition_digest
+    assert raised.value.details["play_id"] == edited.play_id
+    assert raised.value.details["actual"] == plays[position].definition_digest
 
 
 def test_the_dependency_closure_is_the_union_the_definitions_declare():

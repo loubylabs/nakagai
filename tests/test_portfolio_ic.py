@@ -722,7 +722,38 @@ def test_each_accumulator_becomes_exactly_one_slice():
         assert row.signals == total.signals
         assert row.net_pnl == total.net_pnl
         assert row.fees == total.fees
-        assert row.ic is result.ic[(row.play_id, row.symbol)]
+
+
+def test_each_slice_carries_the_estimates_measured_for_its_own_pair():
+    """The frozen row's three estimates are the map's entry for THAT pair.
+
+    Measured a SECOND time here rather than read back off the same slices. The
+    fixture's `slice_ic` is those slices keyed by pair, so comparing a slice
+    against it is comparing a value with itself and cannot fail. `_ic_map` is
+    pure, so calling it over the same schedule, bars, and registry answers the
+    same question independently.
+
+    The four pairs are built to DISAGREE, which is what makes a mis-keying
+    observable at all. The two plays grade different numbers of observations,
+    and a 777 print planted in QQQ's tape moves its forward returns away from
+    SPY's, so no two of the four estimate triples are equal. Over the default
+    fixture, where both symbols carry one tape and both plays grade alike, all
+    four would be identical and a map keyed by the wrong pair would pass.
+    """
+    planted = BarPlan(symbol="QQQ", at=ts("2026-11-25T16:00:00Z"),
+                      open=777.0, high=777.2, low=776.8, close=777.0)
+    result = ic_replay(bars=(planted,), plays=(
+        ScriptedPlay(play_id="play-a", priority=100, ic_timeframe="15m",
+                     ic_margin=descending),
+        ScriptedPlay(play_id="play-b", priority=100, ic_timeframe="15m",
+                     ic_margin=blank_after(15)),
+    ))
+
+    measured = _ic_map(result.schedule, result.prepared, result.registry)
+
+    assert len({row.ic for row in result.slices}) == 4
+    for row in result.slices:
+        assert row.ic == measured[(row.play_id, row.symbol)]
 
 
 def test_a_slice_carries_the_replays_own_identity():
@@ -763,7 +794,7 @@ def test_a_slice_reports_its_own_cohort_and_an_empty_one_reports_nothing():
 def test_an_ic_map_that_misses_a_pair_refuses():
     """A slice cannot be built without the estimates that belong to it."""
     result = ic_replay()
-    short = {key: value for key, value in result.ic.items()
+    short = {key: value for key, value in result.slice_ic.items()
              if key != ("play-b", "QQQ")}
 
     with pytest.raises(ReplayInputError) as raised:
