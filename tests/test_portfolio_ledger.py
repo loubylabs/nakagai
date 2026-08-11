@@ -686,6 +686,23 @@ def test_a_snapshot_reconciles_equity_to_cash_and_liquidation_value():
     assert up.gross_exposure == 72_114.0
 
 
+def test_a_snapshot_that_does_not_reconcile_cannot_be_built():
+    """The account identity belongs to the value, not to one call site.
+
+    Every equity point copies these fields straight through, so a snapshot
+    whose stated equity disagreed with its own parts would publish a curve that
+    ties back to nothing. One cent is enough to refuse.
+    """
+    with pytest.raises(ReplayInputError) as exc:
+        LedgerSnapshot(
+            settled_cash=28_600.0, unsettled_cash=0.0, short_collateral=0.0,
+            positions_liquidation_value=71_400.0, portfolio_equity=100_000.01,
+            gross_exposure=71_400.0, open_positions=1,
+        )
+
+    assert exc.value.code == "unreconciled_equity"
+
+
 def test_a_short_marks_at_its_collateral_plus_unrealized_pnl():
     ledger = funded_ledger(100_000.0)
     opened_position(

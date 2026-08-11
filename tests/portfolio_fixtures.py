@@ -6,11 +6,12 @@ test, so one failure names one cause. Parent identities are derived here the
 way platform derives them: build the draft, ask core for the candidate
 identity, then ask core for the replay identity.
 
-`replay_fixture` at the foot of the module runs a real replay: it assembles the
+`replay_parts` at the foot of the module runs a real replay: it assembles the
 request, schedule, registry, and prepared bars and hands them to the one
-runtime. Later Phase 1 tasks extend it and the last re-points it at the public
-entry point. It stays a thin assembler over the real core values and never
-grows a second replay implementation.
+runtime. `replay_fixture` and `replay_curve` are two views of what it returns.
+Later Phase 1 tasks extend it and the last re-points it at the public entry
+point. It stays a thin assembler over the real core values and never grows a
+second replay implementation.
 """
 
 import dataclasses
@@ -38,6 +39,7 @@ from nakagai.engine.canonical import (
     trade_id,
     _projection,
 )
+from nakagai.engine.benchmark import ReplayCurve, _equity_series
 from nakagai.engine.execution import ReplayEvents, _PortfolioRuntime
 from nakagai.engine.portfolio import EntryProposal, _Ledger
 from nakagai.engine.portfolio_types import (
@@ -275,6 +277,13 @@ def base_benchmark() -> BenchmarkSpec:
         symbol=None,
         weighting="equal",
         rebalance="never",
+    )
+
+
+def single_symbol_benchmark(symbol: str) -> BenchmarkSpec:
+    """The declared alternative: one named symbol, whether or not it trades."""
+    return BenchmarkSpec(
+        kind="single_symbol", symbol=symbol, weighting="equal", rebalance="never",
     )
 
 
@@ -1377,7 +1386,23 @@ def with_base_bars(frames: dict, plans) -> dict:
     return edited
 
 
-def replay_fixture(
+@dataclasses.dataclass(frozen=True)
+class ReplayParts:
+    """One replay's assembled inputs and everything its loop produced.
+
+    The three inputs travel with the events because the lenses over a replay
+    need them: the equity curve marks the benchmark on the schedule's own
+    instants and reads its prices from the same prepared bars the loop filled
+    against. Handing a lens anything else is the miswiring those lenses refuse.
+    """
+
+    request: PortfolioReplayRequest
+    schedule: ValidatedSchedule
+    prepared: _ValidatedPortfolioBars
+    events: ReplayEvents
+
+
+def replay_parts(
     *,
     plays: tuple[ScriptedPlay, ...] | None = None,
     symbol_order: tuple[str, ...] = ("SPY", "QQQ"),
@@ -1387,15 +1412,17 @@ def replay_fixture(
     signal_stop: float = 99.0,
     signal_target: float = 103.0,
     bars: tuple[BarPlan, ...] = (),
+    drop_pairs: tuple[tuple[str, str], ...] = (),
     price: float = 100.0,
     account: AccountPolicy | None = None,
     execution: ExecutionPolicy | None = None,
+    benchmark: BenchmarkSpec | None = None,
     dependencies: ReplayDependencies | None = None,
     drive_dependencies: ReplayDependencies | None = None,
     window: ReplayWindow | None = None,
     wrap: Callable[[StrategyDefinition], StrategyDefinition] | None = None,
     calls: list | None = None,
-) -> ReplayEvents:
+) -> ReplayParts:
     """One complete replay over the real internal components.
 
     Three knobs vary orderings the canonical contract is supposed to ignore, and
@@ -1406,7 +1433,9 @@ def replay_fixture(
 
     `drive_dependencies` drives the loop with a closure the bars were NOT
     prepared under, which is the one miswiring the runtime has to refuse and
-    which nothing else can stage.
+    which nothing else can stage. `drop_pairs` withholds a frame the request
+    declares, which is what proves a preflight refusal lands before any play is
+    constructed.
 
     `wrap` decorates every definition on its way into the registry, the way
     `base_definitions` does, so a caller that wants each construction counted
@@ -1423,6 +1452,7 @@ def replay_fixture(
         symbols=tuple(symbol_order),
         account=replay_account() if account is None else account,
         execution=frictionless_execution() if execution is None else execution,
+        **({} if benchmark is None else {"benchmark": benchmark}),
         **({} if window is None else {"window": window}),
     )
     schedule = base_schedule()
@@ -1432,6 +1462,8 @@ def replay_fixture(
                    build=lambda labels: flat_frame(labels, price)),
         bars,
     )
+    for symbol, timeframe in drop_pairs:
+        frames = without_pair(frames, symbol, timeframe)
     if reverse_param_keys:
         frames = dict(reversed(list(frames.items())))
     registry = FrozenStrategyRegistry.from_definitions(tuple(
@@ -1442,10 +1474,28 @@ def replay_fixture(
     ))
     prepared = prepare_portfolio_bars(
         request, PortfolioBars(frames), validated, declared)
-    return _PortfolioRuntime(
+    events = _PortfolioRuntime(
         request, validated, registry, prepared,
         declared if drive_dependencies is None else drive_dependencies,
     ).run()
+    return ReplayParts(request=request, schedule=validated, prepared=prepared,
+                       events=events)
+
+
+def replay_fixture(**overrides) -> ReplayEvents:
+    """What one replay's chronology produced, for a test about the loop."""
+    return replay_parts(**overrides).events
+
+
+def replay_curve(**overrides) -> ReplayCurve:
+    """The equity and benchmark lens over one replay.
+
+    The same assembly as `replay_fixture` with the one lens applied, which is
+    the composition the public entry point performs. Task C11 re-points both at
+    `run_portfolio` and nothing either produces may move.
+    """
+    parts = replay_parts(**overrides)
+    return _equity_series(parts.schedule, parts.events, parts.prepared)
 
 
 def canonical_event_bytes(events: ReplayEvents) -> bytes:
@@ -1462,6 +1512,18 @@ def canonical_event_bytes(events: ReplayEvents) -> bytes:
                   for mark in events.marks],
         "signals": [{"play_id": play_id, "symbol": symbol, "count": count}
                     for (play_id, symbol), count in events.signal_counts.items()],
+    })
+
+
+def canonical_curve_bytes(curve: ReplayCurve) -> bytes:
+    """The canonical bytes of one replay's equity curve and benchmark.
+
+    Built from the same codec and the same contract projection the result
+    digest uses, so two curves agree here exactly when they will agree there.
+    """
+    return canonical_replay_bytes({
+        "equity": [_projection(point) for point in curve.equity],
+        "benchmark": _projection(curve.benchmark),
     })
 
 

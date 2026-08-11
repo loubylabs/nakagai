@@ -225,6 +225,12 @@ class LedgerSnapshot:
     open positions would liquidate for. That identity is the account mark, not
     a derived convenience, so it is summed here once and never recomputed
     downstream.
+
+    It is also checked here rather than trusted, because every equity point a
+    user reads copies these fields straight through. A snapshot whose stated
+    equity disagreed with its own parts would publish a curve that ties back to
+    no account, and the disagreement would surface as a metric nobody could
+    reconcile rather than as a refusal at the value that broke it.
     """
 
     settled_cash: float
@@ -241,6 +247,15 @@ class LedgerSnapshot:
                       "portfolio_equity")
         _set(self, "open_positions",
              _require_ordinal(self.open_positions, "open_positions"))
+        # Exact, and in the one summation order `snapshot` uses. A tolerance
+        # here would be a licence for the curve and the cash to drift apart.
+        if self.portfolio_equity != (self.settled_cash + self.unsettled_cash
+                                     + self.positions_liquidation_value):
+            raise _fail(
+                "unreconciled_equity",
+                "portfolio equity is settled cash, unsettled credits, and "
+                "liquidation value", field="portfolio_equity",
+            )
 
 
 @dataclass(frozen=True)
