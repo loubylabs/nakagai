@@ -756,6 +756,43 @@ def test_an_honest_end_anchored_term_would_fail_without_the_exemption(name, bars
     assert verify_term(term, bars).status == FAILED
 
 
+def _end_anchored_peeker(_eval_fn, frame, **args):
+    """An `end_anchored` term whose body genuinely reads a future row."""
+    return frame["close"].shift(-1)
+
+
+def test_a_broken_end_anchored_term_is_reported_exempt_not_passing(bars, monkeypatch):
+    """The frozen acceptance criterion, which honest terms cannot prove.
+
+    "A deliberately broken term that is `end_anchored` is reported as exempt,
+    not as passing." Running the two honest core terms through the exemption
+    shows the exemption FIRES. It does not show what the gate does with an
+    end-anchored term that peeks, and that is the case the criterion is about:
+    the gate has to be honest about what it did not test rather than blessing it.
+
+    Both halves of this term matter. It carries the flag, so EXEMPT is the only
+    admissible verdict. And it really peeks, so with the exemption removed the
+    gate finds the peek, which is what makes EXEMPT a refusal to bless rather
+    than an accident of an honest body.
+    """
+    term = Term("end_anchored_peeker", "primitive", {}, {},
+                _end_anchored_peeker, end_anchored=True)
+
+    verdict = verify_term(term, bars)
+    assert verdict.status == EXEMPT, (
+        f"an end_anchored term that peeks came back {verdict.status}: "
+        f"{verdict.reason}")
+    assert verdict.status not in (CHECKED, FAILED)
+    assert "end_anchored" in verdict.reason
+    assert verdict.cause == "", "EXEMPT is not a rejection and carries no cause"
+
+    monkeypatch.setattr(verify_module, "exemption_reason", lambda _term: None)
+    unexempt = verify_term(term, bars)
+    assert unexempt.status == FAILED, (
+        "the term must really be broken, or EXEMPT proves nothing")
+    assert unexempt.cause == "lookahead"
+
+
 def test_an_end_anchored_term_returns_a_scalar_not_a_series(bars):
     """The structural fact underneath the exemption, asserted rather than assumed."""
     term = core_vocabulary().primitives["fvg_nearest"]
