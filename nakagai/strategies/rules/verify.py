@@ -174,3 +174,87 @@ def arg_sets(term: Term) -> tuple[dict, ...]:
             for value in (rule[0], rule[1]):
                 add({**base, name: value})
     return tuple(out)
+
+
+# A fixed COUNT, not a fixed stride: widening the fixture must not multiply the
+# cost, because node 02 runs this over 100+ terms in CI. Probes start at half the
+# frame so every term is past its warm-up, including rvol at its 60-session
+# maximum. The residual risk is that a term peeking only between probes passes;
+# raising PROBE_COUNT is the lever if measured CI time allows it.
+PROBE_COUNT = 20
+
+
+def probe_rows(n: int) -> list[int]:
+    """PROBE_COUNT rows evenly spaced across the second half of the frame."""
+    lo, hi = n // 2, n - 1
+    if hi <= lo:
+        return []
+    step = (hi - lo) / max(PROBE_COUNT - 1, 1)
+    return sorted({int(lo + round(k * step)) for k in range(PROBE_COUNT)})
+
+
+def _value_at(out, i: int) -> float:
+    return float(out.iloc[i]) if isinstance(out, pd.Series) else float(out)
+
+
+def _agrees(whole: float, prefix: float) -> bool:
+    return (pd.isna(whole) and pd.isna(prefix)) or whole == prefix
+
+
+def verify_term(term: Term, bars: pd.DataFrame) -> TermVerdict:
+    """Is this term causal: does row i depend only on rows <= i?
+
+    Computes the term over the whole frame, recomputes it over the prefix ending
+    at each probe row, and compares. A disagreement means the whole-frame value at
+    row i used a row after i, which is the look-ahead this gate refuses.
+
+    Returns a verdict rather than a boolean so EXEMPT and VACUOUS never read as a
+    pass. Vacuity is judged PER ARGUMENT SET: one mandated set that is NaN at every
+    probe makes the term vacuous, because the set proves nothing and the schema
+    said it had to be tested.
+    """
+    reason = exemption_reason(term)
+    if reason is not None:
+        return TermVerdict(term.name, EXEMPT, reason)
+
+    rows = probe_rows(len(bars))
+    if not rows:
+        return TermVerdict(term.name, VACUOUS,
+                           f"frame of {len(bars)} rows is too short to probe")
+
+    checked = 0
+    for args in arg_sets(term):
+        try:
+            raw = (term.fn(None, bars, **args) if term.kind == "primitive"
+                   else term.fn(bars, args) if term.kind == "bar"
+                   else term.fn(bars["close"], args))
+        except Exception as exc:                       # noqa: BLE001
+            return TermVerdict(term.name, FAILED,
+                               f"args {args}: whole-frame call raised {exc}")
+        mismatch = field_mismatch(term, raw)
+        if mismatch is not None:
+            return TermVerdict(term.name, FAILED, f"schema: {mismatch}")
+
+        whole = evaluate_term(term, bars, args)
+        saw_a_number = False
+        for i in rows:
+            want = _value_at(whole, i)
+            try:
+                prefix = _value_at(evaluate_term(term, bars.iloc[:i + 1], args), -1)
+            except Exception as exc:                   # noqa: BLE001
+                return TermVerdict(term.name, FAILED,
+                                   f"args {args} row {i}: prefix call raised {exc}")
+            if not _agrees(want, prefix):
+                return TermVerdict(
+                    term.name, FAILED,
+                    f"args {args} row {i}: whole-frame {want!r} != prefix "
+                    f"{prefix!r}, so row {i} read a row after itself")
+            saw_a_number = saw_a_number or not pd.isna(want)
+        if not saw_a_number:
+            return TermVerdict(
+                term.name, VACUOUS,
+                f"args {args} are NaN at all {len(rows)} probe rows, so agreement "
+                f"proves nothing about this mandated argument set")
+        checked += 1
+
+    return TermVerdict(term.name, CHECKED, "", checked)

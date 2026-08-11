@@ -8,8 +8,9 @@ import pytest
 import nakagai.strategies.rules.verify as verify_module
 from nakagai.strategies.rules.vocabulary import Term, core_vocabulary
 from nakagai.strategies.rules.verify import (
-    CONDITION_ARG, MAX_ARG_SETS, TermVerdict, arg_sets, evaluate_term,
-    exemption_reason, field_mismatch,
+    CHECKED, CONDITION_ARG, EXEMPT, FAILED, MAX_ARG_SETS, PROBE_COUNT,
+    TermVerdict, VACUOUS, arg_sets, evaluate_term, exemption_reason,
+    field_mismatch, probe_rows, verify_term,
 )
 
 
@@ -306,3 +307,76 @@ def test_the_cap_counts_what_the_term_produces_not_the_formula(monkeypatch):
     monkeypatch.setattr(verify_module, "MAX_ARG_SETS", 3)
     with pytest.raises(ValueError, match="more than 3"):
         arg_sets(term)
+
+
+def _peeking_series(s, a):
+    """Reads one row into the future. This is the defect the gate exists for."""
+    return s.shift(-1)
+
+
+def test_probe_rows_sit_past_the_warmup_and_are_bounded_in_count(bars):
+    rows = probe_rows(len(bars))
+    assert len(rows) == PROBE_COUNT
+    assert min(rows) >= len(bars) // 2
+    assert max(rows) < len(bars)
+
+
+def test_a_peeking_term_fails_the_gate(bars):
+    """The gate's own falsification test. Watch this fail before trusting a pass."""
+    verdict = verify_term(Term("peeker", "series", {}, {}, _peeking_series), bars)
+    assert verdict.status == FAILED
+    assert verdict.reason, "a failure must say which row disagreed"
+
+
+def test_an_honest_term_is_checked(bars):
+    verdict = verify_term(core_vocabulary().indicators["sma"], bars)
+    assert verdict.status == CHECKED
+    assert verdict.arg_sets_checked == len(arg_sets(core_vocabulary().indicators["sma"]))
+
+
+def test_every_mandated_argument_set_must_be_non_vacuous(bars):
+    """One all-NaN argument set makes the TERM vacuous, not just that set.
+
+    Both plan-gate lenses caught the opposite: rvol's mandated sessions=60 was NaN
+    at every probe on a short fixture while the term reported CHECKED, so the
+    boundary went untested behind a green run.
+    """
+    short = bars.iloc[:40 * 26]
+    verdict = verify_term(core_vocabulary().primitives["rvol"], short)
+    assert verdict.status == VACUOUS
+    assert "sessions" in verdict.reason and "60" in verdict.reason
+
+
+def test_rvol_is_checked_on_the_full_fixture(bars):
+    """The same term on the properly sized fixture. This is why it is 160 sessions."""
+    verdict = verify_term(core_vocabulary().primitives["rvol"], bars)
+    assert verdict.status == CHECKED, verdict.reason
+
+
+def test_an_all_nan_term_is_vacuous_not_checked(bars):
+    term = Term("always_nan", "series", {}, {},
+                lambda s, a: pd.Series(float("nan"), index=s.index))
+    assert verify_term(term, bars).status == VACUOUS
+
+
+def test_a_term_that_raises_is_failed_not_swallowed(bars):
+    term = Term("explodes", "series", {}, {},
+                lambda s, a: (_ for _ in ()).throw(ValueError("boom")))
+    verdict = verify_term(term, bars)
+    assert verdict.status == FAILED and "boom" in verdict.reason
+
+
+def test_a_term_whose_schema_disagrees_with_its_columns_is_failed(bars):
+    term = Term("under_declared", "frame", {"field": ("a",)}, {"field": "a"},
+                lambda s, a: pd.DataFrame({"a": s, "b": s.shift(-1)}))
+    verdict = verify_term(term, bars)
+    assert verdict.status == FAILED
+    assert "b" in verdict.reason
+
+
+@pytest.mark.parametrize(
+    "name", ["sma", "ema", "rsi", "macd", "bb", "atr", "donchian", "vwap",
+             "ichimoku", "stoch", "supertrend", "keltner", "obv", "adx"])
+def test_every_shipped_indicator_shape_is_checked_and_passes(name, bars):
+    verdict = verify_term(core_vocabulary().indicators[name], bars)
+    assert verdict.status == CHECKED, f"{name}: {verdict.reason}"
