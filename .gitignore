@@ -7,3 +7,4 @@ dist/
 # Superpowers scratch: never committed
 docs/superpowers/
 .superpowers/
+.second-opinion/
