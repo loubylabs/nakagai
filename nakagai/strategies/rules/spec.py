@@ -72,6 +72,19 @@ DEFAULT_RISK = {"stop": {"kind": "atr", "n": STOP_ATR_N_DEFAULT,
                 "target": {"kind": "rr", "rr": TARGET_RR_DEFAULT}}
 
 
+def is_group_node(node) -> bool:
+    """True for a dict spelling any group key.
+
+    One definition, imported by every walker over the grammar (the validator
+    and the describe renderer here, the evaluator, the canonicalizer, the Pine
+    lowering). Each of them used to spell `"all" in node or "any" in node`
+    inline, and three of the four failed SILENTLY on a key they did not know
+    about, so a group key added in one place and forgotten in another is
+    exactly the shape of bug this closes.
+    """
+    return isinstance(node, dict) and any(k in node for k in GROUP_KEYS)
+
+
 class _Budget:
     def __init__(self):
         self.conditions = 0
@@ -398,16 +411,34 @@ def _check_group(group, path: str, errs: list[str], budget: _Budget,
     if depth > MAX_DEPTH:
         errs.append(f"{path}: group depth exceeds {MAX_DEPTH}")
         return
-    if not isinstance(group, dict) or len(group) != 1 or next(iter(group)) not in ("all", "any"):
-        errs.append(f"{path}: expected {{\"all\": [...]}} or {{\"any\": [...]}}")
+    if (not isinstance(group, dict) or len(group) != 1
+            or next(iter(group)) not in GROUP_KEYS):
+        errs.append(f"{path}: expected {{\"all\": [...]}}, {{\"any\": [...]}}, "
+                    "or {\"not\": {...}}")
         return
-    key, items = next(iter(group.items()))
-    if not isinstance(items, list) or not items:
+    key, val = next(iter(group.items()))
+    if key == "not":
+        # N3-D6: `not` takes a GROUP, never a bare leaf. One accepted shape
+        # rather than two, so {"not": {"all": [<leaf>]}} is how a single
+        # condition is negated, and the refusal names that form because an
+        # error a user cannot act on is a worse product than a refusal.
+        # N3-D7: `not` may contain `not` directly, and it counts against
+        # MAX_DEPTH like any other group, which the recursive call enforces
+        # the same way it does for all/any.
+        if not (isinstance(val, dict) and len(val) == 1
+                and next(iter(val)) in GROUP_KEYS):
+            errs.append(f"{path}.not: expected a group ({{\"all\": [...]}}, "
+                        "{\"any\": [...]}, or {\"not\": {...}}), not a bare "
+                        "condition")
+            return
+        _check_group(val, f"{path}.not", errs, budget, vocabulary, depth + 1)
+        return
+    if not isinstance(val, list) or not val:
         errs.append(f"{path}.{key}: must be a non-empty list")
         return
-    for i, item in enumerate(items):
+    for i, item in enumerate(val):
         p = f"{path}.{key}[{i}]"
-        if isinstance(item, dict) and ("all" in item or "any" in item):
+        if is_group_node(item):
             _check_group(item, p, errs, budget, vocabulary, depth + 1)
             continue
         _check_condition(item, p, errs, budget, vocabulary)
@@ -634,16 +665,35 @@ def _condition_text(cond: dict, vocabulary: Vocabulary) -> str:
             f"{_expr_text(cond['rhs'], vocabulary)}")
 
 
-def _group_text(group, vocabulary: Vocabulary, indent: str = "  ") -> str:
-    key, items = next(iter(group.items()))
+def _group_text(group, vocabulary: Vocabulary, depth: int = 0) -> str:
+    """One group's readback, every line indented by its OWN depth already.
+
+    Recursion passes `depth + 1` and nothing else, so a nested block's lines
+    are correct the moment they are produced and the caller never re-indents a
+    child's text after the fact. The previous string-`.replace()` scheme did
+    exactly that second pass, and it double-counted: a grandchild leaf came
+    out six spaces deep instead of four. Nothing caught it because no test
+    asserted exact whitespace on a nested group; N3-D11 freezes the `not`
+    readback as goldens, which is what exposed it.
+    """
+    indent = "  " * depth
+    key, val = next(iter(group.items()))
+    if key == "not":
+        # N3-D11's frozen shape: NOT prefixes the inner group's own joiner
+        # line IN PLACE, at the same depth, rather than adding a level of its
+        # own. Everything under it (its list items, or a nested NOT's own
+        # prefix) keeps the depth it would have had without the negation, so
+        # the scope of the negation is visible from indentation alone.
+        inner = _group_text(val, vocabulary, depth)
+        head, _, tail = inner.partition("\n")
+        return f"{indent}NOT {head[len(indent):]}" + (f"\n{tail}" if tail else "")
     joiner = "ALL of:" if key == "all" else "ANY of:"
-    lines = [joiner]
-    for item in items:
-        if "all" in item or "any" in item:
-            lines.append(indent + _group_text(item, vocabulary, indent + "  ")
-                         .replace("\n", "\n" + indent))
+    lines = [f"{indent}{joiner}"]
+    for item in val:
+        if is_group_node(item):
+            lines.append(_group_text(item, vocabulary, depth + 1))
         else:
-            lines.append(f"{indent}- {_condition_text(item, vocabulary)}")
+            lines.append(f"{indent}  - {_condition_text(item, vocabulary)}")
     return "\n".join(lines)
 
 

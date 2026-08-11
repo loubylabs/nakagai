@@ -9,7 +9,7 @@ from nakagai.strategies.rules import (
 )
 from nakagai.strategies.rules import spec as rules_spec
 from nakagai.strategies.rules.spec import (
-    TIMEFRAMES, _expr_text, validate_condition_group)
+    MAX_DEPTH, TIMEFRAMES, _expr_text, group_text, validate_condition_group)
 
 ORB = {
     "version": 2, "name": "orb-volume", "timeframe": "15m",
@@ -503,3 +503,81 @@ def test_describe_renders_a_second_condition_taking_terms_condition_readably(
             "when": {"lhs": {"src": "close"}, "op": ">", "rhs": {"src": "open"}}}
     assert (_expr_text(node, count_where_vocab)
             == "count_where(5, close is above open)")
+
+
+# --- `not` (N3-D6, N3-D7, N3-D11) -------------------------------------------
+
+LEAF_A = {"lhs": {"src": "close"}, "op": ">", "rhs": 1000}
+LEAF_B = {"lhs": {"src": "volume"}, "op": ">", "rhs": 1_000_000}
+NOT_RISK = ORB["risk"]
+
+
+def test_not_validates_over_a_group():
+    spec = {"version": 2, "name": "x", "timeframe": "15m",
+            "long": {"not": {"any": [LEAF_A, LEAF_B]}}, "risk": NOT_RISK}
+    assert validate_spec(spec) == []
+
+
+def test_not_over_a_bare_leaf_is_refused_naming_the_accepted_form():
+    """N3-D6: one accepted shape."""
+    spec = {"version": 2, "name": "x", "timeframe": "15m",
+            "long": {"not": LEAF_A}, "risk": NOT_RISK}
+    errs = validate_spec(spec)
+    assert any("expected a group" in e and '"all"' in e for e in errs), errs
+
+
+def test_not_may_contain_not_directly():
+    """N3-D7."""
+    spec = {"version": 2, "name": "x", "timeframe": "15m",
+            "long": {"not": {"not": {"all": [LEAF_A]}}}, "risk": NOT_RISK}
+    assert validate_spec(spec) == []
+
+
+def test_not_counts_against_max_depth():
+    group = {"all": [LEAF_A]}
+    for _ in range(MAX_DEPTH + 2):
+        group = {"not": group}
+    spec = {"version": 2, "name": "x", "timeframe": "1h", "long": group,
+            "risk": NOT_RISK}
+    errs = validate_spec(spec)
+    assert any("group depth exceeds" in e for e in errs), errs
+
+
+def test_not_readback_matches_the_frozen_shape_flat():
+    """N3-D11, example 1, verbatim."""
+    text = group_text({"not": {"any": [LEAF_A, LEAF_B]}})
+    assert text == ("NOT ANY of:\n"
+                    "  - close is above 1000\n"
+                    "  - volume is above 1e+06")
+
+
+def test_not_readback_matches_the_frozen_shape_nested():
+    """N3-D11, example 2, verbatim. The one that distinguishes a renderer that
+    scopes correctly from one that prefixes NOT onto the whole tree."""
+    leaf_c = {"lhs": {"src": "close"}, "op": "<", "rhs": 3}
+    text = group_text({"all": [{"not": {"any": [LEAF_A, LEAF_B]}}, leaf_c]})
+    assert text == ("ALL of:\n"
+                    "  NOT ANY of:\n"
+                    "    - close is above 1000\n"
+                    "    - volume is above 1e+06\n"
+                    "  - close is below 3")
+
+
+def test_a_nested_group_two_levels_deep_indents_by_exactly_two_per_level():
+    """The pre-existing bug the frozen goldens exposed, pinned on a plain
+    all/any tree with no `not` in it: the string-.replace() scheme
+    double-counted and put the grandchild leaf six spaces deep."""
+    text = group_text({"all": [{"any": [LEAF_A]}, LEAF_B]})
+    assert text == ("ALL of:\n"
+                    "  ANY of:\n"
+                    "    - close is above 1000\n"
+                    "  - volume is above 1e+06")
+
+
+def test_double_negation_canonicalizes_structurally_not_simplified():
+    """N3-D7's second half: {"not": {"not": G}} hashes differently from G."""
+    spec_dbl = {"version": 2, "name": "x", "timeframe": "1h",
+                "long": {"not": {"not": {"all": [LEAF_A]}}}, "risk": NOT_RISK}
+    spec_plain = {"version": 2, "name": "x", "timeframe": "1h",
+                  "long": {"all": [LEAF_A]}, "risk": NOT_RISK}
+    assert spec_hash(spec_dbl) != spec_hash(spec_plain)

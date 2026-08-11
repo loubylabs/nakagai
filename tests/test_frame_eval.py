@@ -526,3 +526,58 @@ def test_not_over_a_not_yet_closed_higher_timeframe_operand_does_not_fire():
     seeing = sorted(set(range(len(out))) - set(blind))
     assert out.iloc[seeing].all(), "the visible rows must still read satisfied"
     assert out.dtype == bool
+
+
+def test_not_evaluates_to_kleene_negation():
+    frames = _closes([1.0, 2.0, 4.0, 5.0, 2.0, 6.0])
+    fe = FrameEval(frames, TFS)
+    group = {"not": {"any": [
+        {"lhs": {"src": "close"}, "op": ">", "rhs": 1000.0},
+        {"lhs": {"src": "close"}, "op": "<", "rhs": -1000.0}]}}
+    out = fe.group_series(group, "15m")
+    assert out.dtype == bool
+    assert out.all()  # neither disjunct ever true, so not(false or false)
+
+
+# The leaf is a still-warming indicator so the unknown rows exist by
+# construction: sma over 20 bars is NA for the first 19. The arg is `n`; a
+# spelling _eval does not know (`len`) is merged into the arg dict without
+# refusal and the term then runs on its DEFAULT length, so the fixture would
+# have no NA rows at all and the assertion below would be the only thing
+# saying so.
+_WARMING = {"lhs": {"ind": "sma", "n": 20}, "op": ">", "rhs": {"src": "close"}}
+
+
+def test_double_negation_evaluates_to_the_original_group():
+    """N3-D7's middle verb. Validating and canonicalizing a double negation
+    were already covered; evaluating one was not, so a reducer that accepted
+    only all/any beneath a negation would pass both and raise the moment a
+    saved spec with {"not": {"not": G}} was actually run.
+
+    All three Kleene values, because the interesting one is NA: under D8 an
+    unknown must survive both negations as unknown. An implementation that
+    collapsed NA to False anywhere in the pair round-trips True and False
+    correctly and fails only here.
+    """
+    fe = FrameEval(_frames(), TFS)
+    inner = {"all": [_WARMING]}
+    base = fe._group_reduce_na(inner, "15m")
+    once = fe._group_reduce_na({"not": inner}, "15m")
+    twice = fe._group_reduce_na({"not": {"not": inner}}, "15m")
+
+    assert base.isna().any(), (
+        "no unknown rows in the fixture, so the NA leg below proves nothing")
+    known = base.dropna()
+    assert known.any() and not known.all(), \
+        "fixture must carry all three Kleene values, not only NA and one other"
+    assert twice.equals(base), "double negation did not round-trip"
+    assert not twice.equals(once), "double negation collapsed to a single one"
+    assert twice[base.isna()].isna().all(), "unknown did not survive both negations"
+
+
+def test_double_negation_is_bool_at_the_public_boundary():
+    """N3-D4 still holds through a nested negation: the private reducer is
+    nullable, group_series is not."""
+    fe = FrameEval(_frames(), TFS)
+    out = fe.group_series({"not": {"not": {"all": [_WARMING]}}}, "15m")
+    assert out.dtype == bool

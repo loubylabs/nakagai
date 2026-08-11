@@ -7,7 +7,7 @@ materialized, so two specs that trade identically hash identically.
 import hashlib
 import json
 
-from nakagai.strategies.rules.spec import DEFAULT_RISK, VERSION
+from nakagai.strategies.rules.spec import DEFAULT_RISK, VERSION, is_group_node
 from nakagai.strategies.rules.vocabulary import (
     Vocabulary, is_condition_rule, resolve_vocabulary,
 )
@@ -72,8 +72,17 @@ def _canon_cond(c, vocabulary: Vocabulary):
 
 def _canon_group(g, vocabulary: Vocabulary):
     key = next(iter(g))
-    return {key: [_canon_group(i, vocabulary)
-                  if isinstance(i, dict) and ("all" in i or "any" in i)
+    if key == "not":
+        # `not`'s value is a single nested group, not a list of items, so it
+        # is canonicalized on its own rather than through the comprehension
+        # below: `for i in g[key]` over a dict would silently iterate its KEY
+        # STRINGS instead of raising, corrupting the hash rather than
+        # crashing. Structural, per N3-D7: {"not": {"not": G}} canonicalizes
+        # as a double negation and is not simplified away, because
+        # canonicalization is a structural transform and simplifying logic
+        # would change what a spec_hash identifies.
+        return {key: _canon_group(g[key], vocabulary)}
+    return {key: [_canon_group(i, vocabulary) if is_group_node(i)
                   else _canon_cond(i, vocabulary) for i in g[key]]}
 
 

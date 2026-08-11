@@ -14,7 +14,7 @@ from nakagai.screen.runner import run_screen
 from nakagai.screen.spec import describe_screen, validate_screen_spec
 from nakagai.strategies.catalog import load_entries
 from nakagai.strategies.rules import spec_hash, validate_spec
-from nakagai.strategies.rules.canon import canonical_expr
+from nakagai.strategies.rules.canon import canonical_expr, canonical_spec
 from nakagai.strategies.rules.frame_eval import FrameEval
 from nakagai.strategies.rules.spec import validate_condition_group
 from nakagai.strategies.rules.vocabulary import (
@@ -264,3 +264,17 @@ def test_the_retired_exprs_module_is_gone():
     # the vocabulary. The helper lives in frame_eval.py now.
     with pytest.raises(ModuleNotFoundError):
         importlib.import_module("nakagai.strategies.rules.exprs")
+
+
+def test_canon_group_handles_not_without_iterating_its_dict_as_a_list():
+    """canon.py's _canon_group: `for i in g[key]` over a dict (not's value)
+    iterates the dict's KEY STRINGS rather than raising a shape error, and
+    _canon_cond then indexes a str."""
+    spec = {"version": 2, "timeframe": "1h",
+            "long": {"not": {"any": [
+                {"lhs": {"src": "close"}, "op": ">", "rhs": 1}]}},
+            "risk": {"stop": {"kind": "atr", "n": 14, "mult": 2.0},
+                     "target": {"kind": "rr", "rr": 2.0}}}
+    canon = canonical_spec(spec)
+    assert canon["long"] == {"not": {"any": [
+        {"lhs": {"src": "close"}, "op": ">", "rhs": 1.0}]}}

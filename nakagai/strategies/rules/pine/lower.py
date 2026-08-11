@@ -69,6 +69,7 @@ from nakagai.strategies.rules.spec import (
     TARGET_RR_BOUNDS, TARGET_RR_DEFAULT, TIME_STOP_BOUNDS, TIMEFRAMES,
     TRAILING_ATR_MULT_BOUNDS, TRAILING_ATR_MULT_DEFAULT, TRAILING_ATR_N_BOUNDS,
     TRAILING_ATR_N_DEFAULT, TRAILING_PCT_BOUNDS, TRAILING_PCT_DEFAULT,
+    is_group_node,
 )
 from nakagai.strategies.rules.vocabulary import Vocabulary, is_choice_rule
 
@@ -101,8 +102,24 @@ def _tuple(names: list[str]) -> str:
     return names[0] if len(names) == 1 else f"[{', '.join(names)}]"
 
 
-def _is_group(node) -> bool:
-    return isinstance(node, dict) and ("all" in node or "any" in node)
+def _refuse_not(key: str, path: RulePath) -> None:
+    """N3-D8: Pine refuses `not` loudly; it does not learn to compile it.
+
+    Pine is undeployed, so compiling negation buys nothing today, and a
+    mis-compiled chart that disagrees with the engine is worse than one that
+    does not render. The refusal has to be explicit because the recognizer
+    below now admits `not`: without this, a negation would route into the
+    all/any joiner logic, which reads `key == "all"` and otherwise assumes
+    "or", so it would silently render as ANY. Falling through to the leaf
+    lowerer instead, which is what a narrow recognizer did, reads `lhs` off a
+    key string. Silence is the one option not available.
+    """
+    if key == "not":
+        raise PineCompileError(
+            "pine_unsupported",
+            f"{path.text}: `not` has no Pine lowering; rewrite the spec "
+            "without a negation to generate a chart",
+            path=path.text)
 
 
 def _sanitize(part: str) -> str:
@@ -787,11 +804,12 @@ class SpecLowerer:
             return self._frame_value(
                 path, "nk_" + "_".join(_sanitize(p) for p in path.parts), "bool",
                 lambda frame: (self._group(node, path, frame, frame)
-                               if _is_group(node)
+                               if is_group_node(node)
                                else self._condition(node, path, frame, frame)))
-        if not _is_group(node):
+        if not is_group_node(node):
             return self._condition(node, path, self.frame, self.chart)
         key, items = next(iter(node.items()))
+        _refuse_not(key, path)
         joiner = " and " if key == "all" else " or "
         return "(" + joiner.join(
             self._tree(item, path.child(key, i))
@@ -908,12 +926,13 @@ class SpecLowerer:
     # operands that still belong to the play's own frame.
     def _group(self, group: dict, path: RulePath, frame: str, host: str) -> str:
         key, items = next(iter(group.items()))
+        _refuse_not(key, path)
         joiner = " and " if key == "all" else " or "
         parts = []
         for i, item in enumerate(items):
             child = path.child(key, i)
             parts.append(self._group(item, child, frame, host)
-                         if "all" in item or "any" in item
+                         if is_group_node(item)
                          else self._condition(item, child, frame, host))
         return "(" + joiner.join(parts) + ")"
 

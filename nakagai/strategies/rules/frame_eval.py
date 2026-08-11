@@ -26,7 +26,7 @@ import pandas as pd
 from nakagai.data.schema import DEFAULT_TIMEFRAMES, TimeframeSet
 from nakagai.engine.context import visible_counts
 from nakagai.strategies.rules.primitives import end_anchored_series
-from nakagai.strategies.rules.spec import GROUP_KEYS
+from nakagai.strategies.rules.spec import is_group_node
 from nakagai.strategies.rules.vocabulary import (
     Vocabulary, is_condition_rule, resolve_vocabulary,
 )
@@ -327,10 +327,6 @@ class FrameEval:
         # turns the right positions into pd.NA rather than a lossy False.
         return out.astype("boolean").mask(na, pd.NA)
 
-    @staticmethod
-    def _is_group_node(node) -> bool:
-        return isinstance(node, dict) and any(k in node for k in GROUP_KEYS)
-
     def _group_reduce_na(self, group: dict, tf: str) -> pd.Series:
         """The private Kleene-preserving reducer: nullable boolean throughout.
 
@@ -348,7 +344,7 @@ class FrameEval:
         key, val = next(iter(group.items()))
         if key == "not":
             return ~self._group_reduce_na(val, tf)
-        parts = [self._group_reduce_na(i, tf) if self._is_group_node(i)
+        parts = [self._group_reduce_na(i, tf) if is_group_node(i)
                  else self._condition_series_na(i, tf) for i in val]
         op = operator.and_ if key == "all" else operator.or_
         return functools.reduce(op, parts)

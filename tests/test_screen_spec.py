@@ -137,3 +137,12 @@ def test_max_lookback_finds_the_longest_window():
          "op": ">", "rhs": 0}]}}
     assert max_lookback(spec) == 200
     assert max_lookback(GOOD) == 20  # floor
+
+
+def test_screen_spec_inherits_not_in_validation_and_readback():
+    spec = {"version": 1, "tf": "1d",
+            "conditions": {"not": {"any": [RSI_LT_30]}}}
+    assert validate_screen_spec(spec) == []
+    assert describe_screen(spec) == (
+        "Screen on 1d bars, matching symbols where NOT ANY of:\n"
+        "  - rsi(14) is below 30")

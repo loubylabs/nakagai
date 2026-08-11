@@ -295,3 +295,52 @@ def test_a_term_whose_pine_slot_is_not_a_lowering_is_refused_where_it_is_built()
     with pytest.raises(TypeError, match="term 'raw' needs a PineLowering"):
         Term("raw", "series", {}, {}, lambda series, _args: series,
              pine=_emit_close)
+
+
+_NOT_RISK = {"stop": {"kind": "atr", "n": 14, "mult": 2.0},
+             "target": {"kind": "rr", "rr": 2.0}}
+
+
+def test_not_is_refused_with_a_named_message_top_level():
+    spec = {"version": 2, "name": "x", "timeframe": "15m",
+            "long": {"not": {"all": [{"lhs": {"src": "close"}, "op": ">",
+                                      "rhs": 1}]}},
+            "risk": _NOT_RISK}
+    assert validate_spec(spec) == [], "the spec must be VALID before Pine sees it"
+    with pytest.raises(PineCompileError) as exc:
+        lower_pine(spec)
+    assert exc.value.code == "pine_unsupported"
+    assert "`not`" in str(exc.value)
+
+
+def test_not_is_refused_with_a_named_message_nested():
+    spec = {"version": 2, "name": "y", "timeframe": "15m",
+            "long": {"all": [
+                {"not": {"any": [{"lhs": {"src": "close"}, "op": ">",
+                                  "rhs": 1}]}},
+                {"lhs": {"src": "close"}, "op": ">", "rhs": 0}]},
+            "risk": _NOT_RISK}
+    assert validate_spec(spec) == [], "the spec must be VALID before Pine sees it"
+    with pytest.raises(PineCompileError) as exc:
+        lower_pine(spec)
+    assert exc.value.code == "pine_unsupported"
+    assert "`not`" in str(exc.value)
+
+
+def test_not_is_refused_with_a_named_message_on_the_chart_composition_path():
+    """The SECOND refusal site. _decide splits a tree that reads a foreign
+    timeframe and composes it on the chart through _tree, which unpacks a
+    group key of its own; a play whose own frame is not the driving frame
+    never reaches _group at all. Without a refusal there too, `not` reaches
+    the leaf lowerer, which reads `lhs` off a key string and dies with a
+    TypeError instead of a named refusal.
+    """
+    spec = {"version": 2, "name": "z", "timeframe": "1h",
+            "long": {"not": {"all": [{"lhs": {"src": "close", "tf": "1d"},
+                                      "op": ">", "rhs": 1}]}},
+            "risk": _NOT_RISK}
+    assert validate_spec(spec) == [], "the spec must be VALID before Pine sees it"
+    with pytest.raises(PineCompileError) as exc:
+        lower_pine(spec)
+    assert exc.value.code == "pine_unsupported"
+    assert "`not`" in str(exc.value)
