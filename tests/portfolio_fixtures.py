@@ -16,9 +16,9 @@ second replay implementation.
 
 import dataclasses
 import hashlib
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import field
-from datetime import date
+from datetime import date, timedelta
 
 import pandas as pd
 
@@ -41,7 +41,8 @@ from nakagai.engine.canonical import (
 )
 from nakagai.engine.benchmark import ReplayCurve, _equity_series
 from nakagai.engine.execution import ReplayEvents, _PortfolioRuntime
-from nakagai.engine.portfolio import EntryProposal, _Ledger
+from nakagai.engine.metrics import _portfolio_metrics, _slice_accumulators
+from nakagai.engine.portfolio import EntryProposal, PositionKey, _Ledger
 from nakagai.engine.portfolio_types import (
     AccountPolicy,
     BenchmarkResult,
@@ -1496,6 +1497,195 @@ def replay_curve(**overrides) -> ReplayCurve:
     """
     parts = replay_parts(**overrides)
     return _equity_series(parts.schedule, parts.events, parts.prepared)
+
+
+@dataclasses.dataclass(frozen=True)
+class ReplayLenses:
+    """One replay, plus every lens taken over it.
+
+    The metric lens reads the curve lens, so a test that asserts on a metric
+    can also point at the equity point it came from without assembling the
+    replay twice.
+    """
+
+    request: PortfolioReplayRequest
+    schedule: ValidatedSchedule
+    events: ReplayEvents
+    curve: ReplayCurve
+    metrics: PortfolioMetrics
+    slices: Mapping[PositionKey, object]
+
+
+def replay_metrics(**overrides) -> ReplayLenses:
+    """The metric and slice lenses over one replay.
+
+    The same assembly as `replay_curve` with the metric lens applied on top,
+    which is the composition the public entry point performs. Task C11
+    re-points it at `run_portfolio` and nothing it produces may move.
+    """
+    parts = replay_parts(**overrides)
+    curve = _equity_series(parts.schedule, parts.events, parts.prepared)
+    return ReplayLenses(
+        request=parts.request,
+        schedule=parts.schedule,
+        events=parts.events,
+        curve=curve,
+        metrics=_portfolio_metrics(
+            curve, parts.events.trades, parts.events.rejections, parts.schedule),
+        slices=_slice_accumulators(parts.events, parts.schedule),
+    )
+
+
+# ------------------------------------------------- many-session metric input
+
+# The replay fixtures above trade one half day, which is one daily return. The
+# pooled statistics need sixty, and the annualization needs a window long
+# enough to state in years, so those tests drive the metric lens over a
+# schedule of many short sessions and a curve built by hand. Core reads the
+# schedule as data and never consults an installed calendar, so a synthetic
+# run of weekday sessions is an ordinary input rather than a claim about XNYS.
+#
+# Two intervals a session, 14:30Z to 15:00Z. That is 09:30 Eastern in winter
+# and 10:30 in summer, and both land on the session's own date, which is the
+# only thing `validate_schedule` asks of an open.
+DAILY_FIRST_SESSION = date(2026, 1, 5)
+DAILY_SESSION_OPEN = "T14:30:00Z"
+DAILY_SESSION_INTERVALS = 2
+
+
+def daily_session_dates(count: int) -> tuple[date, ...]:
+    """`count` consecutive weekday sessions from the first Monday of 2026."""
+    built: list[date] = []
+    day = DAILY_FIRST_SESSION
+    while len(built) < count:
+        if day.weekday() < 5:
+            built.append(day)
+        day += timedelta(days=1)
+    return tuple(built)
+
+
+def daily_schedule(sessions: int, *, last_intervals: int | None = None) -> ReplaySchedule:
+    """A schedule of `sessions` short weekday sessions and no context bars.
+
+    `last_intervals` lengthens the final session alone, which is how a window
+    whose test range spans an exact number of years is built: session opens are
+    a whole number of days apart, so only the last close can supply the hours.
+    """
+    dates = daily_session_dates(sessions)
+    intervals: list[ScheduledBaseInterval] = []
+    for position, session in enumerate(dates):
+        count = DAILY_SESSION_INTERVALS
+        if last_intervals is not None and position == len(dates) - 1:
+            count = last_intervals
+        intervals.extend(session_intervals(
+            session, ts(f"{session.isoformat()}{DAILY_SESSION_OPEN}"), count))
+    draft = ReplaySchedule(
+        identity=base_identity(), base_intervals=tuple(intervals), context_bars=(),
+    )
+    return dataclasses.replace(draft, identity=base_identity(schedule_digest(draft)))
+
+
+def daily_request(sessions: int, *, last_intervals: int | None = None,
+                  **overrides) -> PortfolioReplayRequest:
+    """Warm up on the first session, test every session after it."""
+    schedule = daily_schedule(sessions, last_intervals=last_intervals)
+    intervals = schedule.base_intervals
+    return base_request(
+        window=ReplayWindow(
+            train_start=intervals[0].open_ts,
+            train_end=intervals[DAILY_SESSION_INTERVALS].open_ts,
+            test_start=intervals[DAILY_SESSION_INTERVALS].open_ts,
+            test_end=intervals[-1].close_ts,
+        ),
+        schedule_identity=schedule.identity,
+        ic_tail_end=intervals[-1].close_ts,
+        **overrides,
+    )
+
+
+def daily_validated(sessions: int, *, last_intervals: int | None = None,
+                    **overrides) -> ValidatedSchedule:
+    return validate_schedule(
+        daily_request(sessions, last_intervals=last_intervals, **overrides),
+        daily_schedule(sessions, last_intervals=last_intervals),
+    )
+
+
+def _daily_point(request: PortfolioReplayRequest, ordinal: int,
+                 at: pd.Timestamp, equity: float) -> EquityPoint:
+    """One point holding `equity` and nothing else, reconciled by hand.
+
+    A positive account is all settled cash; a nonpositive one is carried as
+    liquidation value, because settled cash cannot be negative. Either way the
+    point states the same account identity a real snapshot does.
+    """
+    return EquityPoint(
+        replay_id=request.replay_id,
+        ts=at,
+        point_ordinal=ordinal,
+        settled_cash=equity if equity > 0.0 else 0.0,
+        unsettled_cash=0.0,
+        short_collateral=0.0,
+        positions_liquidation_value=0.0 if equity > 0.0 else equity,
+        portfolio_equity=equity,
+        gross_exposure=0.0,
+        open_positions=0,
+        benchmark_equity=request.account.starting_equity,
+    )
+
+
+def daily_curve(validated: ValidatedSchedule, returns: Sequence[float], *,
+                benchmark_return: float = 0.0,
+                final: float | None = None) -> ReplayCurve:
+    """One curve whose sessions realize `returns`, one return per test session.
+
+    Every point of a session carries that session's closing equity, so a
+    drawdown is readable off the returns alone. `final` gives the post-close
+    point at `test_end` a value of its own, which is what tells a sampler that
+    reads the last point of a session from one that reads the last close.
+
+    The benchmark series is deliberately flat while `benchmark_return` is
+    whatever the caller says: the two disagree so that a metric recomputing the
+    benchmark from the points cannot pass for one reading the curve's own
+    reported return.
+    """
+    request = validated.request
+    starting = request.account.starting_equity
+    equity = starting
+    values: list[float] = []
+    for factor in returns:
+        equity = equity * (1.0 + factor)
+        values.append(equity)
+    sessions: list[date] = []
+    for interval in validated.test_intervals:
+        if not sessions or sessions[-1] != interval.session_date:
+            sessions.append(interval.session_date)
+    if len(sessions) != len(values):
+        raise AssertionError(
+            f"the schedule tests {len(sessions)} sessions and the fixture "
+            f"supplied {len(values)} returns")
+    by_session = dict(zip(sessions, values, strict=True))
+    points = [_daily_point(request, 0, request.window.test_start, starting)]
+    for interval in validated.test_intervals:
+        points.append(_daily_point(
+            request, len(points), interval.close_ts,
+            by_session[interval.session_date]))
+    points.append(_daily_point(
+        request, len(points), request.window.test_end,
+        values[-1] if final is None else final))
+    return ReplayCurve(
+        equity=tuple(points),
+        benchmark=BenchmarkResult(spec=request.benchmark,
+                                  total_return=benchmark_return),
+    )
+
+
+def daily_metrics(returns: Sequence[float], *, last_intervals: int | None = None,
+                  **curve_fields) -> PortfolioMetrics:
+    """The metrics of a curve that traded nothing and returned `returns`."""
+    validated = daily_validated(len(returns) + 1, last_intervals=last_intervals)
+    return _portfolio_metrics(
+        daily_curve(validated, returns, **curve_fields), (), (), validated)
 
 
 def canonical_event_bytes(events: ReplayEvents) -> bytes:

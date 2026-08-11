@@ -4,7 +4,7 @@ import pandas as pd
 import pytest
 
 from nakagai.engine.engine import BacktestResult, Trade
-from nakagai.engine.metrics import MIN_SHARPE_OBSERVATIONS, buy_and_hold_return, summarize
+from nakagai.engine.runner import MIN_SHARPE_OBSERVATIONS, buy_and_hold_return, summarize
 from nakagai.strategies.base import Direction
 
 

@@ -45,7 +45,7 @@ import pandas as pd
 from nakagai.data.cache import BarCache
 from nakagai.data.schema import TimeframeSet, validate_bars
 from nakagai.engine.engine import Engine
-from nakagai.engine.metrics import buy_and_hold_return, summarize
+from nakagai.engine.runner import buy_and_hold_return, summarize
 from nakagai.strategies.catalog import load_catalog
 from nakagai.strategies.rules import core_vocabulary
 
