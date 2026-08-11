@@ -68,6 +68,23 @@ def bars():
     return reference_bars(SESSIONS)
 
 
+@pytest.fixture(scope="module")
+def verdicts(bars):
+    """One pass of the gate over core, read by every whole-vocabulary test below.
+
+    The gate is not cheap: each term is called once per mandated argument set
+    over the whole frame, and again over 20 prefixes of it. Five readers running
+    their own pass cost about 30 of this file's 38 seconds and learned nothing
+    the first pass had not already established. This file is the template node
+    02 copies onto a frame three times larger with 100-plus terms, so the shape
+    of it matters more than the seconds do here.
+
+    The one test that cannot use this is the one that hands the gate a composed
+    vocabulary, which is the whole point of that test.
+    """
+    return verify_vocabulary(core_vocabulary(), bars)
+
+
 def test_the_shipped_default_is_the_frame_these_tests_assert_against(bars):
     """Node 02 calls reference_bars() with no argument, so the default is the contract.
 
@@ -577,9 +594,15 @@ def test_a_rejection_reports_how_many_argument_sets_already_passed(bars):
 @pytest.mark.parametrize(
     "name", ["sma", "ema", "rsi", "macd", "bb", "atr", "donchian", "vwap",
              "ichimoku", "stoch", "supertrend", "keltner", "obv", "adx"])
-def test_every_shipped_indicator_shape_is_checked_and_passes(name, bars):
-    verdict = verify_term(core_vocabulary().indicators[name], bars)
-    assert verdict.status == CHECKED, f"{name}: {verdict.reason}"
+def test_every_shipped_indicator_shape_is_checked_and_passes(name, verdicts):
+    """Read out of the shared pass: verifying these again proves nothing new.
+
+    The named shapes are what the parametrisation is for, so a shape that stops
+    being CHECKED still names itself here rather than hiding in a list.
+    """
+    by_name = {v.name: v for v in verdicts}
+    assert name in by_name, f"{name} is no longer a term in the vocabulary"
+    assert by_name[name].status == CHECKED, f"{name}: {by_name[name].reason}"
 
 
 @pytest.mark.parametrize("name", ["fvg_nearest", "order_block"])
@@ -635,8 +658,7 @@ EXPECTED_EXEMPT = {
 }
 
 
-def test_every_core_term_is_checked_or_declared_exempt(bars):
-    verdicts = verify_vocabulary(core_vocabulary(), bars)
+def test_every_core_term_is_checked_or_declared_exempt(verdicts):
     assert len(verdicts) == len(core_vocabulary().all_terms()) == 37
 
     failed = [v for v in verdicts if v.status == FAILED]
@@ -648,9 +670,9 @@ def test_every_core_term_is_checked_or_declared_exempt(bars):
         "too short for it: " + "\n".join(f"{v.name}: {v.reason}" for v in vacuous))
 
 
-def test_every_checked_term_checked_all_of_its_argument_sets(bars):
+def test_every_checked_term_checked_all_of_its_argument_sets(verdicts):
     """CHECKED means every mandated set was exercised, not merely one of them."""
-    for verdict in verify_vocabulary(core_vocabulary(), bars):
+    for verdict in verdicts:
         if verdict.status != CHECKED:
             continue
         term = (core_vocabulary().indicators.get(verdict.name)
@@ -658,8 +680,7 @@ def test_every_checked_term_checked_all_of_its_argument_sets(bars):
         assert verdict.arg_sets_checked == len(arg_sets(term)), verdict.name
 
 
-def test_the_exempt_set_is_exactly_the_declared_one(bars):
-    verdicts = verify_vocabulary(core_vocabulary(), bars)
+def test_the_exempt_set_is_exactly_the_declared_one(verdicts):
     exempt = {v.name for v in verdicts if v.status == EXEMPT}
     assert exempt == set(EXPECTED_EXEMPT)
     for v in verdicts:
@@ -667,10 +688,10 @@ def test_the_exempt_set_is_exactly_the_declared_one(bars):
             assert EXPECTED_EXEMPT[v.name] in v.reason
 
 
-def test_the_gate_covers_every_name_in_the_vocabulary(bars):
+def test_the_gate_covers_every_name_in_the_vocabulary(verdicts):
     """Enumeration comes from the vocabulary, so there is no manifest to forget."""
     v = core_vocabulary()
-    names = {verdict.name for verdict in verify_vocabulary(v, bars)}
+    names = {verdict.name for verdict in verdicts}
     assert names == set(v.indicators) | set(v.primitives)
 
 
