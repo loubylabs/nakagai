@@ -66,6 +66,7 @@ from nakagai.strategies.base import (
     call_on_bar,
     strategy_operation,
 )
+from nakagai.strategies.rules.vocabulary import Vocabulary
 
 # `_Ledger.protective_exit` answers for the whole bar, so one predicate covers
 # two separate steps of this chronology. A reason naming the open belongs to
@@ -185,6 +186,7 @@ class _PortfolioRuntime:
         self._pending: dict[PositionKey, EntryIntent] = {}
         self._counts: dict[PositionKey, int] = {key: 0 for key in self._keys}
         self._signal_ordinal = 0
+        self._vocabularies = self._build_vocabularies(registry)
         self._runtimes = self._build_runtimes(registry)
 
     # ------------------------------------------------------------ the loop
@@ -332,11 +334,17 @@ class _PortfolioRuntime:
 
         Cheap, because a prefix is a view: this is one more dictionary of frame
         references per runtime per interval, not a copy of any bar.
+
+        Per runtime is also what carries the GRAMMAR. Each context evaluates
+        its play's conditions under that play's definition's vocabulary, which
+        is the same grammar the definition's factory built the runtime with and
+        the same one the IC lens grades its factor under. A context shared
+        across plays could carry only one of them.
         """
         return {
             key: build_scheduled_context(
                 self._prepared, key[1], interval.close_ts, self._schedule,
-                self._dependencies,
+                self._dependencies, vocabulary=self._vocabularies[key],
             )
             for key in self._keys
         }
@@ -436,6 +444,35 @@ class _PortfolioRuntime:
         self._mark(end, _prices(bars, "close"))
 
     # ------------------------------------------------------------ internals
+
+    def _build_vocabularies(
+        self, registry: StrategyRegistry,
+    ) -> dict[PositionKey, Vocabulary]:
+        """The grammar each runtime decides under, one per play symbol.
+
+        Asked of the DEFINITION rather than of the runtime it builds, because
+        the same answer has to reach three places that must not disagree: the
+        factory that builds the runtime, the IC lens that grades its factor,
+        and the context this runtime reads its conditions through. A grammar
+        taken off the constructed object would be a fourth reading of the same
+        question, and a strategy is mutable.
+
+        Once per DEFINITION rather than once per play symbol. A vocabulary
+        factory is caller code, and a Vocabulary is an immutable value shared
+        safely between contexts, so calling it per runtime would multiply the
+        work without separating anything. The iteration is over the request's
+        canonical play order, so nothing here depends on a dictionary.
+        """
+        by_strategy: dict[str, Vocabulary] = {}
+        for play in self._request.plays:
+            if play.strategy in by_strategy:
+                continue
+            definition = registry.resolve(play.strategy)
+            with strategy_operation("vocabulary", strategy=definition.name,
+                                    play_id=play.play_id):
+                by_strategy[play.strategy] = definition.vocabulary_factory()
+        return {key: by_strategy[self._plays[key[0]].strategy]
+                for key in self._keys}
 
     def _build_runtimes(self, registry: StrategyRegistry) -> dict[PositionKey, Strategy]:
         """One fresh strategy per play symbol, built at `test_start`.

@@ -345,10 +345,14 @@ def validate_management_decision(value: object, *, position: PositionView,
                                  deciding_close: float) -> ManagementDecision:
     """The decision `manage` returned, checked against the live position.
 
-    Only what the decision REPLACES is judged, under two separate rules:
+    Only what the decision REPLACES is judged, under three separate rules,
+    each with its own refusal code:
 
-    - each replacement sits on its own protective side of the deciding close;
-    - the pair the decision lands in still opens outward, replacement or live.
+    - a replacement stop may only tighten (`loosened_stop`);
+    - each replacement sits on its own protective side of the deciding close
+      (`unprotective_replacement`);
+    - the pair the decision lands in still opens outward, replacement or live
+      (`crossed_protective_levels`).
 
     A null stop or target keeps the live level, and a live level is the
     engine's own state: where the close sits relative to it is a fact about
@@ -370,8 +374,14 @@ def validate_management_decision(value: object, *, position: PositionView,
         loosened = (value.stop < position.live_stop if long
                     else value.stop > position.live_stop)
         if loosened:
+            # Its own code, like its two siblings below. This is a decision a
+            # strategy made and a caller may want to branch on: a play whose
+            # ratchet arithmetic runs backwards is a different report from one
+            # that handed back a level the close is already past. Under the
+            # generic `invalid_value` it arrived indistinguishable from every
+            # structural refusal in this module.
             raise _output_error(
-                "invalid_value", "a replacement stop cannot loosen the live stop",
+                "loosened_stop", "a replacement stop cannot loosen the live stop",
                 field="stop", direction=position.direction,
             )
         # A stop protects from below on a long and from above on a short.

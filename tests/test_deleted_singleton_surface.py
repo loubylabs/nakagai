@@ -69,6 +69,10 @@ DELETED_MODULES = (
 RETIRED_NAMES = (
     "run_grid",
     "run_one",
+    "load_catalog",
+    "VOCABULARY_FACTORY",
+    "PreloadedBars",
+    "spec_definition_digest",
     "BacktestResult",
     "buy_and_hold_return",
     "SlippageModel",
@@ -165,7 +169,7 @@ APPROVED_EXPORTS = {
     # the strategy bundle
     "FrozenStrategyRegistry", "StrategyDefinition", "StrategyDependencies",
     "StrategyRegistry", "composite_definition", "rules_definition",
-    "spec_definition_digest",
+    "spec_base_digest",
     # the strategy boundary
     "EntryIntent", "ManagementDecision", "PositionView", "Signal",
     # results
@@ -202,9 +206,23 @@ def test_no_retired_name_resolves_off_the_engine_package():
     """
     for name in ("Engine", "BacktestResult", "run_one", "run_grid",
                  "summarize", "buy_and_hold_return", "FeeModel",
-                 "SlippageModel", "Trade"):
+                 "SlippageModel", "Trade", "spec_definition_digest"):
         with pytest.raises(AttributeError):
             getattr(engine, name)
+
+
+def test_the_packages_own_machinery_is_not_part_of_its_surface():
+    """The module docstring claims nothing outside `__all__` resolves.
+
+    A plain `from importlib import import_module` at the top of that file is a
+    module-level binding, so `from nakagai.engine import import_module` would
+    succeed and the claim would be false for a name nobody meant to publish.
+    The deferred resolver needs it, so it is bound privately instead.
+    """
+    assert "import_module" not in engine.__all__
+    with pytest.raises(AttributeError):
+        engine.import_module
+    assert engine._import_module("nakagai.engine.replay").run_portfolio is not None
 
 
 def test_a_composite_has_no_class_bound_membership_door():
@@ -213,6 +231,29 @@ def test_a_composite_has_no_class_bound_membership_door():
 
     assert not hasattr(CompositeStrategy, "bound")
     assert not hasattr(CompositeStrategy, "MEMBERS")
+
+
+def test_a_rule_strategy_has_no_class_bound_grammar_door():
+    """Its composite twin went in C11; this is the other half of that pair.
+
+    `RuleStrategy.bound` minted a subclass carrying a `VOCABULARY_FACTORY`
+    class attribute, which the retired `load_catalog` was the only caller of.
+    A grammar reaches a runtime as a constructor argument now, and the
+    definition holds the factory, so there is nothing mutable to bind.
+    """
+    from nakagai.strategies.rules import RuleStrategy
+
+    assert not hasattr(RuleStrategy, "bound")
+    assert not hasattr(RuleStrategy, "VOCABULARY_FACTORY")
+
+
+def test_the_catalog_has_one_loader_and_it_returns_values():
+    """`catalog_definitions` is the whole door; no class-minting loader beside
+    it, so one catalog entry cannot be two types in one process."""
+    from nakagai.strategies import catalog
+
+    assert not hasattr(catalog, "load_catalog")
+    assert callable(catalog.catalog_definitions)
 
 
 # ------------------------------------------------------------- the vocabulary

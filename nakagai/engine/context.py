@@ -39,30 +39,6 @@ from nakagai.strategies.rules.vocabulary import Vocabulary, resolve_vocabulary
 from nakagai.strategies.util import label_freshness
 
 
-class PreloadedBars:
-    """In-memory, BarCache-shaped view of one symbol's timeframes, plus the
-    replay's node cache.
-
-    Engine.run builds one of these, so replay does one parquet read per
-    timeframe total instead of one per bar, and every node in a spec is
-    computed once per replay instead of once per bar. Point-in-time filtering
-    still happens per bar in closed_before; `fe` holds the untruncated frames.
-    """
-
-    # Keyword-only `vocabulary`, as everywhere it sits behind an optional
-    # `tfs`: passed positionally it would bind to `tfs` and the replay would
-    # quietly evaluate against the core vocabulary instead of the injected one.
-    def __init__(self, cache, symbol: str, tfs: TimeframeSet = DEFAULT_TIMEFRAMES,
-                 *, vocabulary: Vocabulary | None = None):
-        from nakagai.strategies.rules.frame_eval import FrameEval
-        self._frames = {tf: cache.load(symbol, tf) for tf in tfs.all}
-        self.fe = FrameEval(self._frames, tfs,
-                            vocabulary=resolve_vocabulary(vocabulary))
-
-    def load(self, symbol: str, timeframe: str):
-        return self._frames[timeframe]
-
-
 def closed_before(df: pd.DataFrame, timeframe: str, now: pd.Timestamp,
                   tfs: TimeframeSet = DEFAULT_TIMEFRAMES) -> pd.DataFrame:
     """Point-in-time prefix of a (sorted) bar frame: only bars fully closed at
@@ -134,23 +110,21 @@ def build_context(cache: BarCache, symbol: str, now: pd.Timestamp,
     from nakagai.strategies.rules.frame_eval import FrameEval
     frames = {tf: cache.load(symbol, tf) for tf in tfs.all}
     bars = {tf: closed_before(frames[tf], tf, now, tfs) for tf in tfs.all}
-    # A replay hands its own FrameEval over the untruncated frames (PreloadedBars);
-    # a scanner or screener has no replay, so it gets one over the cut frames, whose
-    # last row IS `now`. Both index the same way, so there is one walker and one set
-    # of semantics rather than a point-in-time walker beside a whole-frame one.
-    fe = getattr(cache, "fe", None)
-    if fe is None:
-        fe = FrameEval(bars, tfs, vocabulary=resolve_vocabulary(vocabulary))
-        # The span is not optional here. A point-in-time caller can only ever
-        # read the LAST row of each frame, because the frames were just cut at
-        # `now`; without a span the end-anchored primitives default to the whole
-        # frame and walk every row of history one at a time to produce values
-        # nobody asks for. Measured on a three-year 15m SPY cache that took one
-        # spec, one symbol, one bar from 0.001s to 11.4s, and the scan registry
-        # holds three end-anchored specs run every 15 minutes.
-        for tf in tfs.all:
-            n = len(bars[tf])
-            fe.set_span(tf, max(n - 1, 0), n)
+    # The evaluator sits over the CUT frames, whose last row is `now`, so this
+    # door and `build_scheduled_context` index the same way and there is one
+    # walker with one set of semantics rather than a point-in-time walker
+    # beside a whole-frame one.
+    fe = FrameEval(bars, tfs, vocabulary=resolve_vocabulary(vocabulary))
+    # The span is not optional here. A point-in-time caller can only ever read
+    # the LAST row of each frame, because the frames were just cut at `now`;
+    # without a span the end-anchored primitives default to the whole frame and
+    # walk every row of history one at a time to produce values nobody asks
+    # for. Measured on a three-year 15m SPY cache that took one spec, one
+    # symbol, one bar from 0.001s to 11.4s, and the scan registry holds three
+    # end-anchored specs run every 15 minutes.
+    for tf in tfs.all:
+        n = len(bars[tf])
+        fe.set_span(tf, max(n - 1, 0), n)
     ctx = MarketContext(
         symbol=symbol, now=now, tfs=tfs, bars=MappingProxyType(bars), fe=fe,
         cursor=MappingProxyType({tf: len(bars[tf]) - 1 for tf in tfs.all}))
@@ -180,13 +154,23 @@ def _scheduled_timeframes(dependencies: ReplayDependencies) -> TimeframeSet:
 
 def build_scheduled_context(prepared: _ValidatedPortfolioBars, symbol: str,
                             now: pd.Timestamp, schedule: ValidatedSchedule,
-                            dependencies: ReplayDependencies) -> MarketContext:
+                            dependencies: ReplayDependencies, *,
+                            vocabulary: Vocabulary) -> MarketContext:
     """One symbol's causal context at the scheduled base close `now`.
 
     Each frame is cut to the rows the schedule has released: base bars that
     have fully closed, and context bars whose `available_at` has arrived. The
     cut is a prefix because a prepared frame's labels ARE the schedule's
     labels, in the schedule's order.
+
+    `vocabulary` is the grammar the evaluator behind `ctx.fe` reads a spec
+    under, and it is REQUIRED and keyword-only rather than defaulted. The
+    caller is one play's runtime construction, which knows the definition's own
+    grammar; a default here would be silently taken by every replay and would
+    decide entries under the core grammar while the IC lens graded the same
+    play under the definition's, with no digest moving to say so. Keyword-only
+    for the reason every `vocabulary` in this codebase is: bound positionally
+    it would land in an earlier parameter and nothing would raise.
 
     `now` must be a scheduled base close inside the test range. The schedule
     runs on to `ic_tail_end`, and those tail closes are scheduled closes too,
@@ -205,6 +189,7 @@ def build_scheduled_context(prepared: _ValidatedPortfolioBars, symbol: str,
     _require_instance(prepared, "prepared", _ValidatedPortfolioBars)
     _require_instance(schedule, "schedule", ValidatedSchedule)
     _require_instance(dependencies, "dependencies", ReplayDependencies)
+    _require_instance(vocabulary, "vocabulary", Vocabulary)
     symbol = _require_symbol(symbol, "symbol")
     now = _require_timestamp(now, "now")
     closed = schedule.closed_base_count(now)
@@ -235,7 +220,7 @@ def build_scheduled_context(prepared: _ValidatedPortfolioBars, symbol: str,
         for tf in dependencies.timeframes
     }
     tfs = _scheduled_timeframes(dependencies)
-    fe = FrameEval(bars, tfs, vocabulary=resolve_vocabulary(None))
+    fe = FrameEval(bars, tfs, vocabulary=vocabulary)
     # The span is not optional, for the same reason it is not optional in
     # build_context: without one, the end-anchored primitives walk the whole
     # frame to produce values no caller can read.

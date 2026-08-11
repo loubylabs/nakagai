@@ -18,6 +18,7 @@ from nakagai.engine.registry import (
     StrategyDefinition,
     StrategyDependencies,
     StrategyRegistry,
+    _bundle_digest,
     composite_definition,
     rules_definition,
     vocabulary_digest,
@@ -94,12 +95,23 @@ def test_registry_bundle_is_order_independent_and_factories_are_fresh():
     assert definition.factory(PARAMS) is not definition.factory(PARAMS)
 
 
-def test_the_bundle_is_ordered_by_definition_digest():
+def test_the_bundle_is_hashed_in_definition_digest_order():
+    """The sort is not readable off the registry, so it is asserted through
+    the one thing it exists for: the digest.
+
+    `_bundle_digest` hashes the tuple it is handed, in that tuple's order, so
+    the registry's own digest equals the digest of the definitions sorted by
+    `definition_digest` and NOT the digest of the supply order. The first
+    assertion is what makes the second a real check: these definitions are
+    supplied in an order that is neither sorted, so a constructor that skipped
+    the sort would produce a different digest here.
+    """
     supplied = base_definitions()
-    assert [item.name for item in supplied] != sorted(item.name for item in supplied)
-    ordered = registry(supplied).definitions
-    assert [item.definition_digest for item in ordered] == sorted(
-        item.definition_digest for item in supplied)
+    by_digest = tuple(sorted(supplied, key=lambda item: item.definition_digest))
+
+    assert supplied != by_digest
+    assert registry(supplied).registry_digest == _bundle_digest(by_digest)
+    assert registry(supplied).registry_digest != _bundle_digest(supplied)
 
 
 def test_the_registry_digest_follows_a_definition_digest():
@@ -309,9 +321,10 @@ def test_declared_symbols_uppercase_deduplicate_and_sort():
 
 @pytest.mark.parametrize("timeframes", [("30m",), ("",), (), ("1h", "5m")])
 def test_an_unsupported_or_blank_timeframe_is_refused(timeframes):
-    with pytest.raises(ReplayInputError):
+    with pytest.raises(ReplayInputError) as caught:
         StrategyDependencies(timeframes=timeframes, external_symbols=(),
                              vocabulary_digest=CORE_DIGEST)
+    assert caught.value.code == "invalid_value"
 
 
 def test_a_blank_external_symbol_is_refused():

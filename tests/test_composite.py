@@ -16,13 +16,24 @@ from nakagai.engine.portfolio_types import (
     Signal, StrategyOutputError, StrategyRuntimeError,
 )
 from nakagai.strategies.base import MarketContext, Strategy
-from nakagai.strategies.catalog import load_catalog
+from nakagai.strategies.catalog import catalog_definitions
 from nakagai.strategies.composite import CompositeStrategy, validate_composite_spec
 from nakagai.strategies.composite.strategy import member_blocks
 from nakagai.strategies.rules import RuleStrategy, core_vocabulary
 from nakagai.strategies.rules.vocabulary import Term
 
 SPECS = Path(__file__).resolve().parents[1] / "nakagai" / "strategies" / "catalog" / "specs"
+
+
+def _catalog_members():
+    """Name to factory, which is the one shape membership arrives in.
+
+    Built from the frozen catalog definitions rather than from minted classes:
+    a definition's `factory` IS the member builder, so a composite over the
+    shipped specs is assembled exactly the way a registry bundle assembles one.
+    """
+    return {item.name: item.factory
+            for item in catalog_definitions(SPECS, core_vocabulary)}
 
 
 def _two_member_spec():
@@ -37,7 +48,7 @@ def _two_member_spec():
 
 
 def test_validate_against_example_members():
-    members = load_catalog(SPECS, core_vocabulary)
+    members = _catalog_members()
     assert validate_composite_spec(_two_member_spec(), members, allow_refs=False) == []
 
 
@@ -48,7 +59,7 @@ def test_validate_rejects_unknown_member():
 
 def test_supplied_membership_instantiates_members():
     strat = CompositeStrategy({"spec": _two_member_spec()},
-                              members=load_catalog(SPECS, core_vocabulary))
+                              members=_catalog_members())
     assert set(strat._members) == {"a", "b"}
 
 
@@ -66,7 +77,7 @@ _LEG_SPEC = {"version": 2, "name": "rsi-leg", "timeframe": "1h",
              "risk": {"stop": {"kind": "atr", "n": 14, "mult": 2.0},
                       "target": {"kind": "rr", "rr": 2.0}}}
 
-# Mirrors how load_catalog builds a catalog play: empty PARAMS, spec baked in.
+# Mirrors how a catalog definition builds a play: empty params, spec bound.
 _Bare = type("_Bare", (RuleStrategy,),
              {"name": "bare_play", "PARAMS": {}, "DEFAULT_PARAMS": {"spec": _LEG_SPEC}})
 _MEMBERS = {"rules": RuleStrategy, "bare_play": _Bare}
@@ -147,7 +158,8 @@ def test_a_composite_carries_the_vocabulary_its_members_were_built_with():
             "blocks": {"a": {"strategy": "rules", "params": {"spec": _LEG_SPEC}}},
             "long": {"all": ["a"]}}
     strategy = CompositeStrategy(
-        {"spec": spec}, members={"rules": RuleStrategy.bound(lambda: house)})
+        {"spec": spec},
+        members={"rules": lambda params: RuleStrategy(params, vocabulary=house)})
 
     assert strategy.vocabulary is house
 
@@ -230,14 +242,16 @@ def test_composite_output_is_an_ordered_tuple():
 def test_a_raising_member_aborts_the_run_and_names_its_block():
     with pytest.raises(StrategyRuntimeError) as caught:
         _composite(_Boom).on_bar(_ctx())
+    assert caught.value.code == "strategy_raised"
     assert caught.value.details["block"] == "a"
     assert caught.value.details["strategy"] == "boom"
     assert caught.value.details["error"] == "ValueError"
 
 
 def test_a_member_signal_outside_the_contract_aborts_the_run():
-    with pytest.raises(StrategyOutputError):
+    with pytest.raises(StrategyOutputError) as caught:
         _composite(_Bad).on_bar(_ctx())
+    assert caught.value.code == "invalid_value"
 
 
 def test_an_inert_composite_returns_an_empty_tuple():

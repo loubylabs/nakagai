@@ -6,7 +6,6 @@ With no spec it is inert; the scanner can instantiate it harmlessly.
 """
 
 from collections.abc import Mapping
-from typing import ClassVar
 
 import pandas as pd
 
@@ -18,9 +17,7 @@ from nakagai.strategies.rules.spec import (
     TRAILING_ATR_MULT_DEFAULT, TRAILING_ATR_N_DEFAULT, TRAILING_PCT_DEFAULT,
     validate_spec,
 )
-from nakagai.strategies.rules.vocabulary import (
-    Vocabulary, VocabularyFactory, core_vocabulary, resolve_vocabulary,
-)
+from nakagai.strategies.rules.vocabulary import Vocabulary, resolve_vocabulary
 from nakagai.strategies.util import rr_signal
 
 # The frame a spec is evaluated on when it names none. One spelling, because
@@ -67,12 +64,6 @@ class RuleStrategy(Strategy):
     category = "custom"
     tags = ("custom", "rules", "imported")
     DEFAULT_PARAMS = {}
-    VOCABULARY_FACTORY: ClassVar[VocabularyFactory] = core_vocabulary
-
-    @classmethod
-    def bound(cls, vocabulary_factory: VocabularyFactory) -> type["RuleStrategy"]:
-        return type("BoundRuleStrategy", (cls,),
-                    {"VOCABULARY_FACTORY": vocabulary_factory})
 
     def __init__(self, params: dict | None = None,
                  vocabulary: Vocabulary | None = None, *,
@@ -82,12 +73,15 @@ class RuleStrategy(Strategy):
             # A registry definition names its own runtime. The assignment
             # shadows the class attribute on this instance alone, so one
             # immutable definition can build a play called `sma_cross` without
-            # minting a subclass per catalog entry, which is the mutable
-            # class binding the canonical path does not use.
+            # minting a subclass per catalog entry.
             self.name = name
-        self.vocabulary = resolve_vocabulary(
-            vocabulary if vocabulary is not None
-            else type(self).VOCABULARY_FACTORY())
+        # The grammar arrives as a VALUE, per instance, from whoever built this
+        # runtime. There is no class attribute to bind and no subclass to mint:
+        # a definition holds the factory, calls it, and hands the result here,
+        # which is the same grammar the replay gives the context this instance
+        # decides through. `None` is the core's, for a caller with no grammar
+        # of its own.
+        self.vocabulary = resolve_vocabulary(vocabulary)
         self.spec = self.params.get("spec") or {}
         # A bad spec must fail loudly at construction (backtest submission),
         # not silently emit nothing per bar. Empty spec = intentionally inert.

@@ -308,6 +308,7 @@ def test_the_dependency_closure_is_the_union_the_definitions_declare():
         run_portfolio(base_request(), PortfolioBars(surplus), strategy_registry(),
                       base_schedule())
 
+    assert raised.value.code == "missing_required_bar"
     assert raised.value.details["field"] == "unexpected_frame"
     assert raised.value.details["timeframe"] == "4h"
 
@@ -805,6 +806,7 @@ def test_a_factory_that_raises_aborts_before_any_interval_is_replayed():
         replay_result(symbol_order=("SPY",),
                       plays=one_play(factory_raises="no runtime"))
 
+    assert raised.value.code == "strategy_raised"
     assert raised.value.details["operation"] == "construct"
 
 

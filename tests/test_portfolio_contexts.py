@@ -47,6 +47,7 @@ from nakagai.engine.portfolio_types import StrategyOutputError
 from nakagai.strategies.base import MarketContext, Strategy
 from nakagai.strategies.composite.strategy import CompositeStrategy
 from nakagai.strategies.rules import RuleStrategy
+from nakagai.strategies.rules.vocabulary import core_vocabulary
 from tests.portfolio_fixtures import (
     FactoryCalls,
     ScriptedPlay,
@@ -110,7 +111,8 @@ def _gates(request, schedule, dependencies, spec):
     scheduled, reconstructed = [], []
     for interval in validated.test_intervals:
         context = build_scheduled_context(
-            prepared, "SPY", interval.close_ts, validated, dependencies)
+            prepared, "SPY", interval.close_ts, validated, dependencies,
+            vocabulary=core_vocabulary())
         if strategy._fresh(context):
             scheduled.append(interval.close_ts)
         if _label_gate(context, timeframe):
@@ -135,7 +137,8 @@ def test_every_context_of_a_replay_shows_exactly_the_released_rows():
     for interval in validated.test_intervals:
         now = interval.close_ts
         context = build_scheduled_context(
-            prepared, "SPY", now, validated, dependencies)
+            prepared, "SPY", now, validated, dependencies,
+        vocabulary=core_vocabulary())
         assert list(context.bars["15m"].index) == [
             row.open_ts for row in validated.base_intervals if row.close_ts <= now]
         for timeframe in ("1h", "4h", "1d"):
@@ -157,9 +160,11 @@ def test_an_external_dependency_joins_only_after_its_own_availability():
         timeframes=("15m", "1h"), external_symbols=("IWM",))
     validated, prepared = prepared_for(base_request(), base_schedule(), dependencies)
     before = build_scheduled_context(
-        prepared, "IWM", ts("2026-11-27T14:45:00Z"), validated, dependencies)
+        prepared, "IWM", ts("2026-11-27T14:45:00Z"), validated, dependencies,
+        vocabulary=core_vocabulary())
     after = build_scheduled_context(
-        prepared, "IWM", ts("2026-11-27T15:00:00Z"), validated, dependencies)
+        prepared, "IWM", ts("2026-11-27T15:00:00Z"), validated, dependencies,
+        vocabulary=core_vocabulary())
     assert list(before.bars["1h"].index) == [ts("2026-11-25T14:00:00Z")]
     assert list(after.bars["1h"].index) == [ts("2026-11-25T14:00:00Z"),
                                             ts("2026-11-27T14:00:00Z")]
@@ -191,7 +196,8 @@ def test_the_mappings_a_runtime_receives_cannot_be_rebound():
     validated, prepared = prepared_for(
         base_request(), base_schedule(), base_dependencies())
     context = build_scheduled_context(
-        prepared, "SPY", ts("2026-11-27T15:00:00Z"), validated, base_dependencies())
+        prepared, "SPY", ts("2026-11-27T15:00:00Z"), validated,
+        base_dependencies(), vocabulary=core_vocabulary())
     for mapping in (context.bars, context.cursor, context.fresh):
         with pytest.raises(TypeError):
             mapping["15m"] = None
@@ -207,7 +213,8 @@ def test_a_context_carries_only_the_frames_its_replay_declared():
     dependencies = ReplayDependencies(timeframes=("15m", "1h"), external_symbols=())
     validated, prepared = prepared_for(base_request(), base_schedule(), dependencies)
     context = build_scheduled_context(
-        prepared, "SPY", ts("2026-11-27T15:00:00Z"), validated, dependencies)
+        prepared, "SPY", ts("2026-11-27T15:00:00Z"), validated, dependencies,
+        vocabulary=core_vocabulary())
     assert set(context.bars) == {"15m", "1h"}
     assert set(context.cursor) == {"15m", "1h"}
     # The driving frame has no gate, so it is absent from `fresh` on purpose.
@@ -238,7 +245,8 @@ def test_the_cursor_indexes_the_newest_row_each_frame_has_released():
     validated, prepared = prepared_for(base_request(), base_schedule(), dependencies)
 
     context = build_scheduled_context(
-        prepared, "SPY", ts("2026-11-27T15:00:00Z"), validated, dependencies)
+        prepared, "SPY", ts("2026-11-27T15:00:00Z"), validated, dependencies,
+        vocabulary=core_vocabulary())
 
     assert dict(context.cursor) == {"15m": 27, "1h": 1}
     for timeframe, position in context.cursor.items():
@@ -285,7 +293,8 @@ def test_the_gate_is_the_schedules_freshness_and_not_the_bars_availability():
     readable, fresh = [], []
     for interval in validated.test_intervals:
         context = build_scheduled_context(
-            prepared, "SPY", interval.close_ts, validated, dependencies)
+            prepared, "SPY", interval.close_ts, validated, dependencies,
+            vocabulary=core_vocabulary())
         if len(context.bars["1d"]):
             readable.append(interval.close_ts)
         if context.fresh["1d"]:
@@ -307,7 +316,8 @@ def test_a_context_bar_the_schedule_never_calls_fresh_gates_nothing():
     assert [row.fresh_context_at for row in validated.context_bars("4h")] == [None]
     for interval in validated.test_intervals:
         context = build_scheduled_context(
-            prepared, "SPY", interval.close_ts, validated, dependencies)
+            prepared, "SPY", interval.close_ts, validated, dependencies,
+            vocabulary=core_vocabulary())
         assert context.fresh["4h"] is False
 
 
@@ -398,7 +408,8 @@ def test_the_first_test_context_is_warm_from_the_training_range():
     dependencies = base_dependencies()
     validated, prepared = prepared_for(base_request(), base_schedule(), dependencies)
     context = build_scheduled_context(
-        prepared, "SPY", FIRST_TEST_CLOSE, validated, dependencies)
+        prepared, "SPY", FIRST_TEST_CLOSE, validated, dependencies,
+        vocabulary=core_vocabulary())
     closes = context.bars["15m"]["close"]
     assert len(closes) == TRAIN_INTERVALS + 1
     assert context.bars["15m"].index[0] == base_request().window.train_start

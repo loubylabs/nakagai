@@ -40,7 +40,12 @@ from types import MappingProxyType
 import pandas as pd
 from pandas import Timestamp
 
-from nakagai.engine.bars import BASE_TIMEFRAME, _ValidatedPortfolioBars, _require_timeframe
+from nakagai.engine.bars import (
+    BASE_TIMEFRAME,
+    _MISSING_BAR,
+    _ValidatedPortfolioBars,
+    _require_timeframe,
+)
 from nakagai.engine.metrics import _SliceTotals
 from nakagai.engine.portfolio import PositionKey
 from nakagai.engine.portfolio_types import (
@@ -300,7 +305,7 @@ def _causal_frames(schedule: ValidatedSchedule, prepared: _ValidatedPortfolioBar
             frame = prepared.frame(symbol, timeframe)
         except KeyError:
             raise _fail(
-                "missing_required_bar",
+                _MISSING_BAR,
                 "a graded definition declares a frame this replay never prepared",
                 field="frame", symbol=symbol, timeframe=timeframe,
             ) from None

@@ -87,7 +87,11 @@ IcTimeframe: TypeAlias = Callable[[Mapping[str, JSONValue]], str]
 
 @dataclass(frozen=True)
 class StrategyDependencies:
-    """Everything one play reads beyond its own traded symbol's base bars.
+    """Everything one play reads, and the grammar it is read under.
+
+    The base timeframe is part of it rather than assumed: both builders below
+    declare it whatever a spec names, because `on_bar` decides on the driving
+    frame however the conditions were evaluated.
 
     Timeframes deduplicate into the fixed order `15m`, `1h`, `4h`, `1d`, and
     external symbols uppercase, deduplicate, and sort lexically, so two
@@ -142,6 +146,17 @@ class StrategyDefinition:
     observation instants, and which series the realized forward return is
     taken over. A factor without an axis would leave the lens guessing, and an
     axis without a factor would describe a measurement nobody can take.
+
+    `vocabulary_factory` is the GRAMMAR this definition is read under, and it
+    is one field because a replay has to answer that question once. Three
+    things ask it and they must not disagree: the factory builds a runtime
+    that validates its spec under it, the IC lens grades that runtime's factor
+    under it, and the replay evaluates the runtime's conditions under it, by
+    handing this grammar to the context the runtime decides from. Two of those
+    reading the definition's grammar while the third took the core's is a play
+    deciding under one grammar and graded under another, which shows up as a
+    wrong number rather than as an error: `vocabulary_digest` covers what a
+    term DECLARES, so a redefined implementation moves no digest at all.
     """
 
     name: str
@@ -151,12 +166,13 @@ class StrategyDefinition:
     ic_factor: IcFactor | None
     ic_timeframe: IcTimeframe | None = None
     members: tuple["StrategyDefinition", ...] = ()
+    vocabulary_factory: VocabularyFactory = core_vocabulary
 
     def __post_init__(self) -> None:
         _set(self, "name", _require_name(self.name, "name"))
         _set(self, "definition_digest",
              _require_digest(self.definition_digest, "definition_digest"))
-        for field in ("dependencies", "factory"):
+        for field in ("dependencies", "factory", "vocabulary_factory"):
             if not callable(getattr(self, field)):
                 raise _fail("invalid_type", "value must be callable", field=field)
         for field in ("ic_factor", "ic_timeframe"):
@@ -185,7 +201,7 @@ class FrozenStrategyRegistry:
     order, and its digest are all decided before the first caller sees it.
     """
 
-    __slots__ = ("_definitions", "_by_name", "_registry_digest")
+    __slots__ = ("_by_name", "_registry_digest")
 
     def __init__(self, definitions: Iterable[StrategyDefinition]) -> None:
         """Freeze a complete bundle, or refuse it.
@@ -197,13 +213,14 @@ class FrozenStrategyRegistry:
 
         The sort is on `definition_digest` alone, which is total because two
         definitions may not share one: a repeated digest would make a play's
-        `definition_digest` name two different strategies.
+        `definition_digest` name two different strategies. The order is not
+        readable afterwards and does not need to be: it exists so that
+        `registry_digest` cannot depend on the order a caller supplied.
         """
         ordered = tuple(sorted(_require_definitions(definitions),
                                key=lambda item: item.definition_digest))
         registered = _validate_definition_digests(ordered)
         _require_acyclic_and_closed(_definition_graph(ordered, registered))
-        self._definitions = ordered
         self._by_name = MappingProxyType(registered)
         self._registry_digest = _bundle_digest(ordered)
 
@@ -217,11 +234,6 @@ class FrozenStrategyRegistry:
     @property
     def registry_digest(self) -> str:
         return self._registry_digest
-
-    @property
-    def definitions(self) -> tuple[StrategyDefinition, ...]:
-        """The bundle in canonical order: sorted by `definition_digest`."""
-        return self._definitions
 
     def resolve(self, name: str) -> StrategyDefinition:
         definition = self._by_name.get(_require_name(name, "strategy"))
@@ -241,11 +253,11 @@ def validate_registry(
 ) -> StrategyRegistry:
     """Resolve every play's definition and prove it is the one the play names.
 
-    Two different digests meet here and they are one keystroke apart, so read
-    the names carefully. `StrategyDefinition.definition_digest` is the BASE
-    digest of a strategy body, which `spec_definition_digest` above computes
-    for a rule spec. `canonical.definition_digest(base, params)` binds that
-    base to ONE play's parameters, and it is what a `PlayRequest` carries.
+    Two different digests meet here, and they name two different things.
+    `StrategyDefinition.definition_digest` is the BASE digest of a strategy
+    body, which `spec_base_digest` below computes for a rule spec.
+    `canonical.definition_digest(base, params)` binds that base to ONE play's
+    parameters, and it is what a `PlayRequest` carries.
 
     Checking the pair is what stops a play naming any params under any
     definition. Nothing upstream can: the registry digest deliberately covers
@@ -479,7 +491,7 @@ def _term_projection(term: Term) -> dict:
     }
 
 
-def spec_definition_digest(
+def spec_base_digest(
     spec: Mapping[str, JSONValue],
     vocabulary_factory: VocabularyFactory = core_vocabulary,
 ) -> str:
@@ -546,6 +558,7 @@ def rules_definition(
         name=name, definition_digest=definition_digest,
         dependencies=dependencies, factory=factory,
         ic_factor=ic_factor, ic_timeframe=ic_timeframe,
+        vocabulary_factory=vocabulary_factory,
     )
 
 
@@ -668,6 +681,7 @@ def composite_definition(
         dependencies=dependencies, factory=factory,
         ic_factor=None, ic_timeframe=None,
         members=tuple(resolved[key] for key in sorted(resolved)),
+        vocabulary_factory=vocabulary_factory,
     )
 
 

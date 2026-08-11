@@ -7,7 +7,7 @@ import pandas as pd
 import pytest
 
 from nakagai.data.schema import DEFAULT_TIMEFRAMES
-from nakagai.engine.context import PreloadedBars, build_context
+from nakagai.engine.context import build_context
 from nakagai.nlbuilder.prompt import render_system_prompt
 from nakagai.screen.compiler import compile_screen
 from nakagai.screen.runner import run_screen
@@ -99,8 +99,6 @@ def test_a_positional_vocabulary_cannot_bind_to_an_earlier_parameter():
             lambda: validate_condition_group(group, "conditions", vocab),
         "FrameEval":
             lambda: FrameEval({}, DEFAULT_TIMEFRAMES, vocab),
-        "PreloadedBars":
-            lambda: PreloadedBars(None, "SPY", DEFAULT_TIMEFRAMES, vocab),
         "build_context":
             lambda: build_context(None, "SPY", now, DEFAULT_TIMEFRAMES, vocab),
         "render_system_prompt":

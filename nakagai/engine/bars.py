@@ -191,8 +191,14 @@ def prepare_portfolio_bars(
     _require_instance(schedule, "schedule", ValidatedSchedule)
     _require_instance(dependencies, "dependencies", ReplayDependencies)
     if schedule.request != request:
+        # `mismatched_schedule`, the same code `_Ledger` and `_PortfolioRuntime`
+        # raise for the same condition, and not the generic `invalid_value`.
+        # This door runs first inside `run_portfolio`, so it is the one a caller
+        # ever reaches: under a generic code the named one would be published
+        # and unreachable, and a mismatched schedule would arrive
+        # indistinguishable from every other structural refusal.
         raise _fail(
-            "invalid_value", "the schedule was validated for another request",
+            "mismatched_schedule", "the schedule was validated for another request",
             field="schedule",
         )
     for timeframe in dependencies.timeframes:

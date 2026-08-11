@@ -765,6 +765,7 @@ def test_a_curve_too_short_to_measure_refuses(kept):
     with pytest.raises(ReplayInputError) as raised:
         _portfolio_metrics(short, (), (), validated)
 
+    assert raised.value.code == "invalid_value"
     assert raised.value.details["field"] == "equity"
 
 

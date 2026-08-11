@@ -18,8 +18,9 @@ screener compiler.
   metrics. It is deterministic and side-effect free, so it reads no cache,
   writes no file, mints no identifier, and consults no installed calendar.
 - `strategies/`: rule-based (`rules/`), boolean-composed (`composite/`), and
-  ICT-flavored (`ict/`) strategies, plus a catalog loader that turns JSON specs into
-  strategy classes.
+  ICT-flavored (`ict/`) strategies, plus `catalog_definitions`, which turns a
+  directory of JSON specs into frozen `StrategyDefinition` values a registry
+  bundle takes.
 - `screen/`: a conditions-only screener over the same RuleSpec grammar. Evaluation
   is deterministic and LLM-free; an optional English-to-spec compiler shares the
   `nlbuilder` extra with `nlbuilder/`, which installs `anthropic`.
@@ -72,7 +73,7 @@ from nakagai.engine import (
     rules_definition,
     run_portfolio,
     schedule_digest,
-    spec_definition_digest,
+    spec_base_digest,
 )
 
 SESSIONS, PER_SESSION = 8, 26          # eight regular sessions of 15-minute bars
@@ -121,7 +122,7 @@ spec = {
     "risk": {"stop": {"kind": "atr", "n": 14, "mult": 2.0},
              "target": {"kind": "rr", "rr": 2.0}},
 }
-base_digest = spec_definition_digest(spec)
+base_digest = spec_base_digest(spec)
 registry = FrozenStrategyRegistry.from_definitions(
     (rules_definition("sma_cross", base_digest, spec=spec),))
 
@@ -244,13 +245,34 @@ Removed with them: `nakagai.engine.engine`, `nakagai.engine.runner`,
 `nakagai.engine.provenance`, `nakagai.engine.costs`, `nakagai.icir`,
 `BacktestResult`, the singleton `Trade`, `summarize`, `buy_and_hold_return`,
 process-grid expansion, core-owned result parquet, `FeeModel`,
-`SlippageModel`, and `CompositeStrategy.bound`. There is no adapter and no
-alias: a caller migrates to the new contract or stays on 0.4.x.
+`SlippageModel`, `PreloadedBars`, `FrozenStrategyRegistry.definitions`, and
+`CompositeStrategy.bound`. There is no adapter and no alias: a caller migrates
+to the new contract or stays on 0.4.x.
 
 `FeeSpec` and `SlippageSpec` now price a fill themselves, so the request's own
 policy is the model. Composite membership arrives one way, as member factories
 passed to `CompositeStrategy(...)`. `nakagai.engine` exports the complete
 contract and nothing else.
+
+**Breaking: one catalog door, and a grammar is a value.** `load_catalog` is
+removed, with `RuleStrategy.bound` and the `RuleStrategy.VOCABULARY_FACTORY`
+class attribute it was the only caller of. `catalog_definitions(specs_dir,
+vocabulary_factory)` replaces it: a definition carries the name, binds the
+immutable spec, records the grammar it is read under, and builds a plain
+`RuleStrategy` fresh per candidate, so a catalog entry can no longer exist as
+two minted classes in one process. `load_entries` is unchanged.
+
+**Breaking: `spec_definition_digest` is renamed `spec_base_digest`.** It sat one
+keystroke from `definition_digest` and means something else: a base digest of a
+strategy body, against a base digest bound to one play's params.
+
+**A definition's grammar now reaches the replay.** `StrategyDefinition` carries
+`vocabulary_factory`, and the context a runtime decides through is built from
+it. Before this, entries were always evaluated under the core grammar while the
+IC lens graded the definition's own, so a play using an added term aborted and a
+play using a redefined one was graded on a factor that did not produce its
+trades. Nothing announced it: `vocabulary_digest` covers what a term declares,
+not what it computes. Replays under the core grammar are byte-identical.
 
 ### 0.4.2
 

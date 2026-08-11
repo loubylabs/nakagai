@@ -20,12 +20,15 @@ from nakagai.engine.bars import (
     prepare_portfolio_bars,
 )
 from nakagai.engine.context import build_scheduled_context
+from nakagai.engine.execution import _PortfolioRuntime
+from nakagai.engine.portfolio import _Ledger
 from nakagai.engine.portfolio_types import (
     BenchmarkSpec,
     ReplayInputError,
     ReplayWindow,
 )
 from nakagai.engine.schedule import validate_schedule
+from nakagai.strategies.rules.vocabulary import core_vocabulary
 from tests.portfolio_fixtures import (
     bar_frame,
     base_context_bars,
@@ -37,6 +40,7 @@ from tests.portfolio_fixtures import (
     frames_for,
     schedule_with,
     scheduled_labels,
+    strategy_registry,
     ts,
     without_pair,
 )
@@ -149,8 +153,9 @@ def test_membership_of_a_key_outside_the_contract_refuses_rather_than_denies():
     # A malformed key is a caller defect, and answering "no" to it would let
     # a typo read as an absent frame.
     bars = PortfolioBars(base_frames())
-    with pytest.raises(ReplayInputError):
+    with pytest.raises(ReplayInputError) as raised:
         _ = ("SPY", "5m") in bars
+    assert raised.value.code == "invalid_value"
 
 
 def test_a_prepared_pair_nobody_declared_raises_a_key_error():
@@ -480,12 +485,49 @@ def test_a_frame_with_impossible_geometry_refuses(column, value, field):
 
 
 def test_preparation_refuses_a_schedule_built_for_another_request():
+    """`mismatched_schedule`, by name, and not a generic structural refusal.
+
+    Three doors test this one condition: this one, `_Ledger`, and
+    `_PortfolioRuntime`. The bar preflight runs FIRST inside `run_portfolio`,
+    so it is the only one a caller ever reaches, and while it answered
+    `invalid_value` the named code was published and unreachable and a
+    mismatched schedule arrived indistinguishable from every other structural
+    refusal in the contract. The code is what a caller matches on, so it is
+    what this asserts.
+    """
     with pytest.raises(ReplayInputError) as raised:
         prepare_portfolio_bars(
             tail_request(), PortfolioBars(base_frames()), base_validated_schedule(),
             base_dependencies(),
         )
+    assert raised.value.code == "mismatched_schedule"
     assert raised.value.details["field"] == "schedule"
+
+
+def test_every_door_that_checks_the_schedule_refuses_under_one_code():
+    """The bar door, the ledger, and the runtime answer the same condition.
+
+    Asserted together rather than three times apart, because the value of a
+    named code is that it means one thing wherever it comes from: a caller
+    branching on `mismatched_schedule` must not have to know which door
+    happened to run first.
+    """
+    request, schedule = tail_request(), base_validated_schedule()
+    prepared = prepared_base()
+    doors = {
+        "bars": lambda: prepare_portfolio_bars(
+            request, PortfolioBars(base_frames()), schedule, base_dependencies()),
+        "ledger": lambda: _Ledger(request, schedule),
+        "runtime": lambda: _PortfolioRuntime(
+            request, schedule, strategy_registry(), prepared, base_dependencies()),
+    }
+    codes = {}
+    for name, call in doors.items():
+        with pytest.raises(ReplayInputError) as raised:
+            call()
+        codes[name] = raised.value.code
+
+    assert codes == {name: "mismatched_schedule" for name in doors}
 
 
 # ---------------------------------------------------------- scheduled context
@@ -495,7 +537,7 @@ def test_a_context_shows_only_what_the_schedule_has_made_available():
     prepared = prepared_base()
     context = build_scheduled_context(
         prepared, "SPY", ts("2026-11-27T15:00:00Z"), base_validated_schedule(),
-        base_dependencies(),
+        base_dependencies(), vocabulary=core_vocabulary(),
     )
     assert context.symbol == "SPY"
     assert context.now == ts("2026-11-27T15:00:00Z")
@@ -514,7 +556,8 @@ def test_a_context_at_the_first_test_close_sees_no_test_session_daily_bar():
     prepared = prepared_base()
     schedule = base_validated_schedule()
     context = build_scheduled_context(
-        prepared, "SPY", ts("2026-11-27T14:45:00Z"), schedule, base_dependencies(),
+        prepared, "SPY", ts("2026-11-27T14:45:00Z"), schedule,
+        base_dependencies(), vocabulary=core_vocabulary(),
     )
     assert len(context.bars["15m"]) == 27
     assert len(context.bars["1h"]) == 1
@@ -529,11 +572,29 @@ def test_a_context_only_carries_the_declared_timeframes():
     dependencies = ReplayDependencies(timeframes=("15m", "1d"), external_symbols=())
     context = build_scheduled_context(
         prepared, "SPY", ts("2026-11-27T15:00:00Z"), base_validated_schedule(),
-        dependencies,
+        dependencies, vocabulary=core_vocabulary(),
     )
     assert set(context.bars) == {"15m", "1d"}
     assert context.tfs.all == ("15m", "1d")
     assert context.driving_bars is context.bars["15m"]
+
+
+def test_a_context_refuses_anything_that_is_not_a_grammar():
+    """The grammar is an argument now, so it is a checked argument.
+
+    A vocabulary factory is caller code, and one that hands back a mapping or a
+    None would otherwise surface as an `AttributeError` from inside `FrameEval`
+    on the first node it evaluated, outside the closed refusal taxonomy and
+    naming no argument.
+    """
+    for bad in (None, {}, core_vocabulary().indicators):
+        with pytest.raises(ReplayInputError) as raised:
+            build_scheduled_context(
+                prepared_base(), "SPY", ts("2026-11-27T15:00:00Z"),
+                base_validated_schedule(), base_dependencies(), vocabulary=bad,
+            )
+        assert raised.value.code == "invalid_type"
+        assert raised.value.details["field"] == "vocabulary"
 
 
 def test_a_context_cannot_be_built_off_a_scheduled_close():
@@ -541,6 +602,7 @@ def test_a_context_cannot_be_built_off_a_scheduled_close():
         build_scheduled_context(
             prepared_base(), "SPY", ts("2026-11-27T15:07:00Z"),
             base_validated_schedule(), base_dependencies(),
+            vocabulary=core_vocabulary(),
         )
     assert raised.value.code == "invalid_context_time"
 
@@ -557,11 +619,13 @@ def test_a_context_cannot_be_built_inside_the_ic_tail():
         schedule, dependencies,
     )
     last_test_close = build_scheduled_context(
-        prepared, "SPY", request.window.test_end, schedule, dependencies)
+        prepared, "SPY", request.window.test_end, schedule, dependencies,
+        vocabulary=core_vocabulary())
     assert len(last_test_close.bars["15m"]) == SCHEDULED_INTERVALS - 4
     with pytest.raises(ReplayInputError) as raised:
         build_scheduled_context(
-            prepared, "SPY", ts("2026-11-27T18:00:00Z"), schedule, dependencies)
+            prepared, "SPY", ts("2026-11-27T18:00:00Z"), schedule, dependencies,
+            vocabulary=core_vocabulary())
     assert raised.value.code == "invalid_context_time"
 
 
@@ -569,7 +633,7 @@ def test_mutating_a_context_frame_cannot_reach_the_prepared_frame():
     prepared = prepared_base()
     context = build_scheduled_context(
         prepared, "SPY", ts("2026-11-27T15:00:00Z"), base_validated_schedule(),
-        base_dependencies(),
+        base_dependencies(), vocabulary=core_vocabulary(),
     )
     context.bars["15m"].iloc[0, 0] = -3.0
     context.bars["1d"].iloc[0, 0] = -4.0
@@ -598,8 +662,9 @@ def test_a_context_frame_hands_out_no_writable_array():
     # Copy-on-write hands out read-only arrays, which is what makes the
     # zero-copy prefix safe to expose at all.
     context = build_scheduled_context(
-        prepared_base(), "SPY", ts("2026-11-27T15:00:00Z"), base_validated_schedule(),
-        base_dependencies(),
+        prepared_base(), "SPY", ts("2026-11-27T15:00:00Z"),
+        base_validated_schedule(), base_dependencies(),
+        vocabulary=core_vocabulary(),
     )
     values = context.bars["15m"]["open"].to_numpy()
     assert not values.flags.writeable
@@ -612,4 +677,5 @@ def test_a_context_for_an_undeclared_symbol_raises():
         build_scheduled_context(
             prepared_base(), "IWM", ts("2026-11-27T15:00:00Z"),
             base_validated_schedule(), base_dependencies(),
+            vocabulary=core_vocabulary(),
         )

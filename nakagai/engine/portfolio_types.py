@@ -977,6 +977,25 @@ class EquityPoint:
 
 @dataclass(frozen=True)
 class IcEstimate:
+    """One play symbol's rank correlation at one horizon, IN SAMPLE.
+
+    The estimate is a diagnostic taken over the window that was replayed, and
+    it is not a forecast of live behavior. The factor a RuleSpec definition
+    binds is WINDOW-RANKED: `group_margin` rank-transforms every member within
+    the index it is handed, so the factor value at observation `t` depends on
+    observations after `t`. That is the point of ranking, since it is what lets
+    members on different native scales combine, and it never reads a bar past
+    `test_end`, so it is not a causality violation and no trade in the result
+    is affected by it. It does mean a reader comparing this coefficient against
+    what a live-traded factor achieved is comparing two different measurements.
+
+    `observations` is the load-bearing field, not `correlation`. A lens that
+    never ran and a lens that ran and found nothing both report a null
+    coefficient, and only the count tells them apart, so the two always travel
+    together. The coefficient is the one rounded number a replay reports, at
+    four decimals.
+    """
+
     horizon_bars: Literal[1, 5, 20]
     correlation: float | None
     observations: int

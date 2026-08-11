@@ -348,8 +348,9 @@ def test_settlement_takes_a_session_date_and_not_an_instant():
 def test_an_exit_fill_refuses_a_direction_outside_the_contract():
     ledger = funded_ledger(100_000.0)
 
-    with pytest.raises(ReplayInputError):
+    with pytest.raises(ReplayInputError) as raised:
         ledger.exit_fill("flat", 100.0)
+    assert raised.value.code == "invalid_value"
 
 
 def test_an_exit_fee_refuses_anything_that_is_not_a_share_count():
@@ -357,10 +358,12 @@ def test_an_exit_fee_refuses_anything_that_is_not_a_share_count():
     negative count would price a plausible fee instead of refusing."""
     ledger = funded_ledger(100_000.0, execution=base_execution())
 
-    with pytest.raises(ReplayInputError):
+    with pytest.raises(ReplayInputError) as negative:
         ledger.exit_fee(-200)
-    with pytest.raises(ReplayInputError):
+    with pytest.raises(ReplayInputError) as fractional:
         ledger.exit_fee(200.0)
+    assert (negative.value.code, fractional.value.code) == (
+        "invalid_value", "invalid_type")
     assert ledger.exit_fee(200) == pytest.approx(2.0)
 
 
@@ -887,11 +890,12 @@ def test_a_rejection_moves_neither_cash_nor_capacity():
 def test_only_an_unsettled_cash_rejection_may_carry_cash():
     ledger = funded_ledger(100_000.0)
 
-    with pytest.raises(ReplayInputError):
+    with pytest.raises(ReplayInputError) as raised:
         ledger.reject(
             entry_intent(ledger, "SPY"), RejectionReason.PORTFOLIO_CAPACITY,
             ENTRY_TS, 700.0, 300.0,
         )
+    assert raised.value.code == "invalid_value"
 
 
 # ---------------------------------------------------- refusals and binary64
@@ -943,8 +947,9 @@ def test_a_close_the_contract_refuses_leaves_the_position_open():
     ledger = funded_ledger(100_000.0)
     key, _ = opened_position(ledger, frozen_equity=1000.0)
 
-    with pytest.raises(ReplayInputError):
+    with pytest.raises(ReplayInputError) as raised:
         ledger.close(key, 101.0, ENTRY_TS, ExitReason.MANAGE, 0.0)
+    assert raised.value.code == "invalid_value"
 
     assert ledger.open_positions == 1
     assert (ledger.settled_cash, ledger.unsettled_cash) == (99_300.0, 0.0)
@@ -1007,8 +1012,10 @@ def test_a_ledger_refuses_a_schedule_validated_for_another_request():
     request = ledger_request(1000.0)
     other = ledger_request(2000.0)
 
-    with pytest.raises(ReplayInputError):
+    with pytest.raises(ReplayInputError) as raised:
         _Ledger(request, validate_schedule(other, base_schedule()))
+    # The same named code the bar door and the runtime raise for it.
+    assert raised.value.code == "mismatched_schedule"
 
 
 # ------------------------------------------------------------------ helpers

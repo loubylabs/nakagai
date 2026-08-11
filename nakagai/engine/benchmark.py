@@ -37,7 +37,11 @@ from dataclasses import dataclass
 
 from pandas import Timestamp
 
-from nakagai.engine.bars import BASE_TIMEFRAME, _ValidatedPortfolioBars
+from nakagai.engine.bars import (
+    BASE_TIMEFRAME,
+    _MISSING_BAR,
+    _ValidatedPortfolioBars,
+)
 from nakagai.engine.execution import ReplayEvents, ReplayMark, _RawBase
 from nakagai.engine.portfolio_types import (
     BenchmarkResult,
@@ -209,7 +213,7 @@ def _benchmark_bases(request: PortfolioReplayRequest,
     for symbol in _benchmark_symbols(request):
         if (symbol, BASE_TIMEFRAME) not in pairs:
             raise ReplayInputError(
-                "missing_required_bar",
+                _MISSING_BAR,
                 "the benchmark's base frame was never prepared",
                 {"field": "benchmark", "symbol": symbol,
                  "timeframe": BASE_TIMEFRAME},

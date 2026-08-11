@@ -24,7 +24,11 @@ importable, `from nakagai.engine import run_portfolio` works, `dir()` lists the
 full set, and nothing outside `__all__` resolves at all.
 """
 
-from importlib import import_module
+# Bound under a private name because this module claims that nothing outside
+# `__all__` resolves off it, and a plain `import_module` here would be a
+# public name of this package: `from nakagai.engine import import_module`
+# would succeed and falsify the claim.
+from importlib import import_module as _import_module
 
 from nakagai.engine.bars import PortfolioBars
 from nakagai.engine.canonical import (
@@ -89,7 +93,7 @@ _DEFERRED = {
     "composite_definition": "nakagai.engine.registry",
     "rules_definition": "nakagai.engine.registry",
     "run_portfolio": "nakagai.engine.replay",
-    "spec_definition_digest": "nakagai.engine.registry",
+    "spec_base_digest": "nakagai.engine.registry",
 }
 
 __all__ = [
@@ -147,7 +151,7 @@ __all__ = [
     "rules_definition",
     "run_portfolio",
     "schedule_digest",
-    "spec_definition_digest",
+    "spec_base_digest",
     "trade_id",
 ]
 
@@ -157,7 +161,7 @@ def __getattr__(name: str) -> object:
     module = _DEFERRED.get(name)
     if module is None:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-    value = getattr(import_module(module), name)
+    value = getattr(_import_module(module), name)
     globals()[name] = value
     return value
 

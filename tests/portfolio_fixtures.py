@@ -77,7 +77,7 @@ from nakagai.engine.registry import (
     StrategyDependencies,
     composite_definition,
     rules_definition,
-    spec_definition_digest,
+    spec_base_digest,
     vocabulary_digest,
 )
 from nakagai.engine.replay import _finalize_result, _replay, run_portfolio
@@ -1828,6 +1828,7 @@ def rules_replay(spec: Mapping, closes: Sequence[float], *,
                  bars: tuple[BarPlan, ...] = (),
                  account: AccountPolicy | None = None,
                  execution: ExecutionPolicy | None = None,
+                 vocabulary_factory: Callable = core_vocabulary,
                  ) -> PortfolioReplayResult:
     """One real RuleSpec replayed through the public entry point.
 
@@ -1840,11 +1841,16 @@ def rules_replay(spec: Mapping, closes: Sequence[float], *,
     `bars` replaces named base bars outright, which is how a test puts a level
     inside one bar's range: the default geometry is deliberately narrow, so a
     bar that reaches a level reaches it because a test said so.
+
+    `vocabulary_factory` is the grammar the definition is read under, and it
+    reaches the base digest and the definition together, the way a platform
+    bundle builds one. It is what lets a test replay one spec under two
+    grammars and compare what came back.
     """
     schedule = rules_schedule(len(closes))
     intervals = schedule.base_intervals
     params: dict = {}
-    base = spec_definition_digest(spec)
+    base = spec_base_digest(spec, vocabulary_factory)
     request = base_request(
         plays=(PlayRequest(
             play_id="play-r", strategy=spec["name"],
@@ -1863,7 +1869,8 @@ def rules_replay(spec: Mapping, closes: Sequence[float], *,
         execution=frictionless_execution() if execution is None else execution,
     )
     registry = FrozenStrategyRegistry.from_definitions(
-        (rules_definition(spec["name"], base, spec=spec),))
+        (rules_definition(spec["name"], base, spec=spec,
+                          vocabulary_factory=vocabulary_factory),))
     frames = with_base_bars(rules_frames(closes, schedule, symbol), bars)
     return run_portfolio(request, PortfolioBars(frames), registry, schedule)
 

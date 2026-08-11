@@ -127,8 +127,9 @@ class Mutates(Strategy):
 @pytest.mark.parametrize("bad", ["signal", {"symbol": "SPY"}, iter(()),
                                  None, long_signal(), 7])
 def test_on_bar_requires_a_real_sequence(bad):
-    with pytest.raises(StrategyOutputError):
+    with pytest.raises(StrategyOutputError) as caught:
         validate_signal_sequence(bad, symbol="SPY", deciding_close=DECIDING_CLOSE)
+    assert caught.value.code == "invalid_type"
 
 
 def test_an_empty_sequence_is_a_valid_quiet_bar():
@@ -159,6 +160,7 @@ def test_a_non_signal_item_is_refused_even_beside_valid_signals():
     with pytest.raises(StrategyOutputError) as caught:
         validate_signal_sequence([long_signal(), {"symbol": "SPY"}],
                                  symbol="SPY", deciding_close=DECIDING_CLOSE)
+    assert caught.value.code == "invalid_type"
     assert caught.value.details["field"] == "signals[1]"
 
 
@@ -239,23 +241,30 @@ def test_the_signal_is_frozen():
 
 
 def test_management_is_a_frozen_decision_and_cannot_loosen_a_stop():
+    """`loosened_stop`, its own code beside its two self-describing siblings.
+
+    A ratchet running backwards is a different report from a level the close is
+    already past, and a caller reads the difference off the code.
+    """
     position = long_position_view(live_stop=99.0)
-    with pytest.raises(StrategyOutputError):
+    with pytest.raises(StrategyOutputError) as caught:
         validate_management_decision(
             ManagementDecision(action="hold", stop=98.0, target=None),
             position=position,
             deciding_close=101.0,
         )
+    assert caught.value.code == "loosened_stop"
 
 
 def test_a_short_stop_cannot_loosen_upward():
     position = short_position_view(live_stop=101.0)
-    with pytest.raises(StrategyOutputError):
+    with pytest.raises(StrategyOutputError) as caught:
         validate_management_decision(
             ManagementDecision(action="hold", stop=102.0, target=None),
             position=position,
             deciding_close=99.0,
         )
+    assert caught.value.code == "loosened_stop"
 
 
 def test_a_tightening_stop_is_accepted_in_both_directions():
@@ -379,9 +388,10 @@ def test_a_replacement_is_judged_against_the_close_not_an_untouched_level():
     pytest.param({"action": "hold"}, id="a_mapping"),
 ])
 def test_manage_must_return_a_management_decision(bad):
-    with pytest.raises(StrategyOutputError):
+    with pytest.raises(StrategyOutputError) as caught:
         validate_management_decision(bad, position=long_position_view(),
                                      deciding_close=101.0)
+    assert caught.value.code == "invalid_type"
 
 
 @pytest.mark.parametrize("decision,close", [
@@ -395,10 +405,11 @@ def test_manage_must_return_a_management_decision(bad):
                  101.0, id="long_target_on_the_close"),
 ])
 def test_a_replacement_must_protect_the_deciding_close(decision, close):
-    with pytest.raises(StrategyOutputError):
+    with pytest.raises(StrategyOutputError) as caught:
         validate_management_decision(decision,
                                      position=long_position_view(live_stop=99.0),
                                      deciding_close=close)
+    assert caught.value.code == "unprotective_replacement"
 
 
 @pytest.mark.parametrize("decision,close", [
@@ -410,32 +421,46 @@ def test_a_replacement_must_protect_the_deciding_close(decision, close):
                  99.0, id="short_stop_on_the_close"),
 ])
 def test_a_short_replacement_is_the_mirror(decision, close):
-    with pytest.raises(StrategyOutputError):
+    with pytest.raises(StrategyOutputError) as caught:
         validate_management_decision(
             decision, position=short_position_view(live_stop=101.0),
             deciding_close=close)
+    assert caught.value.code == "unprotective_replacement"
 
 
-@pytest.mark.parametrize("bad", [float("nan"), float("inf"), 0.0, -1.0, True])
-def test_a_nonfinite_or_nonpositive_replacement_cannot_even_be_built(bad):
+@pytest.mark.parametrize("bad,code", [
+    pytest.param(float("nan"), "nonfinite_binary64", id="nan"),
+    pytest.param(float("inf"), "nonfinite_binary64", id="infinite"),
+    pytest.param(0.0, "invalid_value", id="zero"),
+    pytest.param(-1.0, "invalid_value", id="negative"),
+    pytest.param(True, "invalid_binary64", id="boolean"),
+])
+def test_a_nonfinite_or_nonpositive_replacement_cannot_even_be_built(bad, code):
     """The decision refuses the value at construction, so `manage` raises
     inside its own body. `call_manage` still reports a strategy OUTPUT error,
-    because the strategy produced a value core refuses, not a runtime fault."""
+    because the strategy produced a value core refuses, not a runtime fault.
+
+    The code travels through unchanged, which is the point of the pass-through:
+    a nonfinite level, a nonpositive one, and a boolean are three different
+    defects and a caller reads which one off the code rather than the message.
+    """
     strategy = Returns([], decision=None)
 
     def manage(position, ctx):
         return ManagementDecision(action="hold", stop=bad, target=None)
 
     strategy.manage = manage
-    with pytest.raises(StrategyOutputError):
+    with pytest.raises(StrategyOutputError) as caught:
         call_manage(strategy, long_position_view(), market_context(),
                     deciding_close=101.0)
+    assert caught.value.code == code
 
 
 def test_management_mutation_is_an_output_error_not_a_runtime_error():
     with pytest.raises(StrategyOutputError) as caught:
         call_manage(Mutates(), long_position_view(), market_context(),
                     deciding_close=101.0)
+    assert caught.value.code == "strategy_mutated_engine_state"
     assert caught.value.details["operation"] == "manage"
 
 
@@ -445,6 +470,7 @@ def test_management_mutation_is_an_output_error_not_a_runtime_error():
 def test_a_raising_on_bar_never_becomes_an_empty_list():
     with pytest.raises(StrategyRuntimeError) as caught:
         call_on_bar(Raises(), market_context(), deciding_close=DECIDING_CLOSE)
+    assert caught.value.code == "strategy_raised"
     assert caught.value.details["operation"] == "on_bar"
     assert caught.value.details["strategy"] == "raises"
 
@@ -453,13 +479,15 @@ def test_a_raising_manage_never_becomes_a_hold():
     with pytest.raises(StrategyRuntimeError) as caught:
         call_manage(Raises(), long_position_view(), market_context(),
                     deciding_close=DECIDING_CLOSE)
+    assert caught.value.code == "strategy_raised"
     assert caught.value.details["operation"] == "manage"
 
 
 def test_an_invalid_return_is_an_output_error_rather_than_a_runtime_error():
-    with pytest.raises(StrategyOutputError):
+    with pytest.raises(StrategyOutputError) as caught:
         call_on_bar(Returns("signal"), market_context(),
                     deciding_close=DECIDING_CLOSE)
+    assert caught.value.code == "invalid_type"
 
 
 def test_a_valid_strategy_call_returns_every_signal_in_order():
@@ -498,4 +526,5 @@ def test_a_constructor_failure_is_a_runtime_error():
     with pytest.raises(StrategyRuntimeError) as caught:
         with strategy_operation("construct", strategy="rules", symbol="SPY"):
             raise ValueError("spec invalid")
+    assert caught.value.code == "strategy_raised"
     assert caught.value.details["operation"] == "construct"

@@ -465,13 +465,15 @@ def test_a_lone_surrogate_stays_inside_the_closed_taxonomy():
     with pytest.raises(ReplayInputError) as raised:
         canonical_replay_bytes({"note": surrogate})
     assert raised.value.code == "invalid_value"
-    with pytest.raises(ReplayInputError):
-        dataclasses.replace(base_plays()[0], strategy=surrogate)
-    with pytest.raises(ReplayInputError):
-        dataclasses.replace(base_plays()[0], params={"note": surrogate})
-    encoded = {**encode_replay_request(base_request()), "registry_digest": surrogate}
-    with pytest.raises(ReplayInputError):
-        decode_replay_request(encoded)
+    for call in (
+        lambda: dataclasses.replace(base_plays()[0], strategy=surrogate),
+        lambda: dataclasses.replace(base_plays()[0], params={"note": surrogate}),
+        lambda: decode_replay_request(
+            {**encode_replay_request(base_request()), "registry_digest": surrogate}),
+    ):
+        with pytest.raises(ReplayInputError) as door:
+            call()
+        assert door.value.code == "invalid_value"
 
 
 def test_canonical_codec_refuses_unbounded_nesting():
@@ -619,13 +621,18 @@ def test_request_refuses_uncanonical_values(override):
 
 def test_play_requests_refuse_blank_names_and_loose_digests():
     play = base_plays()[0]
-    for override in (
-        {"play_id": " "}, {"play_id": ""}, {"play_id": " play-a"},
-        {"strategy": ""}, {"definition_digest": "not-a-digest"},
-        {"priority": 1.0}, {"params": [("fast_n", 10)]},
+    for override, code in (
+        ({"play_id": " "}, "invalid_value"),
+        ({"play_id": ""}, "invalid_value"),
+        ({"play_id": " play-a"}, "invalid_value"),
+        ({"strategy": ""}, "invalid_value"),
+        ({"definition_digest": "not-a-digest"}, "invalid_identifier"),
+        ({"priority": 1.0}, "invalid_type"),
+        ({"params": [("fast_n", 10)]}, "invalid_type"),
     ):
-        with pytest.raises(ReplayInputError):
+        with pytest.raises(ReplayInputError) as raised:
             dataclasses.replace(play, **override)
+        assert raised.value.code == code, override
 
 
 def test_play_parameters_refuse_the_keys_the_codec_reserves():
@@ -638,8 +645,9 @@ def test_play_parameters_refuse_the_keys_the_codec_reserves():
 
 def test_request_refuses_duplicate_play_ids():
     play = base_plays()[0]
-    with pytest.raises(ReplayInputError):
+    with pytest.raises(ReplayInputError) as raised:
         base_request(plays=(play, dataclasses.replace(play, priority=300)))
+    assert raised.value.code == "duplicate_value"
 
 
 IDENTIFIER_REFUSALS = {
@@ -660,8 +668,9 @@ IDENTIFIER_REFUSALS = {
 
 @pytest.mark.parametrize("override", IDENTIFIER_REFUSALS.values(), ids=IDENTIFIER_REFUSALS)
 def test_request_refuses_malformed_identifiers(override):
-    with pytest.raises(ReplayInputError):
+    with pytest.raises(ReplayInputError) as raised:
         dataclasses.replace(base_request(), **override)
+    assert raised.value.code == "invalid_identifier"
 
 
 WINDOW_REFUSALS = {
@@ -675,8 +684,9 @@ WINDOW_REFUSALS = {
 
 @pytest.mark.parametrize("override", WINDOW_REFUSALS.values(), ids=WINDOW_REFUSALS)
 def test_window_refuses_invalid_boundaries(override):
-    with pytest.raises(ReplayInputError):
+    with pytest.raises(ReplayInputError) as raised:
         dataclasses.replace(base_window(), **override)
+    assert raised.value.code == "invalid_window"
 
 
 POLICY_REFUSALS = {
@@ -923,17 +933,26 @@ def test_child_identifiers_separate_every_component():
 
 
 def test_child_identifiers_refuse_uncanonical_arguments():
+    """Each argument refuses under the code that names what was wrong with it.
+
+    A malformed parent identity is `invalid_identifier`, an uncanonical symbol
+    or ordinal is `invalid_value`, and a boolean ordinal is `invalid_type`:
+    booleans are integers in Python, so an ordinal check that did not separate
+    them would mint an identifier for trade `True`.
+    """
     replay = base_request().replay_id
-    with pytest.raises(ReplayInputError):
-        trade_id("not-a-replay-id", "play-a", "SPY", 0)
-    with pytest.raises(ReplayInputError):
-        trade_id(replay, "play-a", "spy", 0)
-    with pytest.raises(ReplayInputError):
-        trade_id(replay, "play-a", "SPY", -1)
-    with pytest.raises(ReplayInputError):
-        trade_id(replay, "play-a", "SPY", True)
-    with pytest.raises(ReplayInputError):
-        rejection_id(replay, "play-a", "SPY", 0, "unsettled_cash_typo")
+    cases = (
+        (lambda: trade_id("not-a-replay-id", "play-a", "SPY", 0), "invalid_identifier"),
+        (lambda: trade_id(replay, "play-a", "spy", 0), "invalid_value"),
+        (lambda: trade_id(replay, "play-a", "SPY", -1), "invalid_value"),
+        (lambda: trade_id(replay, "play-a", "SPY", True), "invalid_type"),
+        (lambda: rejection_id(replay, "play-a", "SPY", 0, "unsettled_cash_typo"),
+         "invalid_value"),
+    )
+    for call, code in cases:
+        with pytest.raises(ReplayInputError) as raised:
+            call()
+        assert raised.value.code == code
 
 
 def test_definition_digest_binds_the_base_digest_to_its_parameters():
@@ -943,8 +962,9 @@ def test_definition_digest_binds_the_base_digest_to_its_parameters():
     assert definition_digest(base, {"fast_n": 10}) != definition_digest("3b" * 32, {"fast_n": 10})
     digest = definition_digest(base, {})
     assert len(digest) == 64 and digest == digest.lower()
-    with pytest.raises(ReplayInputError):
+    with pytest.raises(ReplayInputError) as raised:
         definition_digest("not-a-digest", {})
+    assert raised.value.code == "invalid_identifier"
 
 
 def test_definition_digest_ignores_parameter_key_order():
@@ -1077,30 +1097,40 @@ def test_transport_keeps_every_bit_of_a_binary64_field():
 
 def test_transport_decoding_refuses_unknown_and_missing_keys():
     encoded = encode_replay_schedule(base_schedule())
-    with pytest.raises(ReplayInputError):
+    with pytest.raises(ReplayInputError) as surplus:
         decode_replay_schedule({**encoded, "surprise": 1})
     without = {k: v for k, v in encoded.items() if k != "context_bars"}
-    with pytest.raises(ReplayInputError):
+    with pytest.raises(ReplayInputError) as absent:
         decode_replay_schedule(without)
+    assert (surplus.value.code, absent.value.code) == ("invalid_value", "invalid_value")
 
 
+# The code travels with each case, because this is the door a platform decodes
+# a transported payload at and the code is what it branches on. A wrong shape
+# and a wrong instant are different reports, and a family asserting only the
+# exception type could not tell them apart.
 TRANSPORT_REFUSALS = {
-    "offset_timestamp_text": {"ic_tail_end": "2026-11-27T13:00:00.000000-05:00"},
-    "second_precision_text": {"ic_tail_end": "2026-11-27T18:00:00Z"},
-    "nanosecond_text": {"ic_tail_end": "2026-11-27T18:00:00.000000001Z"},
-    "epoch_number": {"ic_tail_end": 1786809600},
-    "float_for_int": {"request_version": 1.0},
-    "string_for_int": {"request_version": "1"},
-    "null_for_required": {"registry_digest": None},
-    "list_for_mapping": {"account": []},
+    "offset_timestamp_text": (
+        {"ic_tail_end": "2026-11-27T13:00:00.000000-05:00"}, "invalid_timestamp"),
+    "second_precision_text": (
+        {"ic_tail_end": "2026-11-27T18:00:00Z"}, "invalid_timestamp"),
+    "nanosecond_text": (
+        {"ic_tail_end": "2026-11-27T18:00:00.000000001Z"}, "invalid_timestamp"),
+    "epoch_number": ({"ic_tail_end": 1786809600}, "invalid_type"),
+    "float_for_int": ({"request_version": 1.0}, "invalid_value"),
+    "string_for_int": ({"request_version": "1"}, "invalid_value"),
+    "null_for_required": ({"registry_digest": None}, "invalid_type"),
+    "list_for_mapping": ({"account": []}, "invalid_type"),
 }
 
 
-@pytest.mark.parametrize("override", TRANSPORT_REFUSALS.values(), ids=TRANSPORT_REFUSALS)
-def test_transport_decoding_refuses_loose_json(override):
+@pytest.mark.parametrize("override,code", TRANSPORT_REFUSALS.values(),
+                         ids=TRANSPORT_REFUSALS)
+def test_transport_decoding_refuses_loose_json(override, code):
     encoded = {**encode_replay_request(base_request()), **override}
-    with pytest.raises(ReplayInputError):
+    with pytest.raises(ReplayInputError) as raised:
         decode_replay_request(encoded)
+    assert raised.value.code == code
 
 
 SESSION_DATE_REFUSALS = (
@@ -1115,15 +1145,17 @@ def test_transport_decoding_refuses_loose_session_dates(text):
     encoded = encode_replay_schedule(base_schedule())
     intervals = [dict(interval) for interval in encoded["base_intervals"]]
     intervals[0]["session_date"] = text
-    with pytest.raises(ReplayInputError):
+    with pytest.raises(ReplayInputError) as raised:
         decode_replay_schedule({**encoded, "base_intervals": intervals})
+    assert raised.value.code == "invalid_value"
 
 
 def test_transport_decoding_refuses_nonfinite_json_numbers():
     encoded = encode_replay_request(base_request())
     account = {**encoded["account"], "starting_equity": math.nan}
-    with pytest.raises(ReplayInputError):
+    with pytest.raises(ReplayInputError) as raised:
         decode_replay_request({**encoded, "account": account})
+    assert raised.value.code == "nonfinite_binary64"
 
 
 def test_encoded_request_is_serializable_by_a_strict_json_writer():

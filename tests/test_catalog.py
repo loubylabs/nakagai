@@ -1,12 +1,16 @@
-"""The catalog loader over the shipped example specs (the content slot)."""
+"""The catalog loader over the shipped example specs (the content slot).
+
+One door, and it returns VALUES. `catalog_definitions` reads a directory and
+hands back frozen `StrategyDefinition`s a registry bundle takes; there is no
+second loader minting `RuleStrategy` subclasses beside it, so a catalog entry
+cannot exist as two different types in one process.
+"""
 
 from pathlib import Path
 
 import pytest
 
-from nakagai.strategies.catalog import (
-    catalog_definitions, load_catalog, load_entries,
-)
+from nakagai.strategies.catalog import catalog_definitions, load_entries
 from nakagai.strategies.rules import RuleStrategy, Term, core_vocabulary
 
 SPECS = Path(__file__).resolve().parents[1] / "nakagai" / "strategies" / "catalog" / "specs"
@@ -14,31 +18,16 @@ SPECS = Path(__file__).resolve().parents[1] / "nakagai" / "strategies" / "catalo
 
 def test_empty_directory_loads_empty(tmp_path):
     assert load_entries(tmp_path, core_vocabulary) == {}
-    assert load_catalog(tmp_path, core_vocabulary) == {}
+    assert catalog_definitions(tmp_path, core_vocabulary) == ()
 
 
-def test_example_specs_load_as_strategies():
-    catalog = load_catalog(SPECS, core_vocabulary)
-    assert set(catalog) == {"sma_cross", "rsi_reversion", "macd_trend"}
-    for cls in catalog.values():
-        assert issubclass(cls, RuleStrategy)
-
-
-def test_example_strategies_instantiate():
-    for name, cls in load_catalog(SPECS, core_vocabulary).items():
-        strat = cls({})
-        assert strat.name == name
-
-
-@pytest.mark.parametrize("load", (load_entries, load_catalog))
-def test_a_loader_refuses_to_guess_the_vocabulary(load):
-    # No default, on purpose. Both loaders are @cache'd on their argument
-    # tuple, so a defaulted call and an explicit one would be two entries over
-    # the same directory: load_catalog would hand back two different
-    # `Catalog_sma_cross` classes in one process, and nothing would raise. The
-    # test below is the half that proves the caching makes that reachable.
+def test_a_loader_refuses_to_guess_the_vocabulary():
+    # No default, on purpose. One spec read under two grammars is two
+    # strategies, and `load_entries` is @cache'd on its whole argument tuple,
+    # so a defaulted call and an explicit one would also be two entries over
+    # one directory. The test below is the half that proves that is reachable.
     with pytest.raises(TypeError):
-        load(SPECS)
+        load_entries(SPECS)
 
 
 def _house_vocabulary():
@@ -47,18 +36,14 @@ def _house_vocabulary():
         Term("house_close", "series", {}, {}, lambda series, _args: series))
 
 
-def test_two_vocabularies_over_one_directory_are_two_caches():
+def test_two_vocabularies_over_one_directory_are_two_cache_entries():
     # Why the argument is required rather than merely recommended. The cache
     # key is the whole argument tuple, so one directory read under two
-    # factories is two entries and two `Catalog_sma_cross` classes, neither of
-    # which is an instance of the other. That is correct once the caller chose;
-    # a default silently choosing for it is what is not.
-    core = load_catalog(SPECS, core_vocabulary)
-    assert core is load_catalog(SPECS, core_vocabulary)
-    house = load_catalog(SPECS, _house_vocabulary)
-    assert house is not core
-    assert house["sma_cross"] is not core["sma_cross"]
-    assert not issubclass(house["sma_cross"], core["sma_cross"])
+    # factories is two entries. That is correct once the caller chose; a
+    # default silently choosing for it is what is not.
+    core = load_entries(SPECS, core_vocabulary)
+    assert core is load_entries(SPECS, core_vocabulary)
+    assert load_entries(SPECS, _house_vocabulary) is not core
 
 
 # ------------------------------------------------- catalog as frozen values
@@ -103,6 +88,21 @@ def test_a_house_vocabulary_gives_every_catalog_definition_another_digest():
              for item in catalog_definitions(SPECS, _house_vocabulary)}
     assert core.keys() == house.keys()
     assert all(core[name] != house[name] for name in core)
+
+
+def test_a_catalog_definition_carries_the_grammar_it_was_read_under():
+    """The definition records its own grammar, so the replay reads one answer.
+
+    The factory validates a spec under it, the IC lens grades under it, and the
+    context a runtime decides through is built from it. A definition that did
+    not carry it would leave the replay to guess, which is how a play comes to
+    decide under one grammar and be graded under another.
+    """
+    for definition in catalog_definitions(SPECS, _house_vocabulary):
+        assert definition.vocabulary_factory is _house_vocabulary
+        # The built runtime speaks it too, which is what makes the field the
+        # definition's one answer rather than a second, unrelated declaration.
+        assert "house_close" in definition.factory({}).vocabulary.indicators
 
 
 def test_a_catalog_definition_declares_the_frames_its_spec_reads():
