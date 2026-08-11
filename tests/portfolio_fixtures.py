@@ -1182,6 +1182,10 @@ class StrategyCall:
     # runtimes apart from one shared between them: two isolated runtimes each
     # start at one, and one shared runtime counts straight through.
     sequence: int = 0
+    # The first base open this call could see. A price rather than a count, so
+    # a play that writes into its own context is observable from another
+    # play's reading of the same bar.
+    first_base_open: float | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1206,6 +1210,11 @@ class ScriptedPlay:
     # definition is registered under. Only a test that wants the two to
     # disagree sets it; a real definition names its own runtime.
     runtime_name: str | None = None
+    # A careless play: write this price into row zero of the driving frame on
+    # every call, IN PLACE. Copy-on-write sends that write to a copy of the
+    # engine's data, so what it reaches is whatever else holds the same frame
+    # object, which is the only way one play's write can become another's.
+    writes_first_open: float | None = None
 
 
 class ScriptedStrategy(Strategy):
@@ -1231,6 +1240,8 @@ class ScriptedStrategy(Strategy):
 
     def on_bar(self, ctx: MarketContext):
         self._record("on_bar", ctx)
+        if self._play.writes_first_open is not None:
+            ctx.bars[ctx.tfs.driving].iloc[0, 0] = self._play.writes_first_open
         self._raise_if_due(self._play.on_bar_raises, ctx.now)
         if self._play.on_bar_returns is not _UNSET:
             return self._play.on_bar_returns
@@ -1273,6 +1284,7 @@ class ScriptedStrategy(Strategy):
             visible=tuple((tf, len(ctx.bars[tf])) for tf in ctx.tfs.all),
             last_base_label=base.index[-1] if len(base.index) else None,
             sequence=self._sequence,
+            first_base_open=float(base["open"].iloc[0]) if len(base.index) else None,
         ))
 
 

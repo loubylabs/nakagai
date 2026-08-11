@@ -197,7 +197,9 @@ def build_scheduled_context(prepared: _ValidatedPortfolioBars, symbol: str,
 
     The prefixes are views rather than copies, which is safe and deliberate.
     Copying per bar per timeframe would cost a replay dearly for a guarantee
-    pandas already gives.
+    pandas already gives. It gives that guarantee to the ENGINE, though, and
+    not between two consumers: call this once per consumer, so a write lands
+    inside the caller that made it.
     """
     from nakagai.strategies.rules.frame_eval import FrameEval
     _require_instance(prepared, "prepared", _ValidatedPortfolioBars)
@@ -220,6 +222,12 @@ def build_scheduled_context(prepared: _ValidatedPortfolioBars, symbol: str,
     # engine's own prices cannot move. Do not lower that floor, and do not
     # let this become a plain `.iloc` on a frame the engine still trusts
     # under an older pandas.
+    #
+    # Copy-on-write protects the ENGINE and nothing else. A write copies away
+    # from the engine's frame and then mutates the object it was made on, so
+    # two consumers holding one slice still read each other's writes. What
+    # separates them is a slice each, which is why the replay calls this once
+    # per runtime rather than once per symbol.
     bars = {
         tf: prepared.frame(symbol, tf).iloc[:(
             closed if tf == BASE_TIMEFRAME
@@ -234,10 +242,12 @@ def build_scheduled_context(prepared: _ValidatedPortfolioBars, symbol: str,
     for tf in tfs.all:
         rows = len(bars[tf])
         fe.set_span(tf, max(rows - 1, 0), rows)
-    # Read-only, because ONE context per symbol serves every play at this
-    # close. The sharing is deliberate, since two plays reading one symbol at
-    # one instant are entitled to the same view of it, and what makes it safe
-    # is that neither can rebind an entry out from under the other.
+    # Read-only mappings, which is a narrower claim than it looks and is not
+    # what isolates two runtimes: that is one context each, decided by the
+    # caller. These stop a strategy REPLACING an answer the door owns, and the
+    # one that matters is `fresh`. A play that could rebind its own gate could
+    # decide on a close the schedule never released it for, which is the whole
+    # rule this door exists to enforce.
     return MarketContext(
         symbol=symbol, now=now, tfs=tfs, bars=MappingProxyType(bars), fe=fe,
         cursor=MappingProxyType({tf: len(bars[tf]) - 1 for tf in tfs.all}),

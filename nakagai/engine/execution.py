@@ -14,7 +14,7 @@ The order is the architecture's, step for step:
    and process each past every account rule, filling or refusing;
 7-8. exit positions the rest of the bar reached a level on, INCLUDING the ones
    filled at this open, then fold the surviving positions' excursions;
-9-10. build one causal context per symbol at the close, then manage every open
+9-10. build one causal context per runtime at the close, then manage every open
    position in position order;
 11-12. evaluate every play symbol in canonical order, number every signal it
    returns, and either open its pending seat or record why it could not;
@@ -312,23 +312,37 @@ class _PortfolioRuntime:
             bar = bars[key[1]]
             self._ledger.observe(key, bar.high, bar.low)
 
-    def _contexts(self, interval: ScheduledBaseInterval) -> dict[str, MarketContext]:
-        """Step 9: one point-in-time context per symbol at this close.
+    def _contexts(self,
+                  interval: ScheduledBaseInterval) -> dict[PositionKey, MarketContext]:
+        """Step 9: one point-in-time context per RUNTIME at this close.
 
-        Per symbol rather than per play symbol: a context is a view of one
-        symbol's released bars, so two plays reading the same symbol at the same
-        instant are entitled to exactly the same view of it.
+        Per play symbol rather than per symbol, and the difference is isolation
+        alone: every context of one symbol at one close is cut from the same
+        rows and carries the same numbers, so two plays still read one market
+        and the replay stays deterministic.
+
+        What they must not share is the OBJECT. Copy-on-write is what makes a
+        zero-copy prefix safe to hand out, but it protects the ENGINE and not a
+        sibling: a strategy writing in place copies away from the engine's
+        frame and then mutates the frame the next play is about to read, so one
+        play's careless write became the next play's prices. Slicing once per
+        runtime makes that copy land inside the writer alone, which is what the
+        architecture means by a strategy emitting the same signals for the same
+        bars whatever another play does.
+
+        Cheap, because a prefix is a view: this is one more dictionary of frame
+        references per runtime per interval, not a copy of any bar.
         """
         return {
-            symbol: build_scheduled_context(
-                self._prepared, symbol, interval.close_ts, self._schedule,
+            key: build_scheduled_context(
+                self._prepared, key[1], interval.close_ts, self._schedule,
                 self._dependencies,
             )
-            for symbol in self._symbols
+            for key in self._keys
         }
 
     def _manage(self, interval: ScheduledBaseInterval, bars: Mapping[str, _Bar],
-                contexts: Mapping[str, MarketContext]) -> None:
+                contexts: Mapping[PositionKey, MarketContext]) -> None:
         """Step 10: manage every open position, in position order.
 
         A replacement lands before a requested close, so a decision that
@@ -338,7 +352,7 @@ class _PortfolioRuntime:
             play_id, symbol = key
             close = bars[symbol].close
             decision = call_manage(
-                self._runtimes[key], self._ledger.view(key), contexts[symbol],
+                self._runtimes[key], self._ledger.view(key), contexts[key],
                 deciding_close=close, play_id=play_id,
                 event_ts=interval.close_ts.isoformat(),
             )
@@ -352,7 +366,7 @@ class _PortfolioRuntime:
                 )
 
     def _evaluate(self, interval: ScheduledBaseInterval, bars: Mapping[str, _Bar],
-                  contexts: Mapping[str, MarketContext]) -> None:
+                  contexts: Mapping[PositionKey, MarketContext]) -> None:
         """Steps 11 and 12: evaluate every runtime, then number every signal.
 
         Evaluation is unconditional. A play symbol that is occupied, out of
@@ -362,7 +376,7 @@ class _PortfolioRuntime:
         for key in self._keys:
             play_id, symbol = key
             signals = call_on_bar(
-                self._runtimes[key], contexts[symbol],
+                self._runtimes[key], contexts[key],
                 deciding_close=bars[symbol].close, play_id=play_id,
                 event_ts=interval.close_ts.isoformat(),
             )
@@ -447,6 +461,17 @@ class _PortfolioRuntime:
             with strategy_operation("construct", strategy=play.strategy,
                                     play_id=key[0], symbol=key[1], event_ts=stamp):
                 runtime = definition.factory(play.params)
+            # Type before name, because the name check cannot tell them apart:
+            # a factory returning a dict has no `name`, which would report a
+            # mismatch against `None` and send an operator to a definition
+            # whose name was never the problem.
+            if not isinstance(runtime, Strategy):
+                raise StrategyOutputError(
+                    "invalid_type", "a factory must return a strategy",
+                    {"operation": "construct", "strategy": definition.name,
+                     "seen": type(runtime).__name__, "play_id": key[0],
+                     "symbol": key[1], "event_ts": stamp},
+                )
             declared = getattr(runtime, "name", None)
             if declared != definition.name:
                 raise StrategyOutputError(

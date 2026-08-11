@@ -15,7 +15,7 @@ def make_bars():
     """Factory: n bars of the given timeframe starting at start (UTC), gently rising."""
 
     def _make(n=10, timeframe="15m", start="2026-06-01 13:30", base=100.0):
-        freq = {"15m": "15min", "1h": "1h", "1d": "1D"}[timeframe]
+        freq = {"15m": "15min", "1h": "1h", "4h": "4h", "1d": "1D"}[timeframe]
         idx = pd.date_range(start=start, periods=n, freq=freq, tz="UTC", name="ts")
         close = base + np.arange(n) * 0.1
         df = pd.DataFrame(

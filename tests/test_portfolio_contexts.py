@@ -35,6 +35,8 @@ Phase 1 contract this task does not own. The gate is fixed here; the alignment
 is measured and reported.
 """
 
+import dataclasses
+
 import pandas as pd
 import pytest
 
@@ -43,6 +45,7 @@ from nakagai.engine.bars import ReplayDependencies
 from nakagai.engine.context import build_scheduled_context
 from nakagai.engine.portfolio_types import StrategyOutputError
 from nakagai.strategies.base import MarketContext, Strategy
+from nakagai.strategies.composite.strategy import CompositeStrategy
 from nakagai.strategies.rules import RuleStrategy
 from tests.portfolio_fixtures import (
     FactoryCalls,
@@ -178,11 +181,12 @@ def test_a_replay_builds_a_context_only_for_the_symbols_it_trades():
 
 
 def test_the_mappings_a_runtime_receives_cannot_be_rebound():
-    """One context per symbol serves every play at that close.
+    """A strategy may not replace an answer the door owns.
 
-    That sharing is deliberate: two plays reading one symbol at one instant are
-    entitled to the same view of it. What makes it safe is that none of them can
-    rebind an entry, so a play cannot swap a frame out from under the next one.
+    A narrower claim than isolation, which is one context per runtime and is
+    pinned below. The one that matters here is `fresh`: a play that could
+    rebind its own gate could decide at a close the schedule never released it
+    for, which is the rule this door exists to enforce.
     """
     validated, prepared = prepared_for(
         base_request(), base_schedule(), base_dependencies())
@@ -191,6 +195,53 @@ def test_the_mappings_a_runtime_receives_cannot_be_rebound():
     for mapping in (context.bars, context.cursor, context.fresh):
         with pytest.raises(TypeError):
             mapping["15m"] = None
+
+
+def test_a_context_carries_only_the_frames_its_replay_declared():
+    """No undeclared key, in any of the three mappings.
+
+    A frame nobody declared is a frame nobody hydrated, so reading one is a
+    spec asking for data this replay never had. It raises rather than reading
+    empty, which would look to a play like a market with no history.
+    """
+    dependencies = ReplayDependencies(timeframes=("15m", "1h"), external_symbols=())
+    validated, prepared = prepared_for(base_request(), base_schedule(), dependencies)
+    context = build_scheduled_context(
+        prepared, "SPY", ts("2026-11-27T15:00:00Z"), validated, dependencies)
+    assert set(context.bars) == {"15m", "1h"}
+    assert set(context.cursor) == {"15m", "1h"}
+    # The driving frame has no gate, so it is absent from `fresh` on purpose.
+    assert set(context.fresh) == {"1h"}
+    assert context.tfs.all == ("15m", "1h")
+    for undeclared in ("4h", "1d"):
+        with pytest.raises(KeyError):
+            context.bars[undeclared]
+        with pytest.raises(KeyError):
+            context.fresh[undeclared]
+
+
+def test_one_plays_write_cannot_reach_another_plays_prices():
+    """Two plays at one close, and the first one writes into its bars.
+
+    Copy-on-write is what makes a zero-copy prefix safe to hand out, and it
+    protects the ENGINE only: the write copies away from the engine's frame and
+    then mutates the object it was made on. So a shared context object is a
+    channel between plays even when nothing can be rebound, and the fix is one
+    context per runtime rather than one per symbol.
+
+    Both halves are asserted. Play B reads the true open at every close it was
+    evaluated on, and play A reads it too, which is the engine's own frame
+    surviving into the next interval.
+    """
+    calls = []
+    replay_fixture(
+        plays=(ScriptedPlay(play_id="play-a", writes_first_open=-1.0),
+               ScriptedPlay(play_id="play-b")),
+        calls=calls,
+    )
+    reads = {play: {call.first_base_open for call in calls if call.play_id == play}
+             for play in ("play-a", "play-b")}
+    assert reads == {"play-a": {100.0}, "play-b": {100.0}}
 
 
 # -------------------------------------------------------- the emission gate
@@ -352,6 +403,72 @@ def test_a_stateful_runtime_is_built_once_per_play_symbol_and_shares_no_state():
                                for play in ("play-a", "play-b")
                                for symbol in ("QQQ", "SPY")}
     assert set(first_seen.values()) == {1}
+
+
+def _composite_over(definition):
+    """A definition whose factory builds a real composite over the original.
+
+    The one shape `scripted_definition` cannot produce on its own, and the one
+    spec:853-854 asks to be proven: a runtime with a recursive member tree. The
+    composite is the real `CompositeStrategy`, its member factory is the
+    original definition's, and both are rebuilt on every call, so the member's
+    own per-instance counter reports whether the tree was rebuilt per play
+    symbol or shared across them.
+    """
+    spec = {
+        "version": 1, "name": "combo", "window_bars": 1,
+        "blocks": {"leg": {"strategy": "member", "params": {}}},
+        "long": {"all": ["leg"]},
+        "risk": {"stop": {"kind": "percent", "pct": 2.0},
+                 "target": {"kind": "rr", "rr": 2.0}},
+    }
+
+    def factory(params):
+        return CompositeStrategy(
+            {"spec": spec}, name=definition.name,
+            members={"member": lambda block: definition.factory(params)})
+
+    return dataclasses.replace(definition, factory=factory)
+
+
+def test_a_composite_rebuilds_its_member_tree_for_every_play_symbol():
+    """Member state cannot cross a play symbol, one level down from the runtime.
+
+    A composite's members are where the leak would actually happen: the votes,
+    the memo, and the ratchet all live on the member rather than on the tree
+    above it. Each of the four members here counts its own calls, and each
+    counts from one.
+    """
+    calls = []
+    replay_fixture(
+        plays=tuple(ScriptedPlay(play_id=play_id) for play_id in ("play-a", "play-b")),
+        calls=calls, wrap=_composite_over,
+    )
+    first_seen: dict[tuple[str, str], int] = {}
+    for call in calls:
+        first_seen.setdefault((call.play_id, call.symbol), call.sequence)
+    assert len(first_seen) == 4
+    assert set(first_seen.values()) == {1}
+    # Four members, each asked at all fourteen closes of the default window.
+    assert len(calls) == 56
+
+
+def test_a_factory_returning_something_other_than_a_strategy_is_refused():
+    """The type, before the name, because the name check cannot tell them apart.
+
+    A mapping has no `name`, so a name comparison alone would report a mismatch
+    against null and send an operator to a definition whose name was never the
+    problem.
+    """
+    def _returns_a_mapping(definition):
+        return dataclasses.replace(
+            definition, factory=lambda params: {"name": definition.name})
+
+    with pytest.raises(StrategyOutputError) as raised:
+        replay_fixture(wrap=_returns_a_mapping)
+    assert raised.value.code == "invalid_type"
+    assert raised.value.details["seen"] == "dict"
+    assert raised.value.details["strategy"] == scripted_name("play-a")
 
 
 def test_a_runtime_whose_declared_name_disagrees_with_its_definition_is_refused():

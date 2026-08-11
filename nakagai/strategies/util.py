@@ -50,6 +50,12 @@ def fresh_bar(ctx: MarketContext, timeframe: str) -> bool:
     exact for a four-hour bucket that does not span a daylight-saving change.
     A schedule answers this from `fresh_context_at` instead and is authoritative
     wherever one exists; see the module docstring.
+
+    `tests/test_portfolio_contexts.py::_label_gate` is a deliberate hand copy
+    of this rule: the daylight-saving tests contrast the schedule's answer
+    against it, and a copy is what keeps them contrasting two rules rather than
+    calling one twice. If this expression changes, change that one, or those
+    tests keep passing while comparing against nothing real.
     """
     bars = ctx.bars[timeframe]
     if bars.empty:

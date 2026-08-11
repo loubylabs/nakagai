@@ -17,6 +17,11 @@ from nakagai.strategies.rules import RuleStrategy
 def _fill(cache, make_bars):
     cache.upsert("SPY", "15m", make_bars(20, "15m", start="2026-06-01 13:30"))
     cache.upsert("SPY", "1h", make_bars(8, "1h", start="2026-06-01 13:00"))
+    # 2026-06-01 is EDT, so Eastern midnight is 04:00Z and the four-hour
+    # buckets anchored on it land at 04:00, 08:00, 12:00 and 16:00Z. Real
+    # labels, because an EMPTY 4h frame answers "not fresh" from the
+    # empty-frame guard and would say nothing about the rule under test.
+    cache.upsert("SPY", "4h", make_bars(4, "4h", start="2026-06-01 04:00"))
     cache.upsert("SPY", "1d", make_bars(5, "1d", start="2026-05-26 00:00"))
 
 
@@ -64,19 +69,29 @@ def test_a_context_declares_which_higher_timeframes_may_be_decided_on(
     The 14:00 hourly bar is readable at every close from 15:00 through 15:45,
     and it entitles an hourly play to decide at 15:00 alone. The daily gate is
     the driving bar that OPENS the session, which is 13:45 here rather than any
-    close an hourly bar lands on, so the two cannot be one answer. Nothing is
-    declared for the driving frame itself: a play decided on the frame the
-    engine replays is fresh on every step of it.
+    close an hourly bar lands on, and the four-hour bucket labeled 12:00Z ends
+    at 16:00Z, so no two of the three answer together. Nothing is declared for
+    the driving frame itself: a play decided on the frame the engine replays is
+    fresh on every step of it.
+
+    Every False here is a frame with bars in it that are not newly complete,
+    never an empty frame, so each one is the delta rule answering rather than
+    an early return.
     """
     cache = BarCache(tmp_path)
     _fill(cache, make_bars)
-    gates = {
-        stamp: build_context(cache, "SPY", pd.Timestamp(stamp, tz="UTC")).fresh
-        for stamp in ("2026-06-01 13:45", "2026-06-01 15:00", "2026-06-01 15:15")
+    contexts = {
+        stamp: build_context(cache, "SPY", pd.Timestamp(stamp, tz="UTC"))
+        for stamp in ("2026-06-01 13:45", "2026-06-01 15:00",
+                      "2026-06-01 15:15", "2026-06-01 16:00")
     }
+    for stamp, ctx in contexts.items():
+        assert len(ctx.bars["4h"]), f"{stamp} has no four-hour bar to judge"
+    gates = {stamp: ctx.fresh for stamp, ctx in contexts.items()}
     assert gates["2026-06-01 13:45"] == {"1h": False, "4h": False, "1d": True}
     assert gates["2026-06-01 15:00"] == {"1h": True, "4h": False, "1d": False}
     assert gates["2026-06-01 15:15"] == {"1h": False, "4h": False, "1d": False}
+    assert gates["2026-06-01 16:00"] == {"1h": True, "4h": True, "1d": False}
 
 
 def test_an_hourly_play_decides_only_where_the_context_says_it_may(
