@@ -120,13 +120,28 @@ def test_the_fixture_survives_the_daylight_saving_boundary(bars):
 
 
 def test_the_fixture_outlasts_the_widest_range_rule_in_the_vocabulary(bars):
-    """rvol's sessions maximum is the binding constraint; prove it is not binding."""
-    widest = max(rule[1] for term in core_vocabulary().all_terms()
-                 for rule in term.args.values()
-                 if isinstance(rule, tuple) and len(rule) == 2
-                 and all(isinstance(x, (int, float)) for x in rule)
-                 and term.name == "rvol")
-    assert widest == 60
+    """The widest session-denominated bound in the vocabulary, found by search.
+
+    Searched by ARG NAME, not by term name. Filtering on term.name == "rvol"
+    would read rvol's own bound back out and pass forever, including for a term
+    added later that declares a wider sessions range; this reddens instead, and
+    the fixture then has to grow. Today the search finds exactly one arg.
+
+    Bars-denominated bounds are excluded deliberately rather than overlooked.
+    SESSIONS counts days and highest's n: (2, 500) counts bars, so folding them
+    together would demand a 1000-session fixture to clear a 500-bar lookback
+    that 160 sessions of 26 bars already covers four times over.
+    """
+    sessions_bounds = {(term.name, name): rule[1]
+                       for term in core_vocabulary().all_terms()
+                       for name, rule in term.args.items()
+                       if name == "sessions" and isinstance(rule, tuple)
+                       and len(rule) == 2
+                       and all(isinstance(x, (int, float))
+                               and not isinstance(x, bool) for x in rule)}
+    assert sessions_bounds, "no session-denominated range rule found to size against"
+    widest = max(sessions_bounds.values())
+    assert widest == 60, f"the widest sessions bound moved to {widest}: {sessions_bounds}"
     assert SESSIONS > widest * 2, "probes must sit well past the widest session window"
 
 

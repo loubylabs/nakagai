@@ -94,7 +94,7 @@ def field_mismatch(term: Term, out) -> str | None:
 def evaluate_term(term: Term, bars: pd.DataFrame, args: dict):
     """One term's output over `bars`, by its kind's calling convention.
 
-    The four conventions are frame_eval.py:238-277's, mirrored rather than
+    The four conventions are frame_eval.py:238-278's, mirrored rather than
     imported, because FrameEval takes a whole grammar node and this takes one
     term. A DataFrame return is narrowed by `field` for BOTH frame-kind and
     bar-kind terms: donchian, ichimoku, keltner, stoch and supertrend are bar-kind
