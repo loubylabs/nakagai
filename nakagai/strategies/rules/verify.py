@@ -51,14 +51,37 @@ EXEMPT = "exempt"
 VACUOUS = "vacuous"
 
 
+# Why a FAILED verdict is a FAILED verdict, in one machine-readable word.
+# FAILED is one bucket for five conditions and only "lookahead" is the term
+# reading rows after i; "gate_error" is this module's own code failing, which
+# the reason strings already said in prose. This is the module's thesis one
+# level down: if a bare boolean cannot tell proved-causal from could-not-test,
+# a bare FAILED cannot tell this-term-peeks from our-gate-broke. Node 02 lists
+# rejected terms in CI output and classifies them on this field, rather than
+# string-matching a reason written for a human to read.
+CAUSES = ("lookahead", "uncallable", "schema", "unenumerable", "gate_error")
+
+
 @dataclass(frozen=True)
 class TermVerdict:
-    """One term's answer. `status` is CHECKED, FAILED, EXEMPT or VACUOUS."""
+    """One term's answer. `status` is CHECKED, FAILED, EXEMPT or VACUOUS.
+
+    `arg_sets_checked` counts the mandated argument sets fully verified before
+    this verdict was returned. On a rejection that is how many passed first, so
+    "failed on set 12 of 21" is readable rather than a bare 0 claiming the gate
+    got nowhere.
+
+    `cause` is one of CAUSES on FAILED, and empty on every other status. It is
+    appended after `arg_sets_checked` deliberately: the documented field order
+    is used positionally at the call sites, and inserting a field mid-order
+    would silently rebind them.
+    """
 
     name: str
     status: str
     reason: str = ""
     arg_sets_checked: int = 0
+    cause: str = ""
 
 
 def exemption_reason(term: Term) -> str | None:
@@ -243,7 +266,8 @@ def verify_term(term: Term, bars: pd.DataFrame) -> TermVerdict:
         every_arg_set = arg_sets(term)
     except Exception as exc:                           # noqa: BLE001
         return TermVerdict(term.name, FAILED,
-                           f"cannot enumerate this term's arguments: {exc}")
+                           f"cannot enumerate this term's arguments: {exc}",
+                           cause="unenumerable")
 
     # Nothing to call is a refusal, not a pass. is_choice_rule(()) is True,
     # because all() over an empty tuple is True, so an enum arg that resolves to
@@ -255,7 +279,8 @@ def verify_term(term: Term, bars: pd.DataFrame) -> TermVerdict:
     if not every_arg_set:
         return TermVerdict(term.name, FAILED,
                            "schema generates no argument sets, so nothing was "
-                           "called")
+                           "called",
+                           cause="unenumerable")
 
     checked = 0
     for args in every_arg_set:
@@ -265,10 +290,12 @@ def verify_term(term: Term, bars: pd.DataFrame) -> TermVerdict:
                    else term.fn(bars["close"], args))
         except Exception as exc:                       # noqa: BLE001
             return TermVerdict(term.name, FAILED,
-                               f"args {args}: whole-frame call raised {exc}")
+                               f"args {args}: whole-frame call raised {exc}",
+                               checked, "uncallable")
         mismatch = field_mismatch(term, raw)
         if mismatch is not None:
-            return TermVerdict(term.name, FAILED, f"schema: {mismatch}")
+            return TermVerdict(term.name, FAILED, f"schema: {mismatch}",
+                               checked, "schema")
 
         # Reuse the call already made rather than calling term.fn a second time
         # on the whole frame. evaluate_term's only step beyond the raw dispatch
@@ -286,18 +313,21 @@ def verify_term(term: Term, bars: pd.DataFrame) -> TermVerdict:
                 return TermVerdict(
                     term.name, FAILED,
                     f"args {args} row {i}: evaluating over the prefix raised "
-                    f"{type(exc).__name__}: {exc}")
+                    f"{type(exc).__name__}: {exc}",
+                    checked, "gate_error")
             if not _agrees(want, prefix):
                 return TermVerdict(
                     term.name, FAILED,
                     f"args {args} row {i}: whole-frame {want!r} != prefix "
-                    f"{prefix!r}, so row {i} read a row after itself")
+                    f"{prefix!r}, so row {i} read a row after itself",
+                    checked, "lookahead")
             saw_a_number = saw_a_number or not pd.isna(want)
         if not saw_a_number:
             return TermVerdict(
                 term.name, VACUOUS,
                 f"args {args} are NaN at all {len(rows)} probe rows, so agreement "
-                f"proves nothing about this mandated argument set")
+                f"proves nothing about this mandated argument set",
+                checked)
         checked += 1
 
     return TermVerdict(term.name, CHECKED, "", checked)

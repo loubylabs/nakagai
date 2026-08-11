@@ -414,6 +414,81 @@ def test_a_term_whose_schema_disagrees_with_its_columns_is_failed(bars):
     assert "b" in verdict.reason
 
 
+def _peek_under_late(s, a):
+    return s.shift(-1) if a["mode"] == "late" else s
+
+
+def _nan_under_late(s, a):
+    return pd.Series(float("nan"), index=s.index) if a["mode"] == "late" else s
+
+
+def test_a_failed_verdict_carries_a_machine_readable_cause(bars):
+    """FAILED is one bucket for five conditions, and only one of them is a peek.
+
+    This is the module's own thesis one level down: if a bare boolean cannot
+    tell proved-causal from could-not-test, a bare FAILED cannot tell
+    this-term-peeks from our-gate-broke. Node 02 lists rejected terms in CI
+    output and has to classify them, and string-matching prose written for a
+    human is not a classification. Four causes are reachable from outside the
+    gate; "gate_error" is asserted by the crash-safety tests below.
+    """
+    peeker = Term("peeker", "series", {}, {}, _peeking_series)
+    assert verify_term(peeker, bars).cause == "lookahead"
+
+    explodes = Term("explodes", "series", {}, {},
+                    lambda s, a: (_ for _ in ()).throw(ValueError("boom")))
+    assert verify_term(explodes, bars).cause == "uncallable"
+
+    under_declared = Term("under_declared", "frame", {"field": ("a",)},
+                          {"field": "a"},
+                          lambda s, a: pd.DataFrame({"a": s, "b": s.shift(-1)}))
+    assert verify_term(under_declared, bars).cause == "schema"
+
+    too_wide = Term("too_wide", "series",
+                    {f"c{i}": ("x", "y", "z") for i in range(6)},
+                    {f"c{i}": "x" for i in range(6)}, lambda s, a: s)
+    assert verify_term(too_wide, bars).cause == "unenumerable"
+
+    empty_choice = Term("empty_choice", "series", {"mode": ()}, {},
+                        _peeking_series)
+    assert verify_term(empty_choice, bars).cause == "unenumerable"
+
+
+def test_a_verdict_that_is_not_a_failure_carries_no_cause(bars):
+    """An empty cause is what "this is not a rejection" reads as downstream."""
+    checked = verify_term(core_vocabulary().indicators["sma"], bars)
+    assert checked.status == CHECKED and checked.cause == ""
+
+    exempt = verify_term(core_vocabulary().primitives["bars_since"], bars)
+    assert exempt.status == EXEMPT and exempt.cause == ""
+
+    vacuous = verify_term(Term("always_nan", "series", {}, {},
+                               lambda s, a: pd.Series(float("nan"), index=s.index)),
+                          bars)
+    assert vacuous.status == VACUOUS and vacuous.cause == ""
+
+
+def test_a_rejection_reports_how_many_argument_sets_already_passed(bars):
+    """arg_sets_checked is a factual claim, and 0 is false when N-1 sets passed.
+
+    Both terms here are honest under `mode="early"` and broken under
+    `mode="late"`, which is the second set enumerated. "failed on set 1 of 2" is
+    what node 02 needs to print; a bare 0 says the gate got nowhere, which is
+    not what happened.
+    """
+    peeks_late = Term("peeks_late", "series", {"mode": ("early", "late")},
+                      {"mode": "early"}, _peek_under_late)
+    verdict = verify_term(peeks_late, bars)
+    assert verdict.status == FAILED and verdict.cause == "lookahead"
+    assert verdict.arg_sets_checked == 1
+
+    empty_late = Term("empty_late", "series", {"mode": ("early", "late")},
+                      {"mode": "early"}, _nan_under_late)
+    verdict = verify_term(empty_late, bars)
+    assert verdict.status == VACUOUS
+    assert verdict.arg_sets_checked == 1
+
+
 @pytest.mark.parametrize(
     "name", ["sma", "ema", "rsi", "macd", "bb", "atr", "donchian", "vwap",
              "ichimoku", "stoch", "supertrend", "keltner", "obv", "adx"])
