@@ -367,9 +367,15 @@ def test_the_net_fails_when_the_causal_rule_is_broken(label, helper_id, before,
 #
 # The engine's answer has two halves and both are taken from the engine itself:
 # frame_eval.driving_group says which spec-timeframe bar a driving bar reads,
-# and RuleStrategy._fresh (util.fresh_bar, util.first_bar_of_session) says
-# whether that driving bar may signal at all. Comparing against only the first
-# would pass on a script that marked all four 15m bars of a 1h bar.
+# and the context's emission gate says whether that driving bar may signal at
+# all. Comparing against only the first would pass on a script that marked all
+# four 15m bars of a 1h bar.
+#
+# A Pine chart has no schedule, so the gate compared against is the unscheduled
+# one: util.label_freshness, which is what build_context puts on ctx.fresh and
+# what RuleStrategy._fresh then reads. Calling its two halves directly is the
+# same answer without assembling a BarCache for it. A portfolio replay reads
+# fresh_context_at off its schedule instead, and no Pine artifact models that.
 
 CHART_STEP = pd.Timedelta(minutes=15)
 # The condition, deliberately built from sources alone: the interpreter models

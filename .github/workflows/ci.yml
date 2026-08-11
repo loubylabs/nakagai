@@ -39,8 +39,42 @@ jobs:
           # --isolated --no-project resolves the wheel and its declared
           # dependencies alone, which is what a consumer's machine looks like.
           uv build --wheel -o dist/
-          uv run --isolated --no-project --with dist/nakagai-*.whl \
-            python -c "import nakagai.engine.engine; import nakagai.strategies.rules; import nakagai.screen.compiler; print('ok')"
+          uv run --isolated --no-project --with dist/nakagai-*.whl python - <<'PY'
+          # The four arguments of the one public replay. Importing them off
+          # `nakagai.engine` rather than their defining modules is the point:
+          # the package promises this is the whole door, and `run_portfolio`
+          # resolves lazily, so a broken layering only shows up on access.
+          import nakagai.screen.compiler
+          import nakagai.strategies.rules
+          from nakagai.engine import (
+              PortfolioBars,
+              ReplaySchedule,
+              StrategyRegistry,
+              run_portfolio,
+          )
+
+          # A retired module that still imports means the wheel shipped a file
+          # this release says it deleted, or a stale tree was packaged. Either
+          # way the published artifact contradicts its own release notes, so
+          # say which module survived instead of failing on a bare assert.
+          survivors = []
+          for retired in ("nakagai.engine.engine", "nakagai.engine.runner",
+                          "nakagai.icir"):
+              try:
+                  __import__(retired)
+              except ModuleNotFoundError:
+                  continue
+              survivors.append(retired)
+          if survivors:
+              raise SystemExit(
+                  "retired modules are importable from the built wheel: "
+                  + ", ".join(survivors)
+                  + ". 0.5.0 removes them with no alias and no shim, so this "
+                    "wheel must not be published.")
+
+          print("ok:", run_portfolio.__name__, PortfolioBars.__name__,
+                StrategyRegistry.__name__, ReplaySchedule.__name__)
+          PY
 
   publish:
     name: publish to PyPI

@@ -1,10 +1,10 @@
 """Cross-process advisory file locking, and the read-modify-write it exists for.
 
-`results/runs.parquet` is appended to by the API's job threads, the MCP
-`run_backtest` subprocess, and the nightly CLI, all concurrently. A bare
-read→concat→write loses whichever writer finishes first, and runs.parquet is the
-evidence source guardrails read, so a lost run is a policy problem, not just a
-data problem.
+A shared parquet file on disk is appended to by several processes at once: API
+job threads, an MCP subprocess, a nightly CLI, a bar-cache upsert. A bare
+read-concat-write loses whichever writer finishes first, and the files this
+guards are evidence a guardrail reads, so a lost row is a policy problem rather
+than only a data problem.
 """
 
 import errno

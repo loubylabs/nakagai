@@ -1,6 +1,8 @@
 import pandas as pd
 
-from nakagai.strategies.base import Direction, MarketContext
+from nakagai.strategies.base import (
+    Direction, MarketContext, validate_signal_sequence,
+)
 from nakagai.strategies.util import first_bar_of_session, fresh_bar, rr_signal
 
 
@@ -70,3 +72,29 @@ def test_rr_signal_rejects_stop_on_wrong_side():
     assert rr_signal(ctx, Direction.LONG, stop=101.0, rr=2.0, tags=("t",), rationale="x") is None
     sig = rr_signal(ctx, Direction.LONG, stop=98.0, rr=2.0, tags=("t",), rationale="x")
     assert sig is not None and sig.target == 104.0
+
+
+def test_rr_signal_references_the_deciding_close():
+    """`entry_ref` is the close the geometry was decided against, and the
+    boundary refuses a signal whose reference is anything else."""
+    b = _bars([pd.Timestamp("2026-01-05 15:00", tz="UTC")], close=100.0)
+    sig = rr_signal(_ctx(b.index[-1], bars_15m=b), Direction.LONG, stop=98.0,
+                    rr=2.0, tags=("t",), rationale="x")
+    assert sig.entry_ref == 100.0
+    assert validate_signal_sequence([sig], symbol="SPY",
+                                    deciding_close=100.0) == (sig,)
+
+
+def test_rr_signal_refuses_a_target_that_walks_through_zero():
+    """A 5% stop with rr 20 puts a SHORT target on zero, which is not a
+    price. Degenerate, so nothing is emitted rather than emitting a signal
+    the replay would have to abort on."""
+    b = _bars([pd.Timestamp("2026-01-05 15:00", tz="UTC")], close=100.0)
+    ctx = _ctx(b.index[-1], bars_15m=b)
+    assert rr_signal(ctx, Direction.SHORT, stop=105.0, rr=20.0, tags=("t",),
+                     rationale="x") is None
+    assert rr_signal(ctx, Direction.SHORT, stop=105.0, rr=21.0, tags=("t",),
+                     rationale="x") is None
+    survivor = rr_signal(ctx, Direction.SHORT, stop=105.0, rr=15.0, tags=("t",),
+                         rationale="x")
+    assert survivor is not None and survivor.target == 25.0
