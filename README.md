@@ -233,6 +233,12 @@ The hosted product at nakag.ai is built on top of this core.
 
 ### 0.5.0
 
+An intentional pre-1.0 breaking release. Every replay entry point 0.4.x offered
+is gone, the strategy contract is strict, the result is one canonical value, and
+the arithmetic is stamped `2`. A consumer migrates before pinning this version:
+there is no release in which both contracts work, and the hosted platform's
+cutover is a migration rather than a version bump.
+
 **Breaking: one public replay, and the singleton engine is gone.**
 `run_portfolio(request, bars, registry, schedule)` replaces `Engine`, `run_one`,
 and `run_grid`. It replays ONE cash account across every selected play and
@@ -254,6 +260,64 @@ policy is the model. Composite membership arrives one way, as member factories
 passed to `CompositeStrategy(...)`. `nakagai.engine` exports the complete
 contract and nothing else.
 
+**Breaking: `FeeSpec.per_fill` replaces `FeeModel.per_trade`, and `charge(qty)`
+prices exactly one fill.** The old model returned `2 * (per_trade + per_share *
+qty)` from a single call, on the assumption that a fee is priced once per round
+trip. The portfolio replay charges the entry and the exit separately, as each
+one happens, so the field is named for what it prices and the method returns
+`per_fill + per_share * qty`. This changes fee arithmetic for any caller that
+carried a non-zero `per_trade`: the same number passed as `per_fill` leaves the
+round-trip total unchanged, while reading the old round-trip total as one fill
+halves it. Zero stays zero, which is what the broker this core was built
+against charges.
+
+**Breaking: a strategy proposes values and never touches engine state.**
+`Signal` moves out of `nakagai.strategies.base` into
+`nakagai.engine.portfolio_types`, which owns the whole canonical contract, and
+`nakagai.engine` exports it. It loses `entry` and gains `entry_ref`, the
+deciding raw close its protective levels were bracketed against; a signal whose
+reference is not that close is refused, so a play can no longer name a price the
+replay did not decide on. `Strategy.on_bar` returns a `Sequence[Signal]` and
+every element of it is a proposal: the singleton engine took `signals[0]` and
+dropped the rest silently, while the order now carries into replay-wide signal
+ordinals. `Strategy.manage` returns an immutable `ManagementDecision` in place
+of the removed `PositionAction` enum, and the position it is handed is a frozen
+`PositionView`, so a ratcheted stop or a replaced target travels back as a value
+and assigning to the position raises. Every return is checked at the boundary
+against a closed error taxonomy, and none of those errors becomes an empty
+signal list: a strategy that refused, a strategy that returned something
+invalid, and a strategy that saw nothing are three different observations, and a
+replay that cannot tell them apart reports contention it never had.
+
+**Canonical transport is core's, and only core's.** `canonical_replay_bytes` is
+the one hashing encoding. Object keys sort lexically, a finite binary64 value
+travels as its exact `float.hex()` inside a tagged object, a date travels
+tagged, and a timestamp has one UTC spelling, so identical inputs produce
+identical bytes no matter what order a mapping was built in or how a runtime
+renders a decimal. Local, remote, and hosted agree byte for byte or they
+disagree loudly. `result_digest` is taken over those bytes, and every identifier
+formula lives beside it: `expected_candidate_id`, `expected_replay_id`,
+`schedule_digest`, `definition_digest`, `spec_base_digest`, `trade_id`,
+`rejection_id`. A caller recomputes rather than reimplementing, and core refuses
+a request whose declared identifiers do not recompute. `encode_replay_*` and
+`decode_replay_*` are a separate ordinary-JSON wire form for an API, a worker
+envelope, or a database column; a receiver recomputes the canonical bytes from
+the decoded values rather than trusting the transport text.
+
+**Arithmetic version 2, and one result carries the whole reading.**
+`ARITHMETIC_VERSION` is `"2"`, and the chronology, the cost model, and the
+metric formulas are one arithmetic under it. A request declaring another version
+is refused rather than reported under a label that does not describe how its
+numbers were reached, so nothing stamped `1` is comparable to anything stamped
+`2`. `PortfolioReplayResult` carries the trades, the structured rejections, the
+account equity curve, an independently calculated benchmark, the portfolio
+metrics, and one `PortfolioSlice` per play symbol holding that pair's own
+counts, gross and net sums, fees, win rate, expectancy, and an `IcEstimate` at
+each of the three horizons. The IC estimate is an in-sample diagnostic over the
+window that was replayed, not a forecast, and `observations` is its load-bearing
+field: a lens that never ran and a lens that ran and found nothing both report a
+null coefficient, and only the count separates them.
+
 **Breaking: one catalog door, and a grammar is a value.** `load_catalog` is
 removed, with `RuleStrategy.bound` and the `RuleStrategy.VOCABULARY_FACTORY`
 class attribute it was the only caller of. `catalog_definitions(specs_dir,
@@ -262,9 +326,14 @@ immutable spec, records the grammar it is read under, and builds a plain
 `RuleStrategy` fresh per candidate, so a catalog entry can no longer exist as
 two minted classes in one process. `load_entries` is unchanged.
 
-**Breaking: `spec_definition_digest` is renamed `spec_base_digest`.** It sat one
-keystroke from `definition_digest` and means something else: a base digest of a
-strategy body, against a base digest bound to one play's params.
+**Two digests, and the names say which is which.**
+`spec_base_digest(spec, vocabulary_factory)` covers a strategy body and the
+grammar it is read under, because one spec under two grammars is two
+strategies. `definition_digest(base_digest, params)` binds that base to one
+play's own params. They sit one keystroke apart and mean different things: a
+registry freezes bases, a request declares definitions, and core refuses a play
+whose declared definition digest does not recompute. Both names are new in this
+release; 0.4.x had no digest of either kind.
 
 **A definition's grammar now reaches the replay.** `StrategyDefinition` carries
 `vocabulary_factory`, and the context a runtime decides through is built from
@@ -273,6 +342,13 @@ IC lens graded the definition's own, so a play using an added term aborted and a
 play using a redefined one was graded on a factor that did not produce its
 trades. Nothing announced it: `vocabulary_digest` covers what a term declares,
 not what it computes. Replays under the core grammar are byte-identical.
+
+**Breaking: `pandas>=3` is the declared floor**, raised from `>=2.2`. The floor
+is load-bearing rather than tidy. Copy-on-write is opt-in in pandas 2.x and
+unconditional from 3.0, and `build_scheduled_context` hands a strategy zero-copy
+prefixes of engine-owned frames. Under 2.x without copy-on-write, a strategy
+writing into `ctx.bars[tf]` would write through into the replay's own prices,
+and nothing would report it. Lowering this floor reintroduces that.
 
 ### 0.4.2
 
