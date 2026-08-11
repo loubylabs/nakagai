@@ -2,7 +2,7 @@
 
 A spec is plain JSON, version 2 only. Operands are expression trees over
 series sources, an indicator registry, math ops, and stateful primitives.
-Entries are nested all/any condition groups per side; exits and risk are
+Entries are nested all/any/not condition groups per side; exits and risk are
 first-class blocks. validate_spec reports precise per-path errors (the NL
 compiler's retry loop feeds on them); describe_spec renders the trust-step
 readback; canon.py owns identity hashing.
@@ -592,7 +592,7 @@ def validate_spec(spec, vocabulary: Vocabulary | None = None) -> list[str]:
 def validate_condition_group(group, path: str = "conditions",
                              tf: str = "1h", *,
                              vocabulary: Vocabulary | None = None) -> list[str]:
-    """Standalone validation of one all/any condition group with a fresh
+    """Standalone validation of one all/any/not condition group with a fresh
     budget. The screener's whole schema is one such group; validate_spec's
     per-side entry groups go through the same walker. `tf` is the timeframe the
     group is evaluated on, which decides whether a cross-timeframe reference

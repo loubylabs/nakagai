@@ -88,21 +88,29 @@ def vocabulary_fingerprint() -> str:
     return hashlib.sha256(blob.encode()).hexdigest()
 
 
-def _keys_in(spec):
-    """The group keys reachable in one spec."""
+def _key_counts(spec):
+    """How many times each group key occurs in one spec, nesting included."""
+    import collections
+
     from nakagai.strategies.rules.spec import GROUP_KEYS
-    used, stack = set(), [spec.get("long"), spec.get("short"),
-                          spec.get("exits", {}).get("exit")]
+    used = collections.Counter()
+    stack = [spec.get("long"), spec.get("short"),
+             spec.get("exits", {}).get("exit")]
     while stack:
         node = stack.pop()
         if not isinstance(node, dict):
             continue
         for key in GROUP_KEYS:
             if key in node:
-                used.add(key)
+                used[key] += 1
                 val = node[key]
                 stack.extend(val if isinstance(val, list) else [val])
     return used
+
+
+def _keys_in(spec):
+    """The group keys reachable in one spec."""
+    return set(_key_counts(spec))
 
 
 def test_every_grammar_shape_is_in_the_fingerprint_corpus():
@@ -110,13 +118,27 @@ def test_every_grammar_shape_is_in_the_fingerprint_corpus():
     trusted: a shape added to the grammar and forgotten here would leave the
     fingerprint silently narrower than the rule requires.
 
-    The distinctness assertion is the one that carries the weight. A union of
-    group keys over the whole corpus is an aggregate floor: every key here is
-    supplied by more than one entry, so an entry replaced by a copy of
-    another entry's shape leaves the union unchanged and the test green. A
-    hand-written per-entry key table was tried and is worse, because it is a
-    second description of the corpus that drifts from it. Canonical structure
-    is derived from the corpus itself and cannot drift.
+    Three assertions, because each catches something the others do not, and
+    the split matters: an earlier draft claimed the distinctness assertion
+    carried the weight, and it does not. Distinctness catches an entry
+    DUPLICATED from another. It says nothing about an entry replaced by a
+    shape that is merely different, which is the likelier accident: swapping
+    the `not-not` entry for `{"all": [{"all": [_LEAF]}]}` leaves nine distinct
+    hashes, leaves the key union at {all, any, not} because four other entries
+    supply `not`, and drops double negation out of hard rule 5's fingerprint
+    with nothing saying so.
+
+    So each entry is also held to its OWN NAME, which is the corpus's own
+    label for the shape it claims to be. A name is read as the group keys it
+    names, counted, so `not-not` must carry two nested negations and not one.
+    That is not the hand-written per-entry key table this test rejected before
+    and was right to: a table is a second description that drifts from the
+    corpus, while a name is the description already there, and an entry
+    renamed to match a weakened shape is no longer claiming to be the shape it
+    dropped.
+
+    The key union stays, doing the job it is actually good at: catching a
+    group key added to the GRAMMAR and forgotten here.
     """
     from nakagai.strategies.rules.spec import GROUP_KEYS, validate_spec
     for shape, spec in SHAPE_CORPUS.items():
@@ -132,6 +154,17 @@ def test_every_grammar_shape_is_in_the_fingerprint_corpus():
         f"is not the shape it is named for: "
         f"{sorted(k for k, v in structures.items() if v in dupes)}")
     assert len(SHAPE_CORPUS) == 9
+
+    # Each entry carries at least the group keys its own name claims, counted,
+    # so `not-not` needs two negations rather than one.
+    for shape, spec in SHAPE_CORPUS.items():
+        counts = _key_counts(spec)
+        for key in GROUP_KEYS:
+            claimed = shape.split("-").count(key)
+            assert counts[key] >= claimed, (
+                f"{shape!r} names {key!r} {claimed} time(s) and carries it "
+                f"{counts[key]}: the entry is no longer the shape it is "
+                f"named for")
 
     assert set().union(*(_keys_in(s) for s in SHAPE_CORPUS.values())) == set(GROUP_KEYS)
 

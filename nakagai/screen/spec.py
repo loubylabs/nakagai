@@ -1,6 +1,6 @@
 """ScreenSpec v1: the conditions-only screening IR.
 
-A screen is one all/any condition group in RuleSpec v2's exact operand
+A screen is one all/any/not condition group in RuleSpec v2's exact operand
 grammar, plus a base timeframe. No entries, exits, sides, or risk: a screen
 answers "does this condition hold for this symbol right now," nothing else.
 Validation and the readback delegate to the rules grammar so the two IRs can
