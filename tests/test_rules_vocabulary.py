@@ -16,7 +16,8 @@ from nakagai.strategies.catalog import load_entries
 from nakagai.strategies.rules import spec_hash, validate_spec
 from nakagai.strategies.rules.frame_eval import FrameEval
 from nakagai.strategies.rules.spec import validate_condition_group
-from nakagai.strategies.rules.vocabulary import Term, core_vocabulary
+from nakagai.strategies.rules.vocabulary import (
+    CONDITION_ARG, Term, core_vocabulary, is_condition_rule)
 
 
 SPECS = (Path(__file__).resolve().parents[1]
@@ -147,6 +148,26 @@ def test_term_refuses_a_default_its_arg_schema_does_not_declare():
     with pytest.raises(ValueError, match=r"defaults \['m'\] are not in its arg"):
         Term("drifted", "series", {"n": (2, 500)}, {"n": 20, "m": 5},
              lambda *_: None)
+
+
+def test_condition_arg_is_recognized_and_is_not_a_choice_rule():
+    assert is_condition_rule(CONDITION_ARG)
+    assert is_condition_rule(core_vocabulary().primitives["bars_since"].args["cond"])
+    assert not is_condition_rule(("safe", "fast"))
+    assert not is_condition_rule((2.0, 500.0))
+
+
+def test_a_condition_typed_arg_may_not_declare_a_default():
+    with pytest.raises(ValueError, match="condition-typed arg"):
+        Term("bad_default", "primitive", {"cond": CONDITION_ARG},
+             {"cond": {"lhs": 1, "op": ">", "rhs": 2}}, lambda *a: None)
+
+
+def test_a_condition_typed_arg_is_refused_outside_primitive_kind():
+    with pytest.raises(ValueError, match="condition-typed"):
+        Term("bad_kind", "series", {"cond": CONDITION_ARG}, {}, lambda *a: None)
+    # primitive kind is fine, and must stay fine
+    Term("ok_kind", "primitive", {"cond": CONDITION_ARG}, {}, lambda *a: None)
 
 
 def test_every_core_term_satisfies_the_term_checks():

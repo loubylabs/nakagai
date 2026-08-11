@@ -39,8 +39,20 @@ from nakagai.strategies.rules import primitives as prim
 from nakagai.strategies.rules.pine import lowerings as pine
 from nakagai.strategies.rules.pine.model import PineLowering
 
-ArgRule: TypeAlias = tuple[float, float] | tuple[str, ...]
+# The arg rule marking a condition-typed argument: its value is a condition
+# node, {"lhs": <expr>, "op": ..., "rhs": <expr>}, never a bare value. A string
+# rather than a tuple, so is_choice_rule reads False for it and a generic reader
+# must branch on this BEFORE the choice and range branches rather than adding a
+# third elif after them: spec.py's non-choice branch does `lo, hi = rule`, which
+# raises ValueError on any bare string.
+CONDITION_ARG: Literal["condition"] = "condition"
+ArgRule: TypeAlias = tuple[float, float] | tuple[str, ...] | Literal["condition"]
 KINDS = ("series", "frame", "bar", "primitive")
+
+
+def is_condition_rule(rule: ArgRule) -> bool:
+    """True for an arg whose value is a condition node, never a bare value."""
+    return rule == CONDITION_ARG
 
 
 def is_choice_rule(rule: ArgRule) -> bool:
@@ -98,6 +110,29 @@ class Term:
             raise ValueError(f"term {self.name!r} defaults "
                              f"{sorted(undeclared)} are not in its arg schema "
                              f"{sorted(args)}")
+        # N3-D13, both halves. A condition-typed arg is refused a default,
+        # because _check_args only ever walks the keys a SPEC supplies, so a
+        # default condition would be validated by nothing (a cross op inside
+        # one is forbidden, and no guard would ever see it). It is also refused
+        # outside `primitive` kind, because only the primitive branch of
+        # frame_eval hands a term the frame and **kwargs the injected evaluator
+        # rides in on; a `series` term is called fn(series, args) and could
+        # never evaluate a condition even with a callback. Both refuse at
+        # construction, so a mis-declared term fails when the vocabulary is
+        # built rather than when a spec happens to reach it.
+        condition_args = sorted(a for a, r in args.items()
+                                if is_condition_rule(r))
+        defaulted = [a for a in condition_args if a in defaults]
+        if defaulted:
+            raise ValueError(f"term {self.name!r} declares a default for "
+                             f"condition-typed arg(s) {defaulted}, which is "
+                             "not allowed: a default condition would be "
+                             "validated by nothing")
+        if condition_args and self.kind != "primitive":
+            raise ValueError(f"term {self.name!r} declares condition-typed "
+                             f"arg(s) {condition_args} on kind {self.kind!r}; "
+                             "a condition-typed arg is only allowed on kind "
+                             "'primitive'")
         object.__setattr__(self, "args", args)
         object.__setattr__(self, "defaults", defaults)
 
@@ -344,7 +379,7 @@ def core_vocabulary() -> Vocabulary:
                    PineLowering(pine.emit_primitive(pine.RVOL, "sessions"),
                                 helpers=(pine.RVOL,)),
                    session_scoped=True, driving_frame_intraday=True),
-        _primitive("bars_since", {"cond": "condition"}, {}, prim.bars_since,
+        _primitive("bars_since", {"cond": CONDITION_ARG}, {}, prim.bars_since,
                    PineLowering(pine.emit_bars_since,
                                 helpers=(pine.BARS_SINCE,))),
         # end_anchored, here and on order_block: the value is anchored to the
