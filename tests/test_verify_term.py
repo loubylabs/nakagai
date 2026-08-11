@@ -271,6 +271,40 @@ def test_arg_sets_of_a_term_with_no_args_is_one_empty_set():
     assert arg_sets(core_vocabulary().primitives["gap_pct"]) == ({},)
 
 
+def test_arg_sets_refuses_a_bare_string_rule_rather_than_indexing_its_letters():
+    """Measured: {"period": "lookback"} enumerated {'period': 'l'} and {'period': 'o'}.
+
+    The partition asked "is this a choice rule" and treated everything else as a
+    range, then read rule[0] and rule[1] with no shape check, so a bare string
+    became a pair of bounds one letter each.
+    """
+    term = Term("stringy_rule", "series", {"period": "lookback"}, {},
+                lambda s, a: s)
+    with pytest.raises(ValueError, match="period"):
+        arg_sets(term)
+
+
+def test_arg_sets_refuses_a_list_of_choices_rather_than_testing_two_of_three(bars):
+    """The dangerous shape: three branches declared, two called, verdict CHECKED.
+
+    Measured: {"mode": ["x", "y", "z"]} enumerated {'mode': 'x'} and
+    {'mode': 'y'} as if the list were a pair of bounds, so 'z' was never called
+    while arg_sets_checked read 2. That is the bounded result reading as
+    complete that the cap refuses, arriving through a different door. ArgRule is
+    documented as a tuple, but node 02's terms come from a generator, and
+    catching a generator that got the schema shape wrong is what this gate is
+    for.
+    """
+    term = Term("listy_rule", "series", {"mode": ["x", "y", "z"]},
+                {"mode": "x"}, lambda s, a: s)
+    with pytest.raises(ValueError, match="mode"):
+        arg_sets(term)
+
+    verdict = verify_term(term, bars)
+    assert verdict.status == FAILED, "an unusable schema is a rejection, not a crash"
+    assert verdict.cause == "unenumerable"
+
+
 def test_no_core_term_exceeds_the_argument_set_cap():
     worst = max(core_vocabulary().all_terms(), key=lambda t: len(arg_sets(t)))
     assert len(arg_sets(worst)) <= MAX_ARG_SETS, worst.name

@@ -141,6 +141,18 @@ def evaluate_term(term: Term, bars: pd.DataFrame, args: dict):
     return out
 
 
+def _is_range_rule(rule) -> bool:
+    """The other half of the ArgRule union: a low and a high, both numbers.
+
+    Booleans are excluded even though bool subclasses int, so a rule of
+    (True, False) is refused rather than read as the range 1 to 0. The same
+    exclusion guards the vocabulary's own search for the widest sessions bound.
+    """
+    return (isinstance(rule, tuple) and len(rule) == 2
+            and all(isinstance(value, (int, float)) and not isinstance(value, bool)
+                    for value in rule))
+
+
 def arg_sets(term: Term) -> tuple[dict, ...]:
     """Every argument set D11 mandates for this term.
 
@@ -152,12 +164,29 @@ def arg_sets(term: Term) -> tuple[dict, ...]:
 
     A condition arg is skipped rather than sampled: a term declaring one is exempt
     anyway, and there is no value to sample.
+
+    A rule of any other shape is refused here rather than guessed at. Reading
+    "everything that is not a choice rule is a range" and then indexing rule[0]
+    and rule[1] turns a bare string into two one-letter bounds and a list of
+    three choices into two of them, and the second one is the dangerous one: the
+    term reports CHECKED with a count that looks complete while a declared
+    branch was never called. ArgRule is documented as a tuple, but node 02's
+    terms come from a generator, and a generator getting the schema shape wrong
+    is exactly what this gate is supposed to catch.
     """
     choices, ranges = {}, {}
     for name, rule in term.args.items():
         if rule == CONDITION_ARG:
             continue
-        (choices if is_choice_rule(rule) else ranges)[name] = rule
+        if is_choice_rule(rule):
+            choices[name] = rule
+        elif _is_range_rule(rule):
+            ranges[name] = rule
+        else:
+            raise ValueError(
+                f"term {term.name!r} declares arg {name!r} as {rule!r}, which "
+                f"is neither a tuple of string choices nor a 2-tuple of "
+                f"numeric bounds; the gate will not guess which one was meant")
 
     out, seen = [], set()
 
