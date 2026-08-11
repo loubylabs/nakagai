@@ -29,6 +29,8 @@ TermVerdict carrying a status and a reason.
 
 from dataclasses import dataclass
 
+import pandas as pd
+
 from nakagai.strategies.rules.vocabulary import Term, is_choice_rule
 
 # The arg rule that marks a condition-taking term. A bare string rather than a
@@ -63,3 +65,47 @@ def exemption_reason(term: Term) -> str | None:
             return (f"takes a condition in {name!r}, which needs an evaluator "
                     f"injected before the term can be called at all")
     return None
+
+
+def field_mismatch(term: Term, out) -> str | None:
+    """Do the term's declared `field` choices match the columns it really returns?
+
+    Declared and produced are different questions, and only the second one says
+    which columns actually get evaluated. A term declaring three fields while
+    returning four leaves the fourth unevaluated and unmentioned, which is what a
+    generated signature gets wrong and what a schema-only reading cannot see.
+    """
+    if not isinstance(out, pd.DataFrame):
+        return None
+    declared = set(term.args.get("field", ()))
+    produced = set(out.columns)
+    if declared == produced:
+        return None
+    missing = sorted(produced - declared)
+    absent = sorted(declared - produced)
+    parts = []
+    if missing:
+        parts.append(f"produces undeclared {missing}, which would never be evaluated")
+    if absent:
+        parts.append(f"declares {absent}, which it does not produce")
+    return "; ".join(parts)
+
+
+def evaluate_term(term: Term, bars: pd.DataFrame, args: dict):
+    """One term's output over `bars`, by its kind's calling convention.
+
+    The four conventions are frame_eval.py:238-277's, mirrored rather than
+    imported, because FrameEval takes a whole grammar node and this takes one
+    term. A DataFrame return is narrowed by `field` for BOTH frame-kind and
+    bar-kind terms: donchian, ichimoku, keltner, stoch and supertrend are bar-kind
+    and multi-output, so narrowing only frame-kind would raise on five terms.
+    """
+    if term.kind == "primitive":
+        out = term.fn(None, bars, **args)
+    elif term.kind == "bar":
+        out = term.fn(bars, args)
+    else:                                   # series, frame
+        out = term.fn(bars["close"], args)
+    if isinstance(out, pd.DataFrame):
+        out = out[args["field"]]
+    return out

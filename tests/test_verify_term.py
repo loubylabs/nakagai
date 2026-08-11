@@ -7,7 +7,7 @@ import pytest
 
 from nakagai.strategies.rules.vocabulary import Term, core_vocabulary
 from nakagai.strategies.rules.verify import (
-    CONDITION_ARG, TermVerdict, exemption_reason,
+    CONDITION_ARG, TermVerdict, evaluate_term, exemption_reason, field_mismatch,
 )
 
 
@@ -41,3 +41,162 @@ def test_exactly_these_core_terms_are_exempt():
     exempt = {t.name for t in core_vocabulary().all_terms()
               if exemption_reason(t) is not None}
     assert exempt == {"fvg_nearest", "order_block", "bars_since"}
+
+
+SESSIONS = 160
+BARS_PER_SESSION = 26
+EXCHANGE_TZ = "America/New_York"
+
+
+@pytest.fixture(scope="module")
+def bars():
+    """Multi-session RTH-shaped 15m bars: 26 a day, 160 weekdays, no weekends.
+
+    160 sessions rather than a round 40 because the vocabulary's widest range rule
+    is rvol's `sessions: (5, 60)`, and a mandated argument set that is NaN at every
+    probe row proves nothing about the term. Each bar opens at the previous close
+    so bodies take both signs, which keeps order_block and any close-against-open
+    condition from being constant. Seeded, so the gate's own result is reproducible.
+
+    ANCHORED IN EXCHANGE-LOCAL TIME, not at a fixed UTC hour. A frame pinned to
+    14:30 UTC is the 09:30 bell only until daylight saving moves, and 160 sessions
+    from January crosses that boundary in March. Measured: the UTC-pinned version
+    leaves opening_range_high and opening_range_low NaN at every probe row, because
+    the bars no longer start at the open; this version checks all 34 non-exempt
+    terms.
+    """
+    rng = np.random.default_rng(19)
+    days = pd.bdate_range("2026-01-05", periods=SESSIONS, tz=EXCHANGE_TZ)
+    stamps = [d + pd.Timedelta(hours=9, minutes=30) + i * pd.Timedelta(minutes=15)
+              for d in days for i in range(BARS_PER_SESSION)]
+    idx = pd.DatetimeIndex(stamps).tz_convert("UTC")
+    idx.name = "ts"
+    n = len(idx)
+    close = 100 + np.cumsum(rng.normal(0, 0.3, n))
+    open_ = np.concatenate([[close[0] - 0.05], close[:-1]])
+    return pd.DataFrame(
+        {"open": open_,
+         "high": np.maximum(open_, close) + np.abs(rng.normal(0, 0.15, n)),
+         "low": np.minimum(open_, close) - np.abs(rng.normal(0, 0.15, n)),
+         "close": close,
+         "volume": 1000.0 + rng.integers(0, 500, n)},
+        index=idx)
+
+
+def test_the_fixture_is_session_shaped_with_two_sided_bodies(bars):
+    """A flat fixture empties several terms of content and reads as coverage.
+
+    The row count and the two-sided bodies are not enough on their own: a
+    continuous 24h index of the same length passes both while giving the five
+    session-scoped primitives a session shape no production frame has. So this
+    reads the index.
+    """
+    assert len(bars) == SESSIONS * BARS_PER_SESSION
+    bodies = bars["close"] - bars["open"]
+    assert (bodies > 0).any() and (bodies < 0).any()
+
+    local = bars.index.tz_convert(EXCHANGE_TZ)
+    assert len(set(local.date)) == SESSIONS, "index is not one block per session"
+    minutes = local.hour * 60 + local.minute
+    assert minutes.min() == 9 * 60 + 30, "sessions do not start at the bell"
+    assert minutes.max() < 16 * 60, "bars fall outside regular hours"
+
+
+def test_the_fixture_survives_the_daylight_saving_boundary(bars):
+    """The bug this fixture shape exists to avoid, asserted directly.
+
+    160 weekdays from 2026-01-05 crosses the March transition, so a fixed UTC
+    offset would put the later sessions an hour off the bell. Every session must
+    open at 09:30 local on both sides of it.
+    """
+    local = bars.index.tz_convert(EXCHANGE_TZ)
+    opens = {d: None for d in sorted(set(local.date))}
+    for ts in local:
+        if opens[ts.date()] is None:
+            opens[ts.date()] = ts
+    assert {(t.hour, t.minute) for t in opens.values()} == {(9, 30)}
+    assert len({t.utcoffset() for t in opens.values()}) == 2, (
+        "the fixture never crosses a DST boundary, so it cannot prove this")
+
+
+def test_the_fixture_outlasts_the_widest_range_rule_in_the_vocabulary(bars):
+    """rvol's sessions maximum is the binding constraint; prove it is not binding."""
+    widest = max(rule[1] for term in core_vocabulary().all_terms()
+                 for rule in term.args.values()
+                 if isinstance(rule, tuple) and len(rule) == 2
+                 and all(isinstance(x, (int, float)) for x in rule)
+                 and term.name == "rvol")
+    assert widest == 60
+    assert SESSIONS > widest * 2, "probes must sit well past the widest session window"
+
+
+def test_evaluate_term_handles_a_series_term(bars):
+    out = evaluate_term(core_vocabulary().indicators["sma"], bars, {"n": 20})
+    assert isinstance(out, pd.Series) and len(out) == len(bars)
+    assert not pd.isna(out.iloc[-1])
+
+
+def test_evaluate_term_selects_the_field_of_a_frame_term(bars):
+    term = core_vocabulary().indicators["macd"]
+    args = {"fast": 12, "slow": 26, "signal": 9, "field": "hist"}
+    hist = evaluate_term(term, bars, args)
+    signal = evaluate_term(term, bars, {**args, "field": "signal"})
+    assert isinstance(hist, pd.Series)
+    assert not hist.equals(signal), "field selection is not happening"
+
+
+def test_evaluate_term_selects_the_field_of_a_bar_term(bars):
+    """bar-kind terms return DataFrames too, so field selection is not frame-only."""
+    term = core_vocabulary().indicators["donchian"]
+    args = {"n": 20, "field": "upper"}
+    upper = evaluate_term(term, bars, args)
+    lower = evaluate_term(term, bars, {**args, "field": "lower"})
+    assert (upper.dropna() >= lower.dropna()).all()
+
+
+def test_evaluate_term_handles_a_bar_term_returning_one_series(bars):
+    out = evaluate_term(core_vocabulary().indicators["atr"], bars, {"n": 14})
+    assert isinstance(out, pd.Series) and (out.dropna() > 0).all()
+
+
+def test_evaluate_term_handles_a_primitive(bars):
+    out = evaluate_term(core_vocabulary().primitives["gap_pct"], bars, {})
+    assert isinstance(out, pd.Series) and len(out) == len(bars)
+
+
+def test_every_core_multi_output_term_declares_the_columns_it_produces(bars):
+    """Schema against reality, for the terms core wrote. All seven agree today.
+
+    Nine terms declare a `field`; seven of them return a DataFrame. The other
+    two, fvg_nearest and order_block, select their field inside the function
+    and return a float, so field_mismatch is a no-op on them. They stay in the
+    loop rather than being filtered out, because narrowing this to indicators
+    would let a future DataFrame-returning primitive skip the check entirely.
+    """
+    for term in core_vocabulary().all_terms():
+        if not term.args.get("field"):
+            continue
+        # The raw callable, without evaluate_term's field narrowing, because the
+        # question is which columns exist before one of them is selected. The
+        # three-way split is evaluate_term's: a primitive called down the series
+        # branch binds the defaults dict to `bars` and crashes inside find_fvgs.
+        if term.kind == "primitive":
+            raw = term.fn(None, bars, **dict(term.defaults))
+        elif term.kind == "bar":
+            raw = term.fn(bars, dict(term.defaults))
+        else:
+            raw = term.fn(bars["close"], dict(term.defaults))
+        assert field_mismatch(term, raw) is None, term.name
+
+
+def test_a_term_that_under_declares_its_fields_is_caught(bars):
+    """The guard above passes on arrival, so prove it can fail.
+
+    A generated `ta` signature that declares three fields and returns four leaves
+    the fourth never evaluated, which is invisible from the schema.
+    """
+    term = Term("under_declared", "frame", {"field": ("a",)}, {"field": "a"},
+                lambda s, a: pd.DataFrame({"a": s, "b": s.shift(-1)}))
+    raw = term.fn(bars["close"], {"field": "a"})
+    reason = field_mismatch(term, raw)
+    assert reason is not None and "b" in reason
