@@ -350,6 +350,24 @@ prefixes of engine-owned frames. Under 2.x without copy-on-write, a strategy
 writing into `ctx.bars[tf]` would write through into the replay's own prices,
 and nothing would report it. Lowering this floor reintroduces that.
 
+**New: a packaged per-term causality gate.**
+`nakagai.strategies.rules.verify` adds `verify_term(term, bars)` and
+`verify_vocabulary(vocabulary, bars)`, which ask of one term whether it reads
+only rows at or before the row it answers for, by comparing a whole-frame
+computation against the prefix computation at probe rows across the term's own
+mandated argument sets. The answer is a `TermVerdict` carrying `CHECKED`,
+`FAILED`, `EXEMPT` or `VACUOUS`, plus a machine-readable `cause` on a failure,
+rather than a bare boolean: an end-anchored term returns a scalar with no
+whole-frame series to index, and a condition-taking term cannot be called
+without an evaluator, so under a boolean both would be indistinguishable from a
+genuine pass. `tests/test_whole_frame_equivalence.py` pins causality for the
+grammar from a hand-maintained list; this pins it for one term from the term's
+own schema, which is what lets a term nobody wrote by hand be admitted or
+refused. `reference_bars()` ships the frame the gate is meant to run on inside
+the wheel rather than in `tests/`, because the consumer reaching this gate
+lives in another repository and cannot get a test fixture. It merged to `main`
+after 0.4.2 without a version bump, so 0.5.0 is the first release to carry it.
+
 ### 0.4.2
 
 - Stamp every new replay run with arithmetic version `1` and fill mode
