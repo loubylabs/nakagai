@@ -10,7 +10,7 @@ readback; canon.py owns identity hashing.
 
 from nakagai.data.schema import DEFAULT_TIMEFRAMES
 from nakagai.strategies.rules.vocabulary import (
-    Vocabulary, is_choice_rule, resolve_vocabulary,
+    Vocabulary, is_choice_rule, is_condition_rule, resolve_vocabulary,
 )
 
 VERSION = 2
@@ -33,6 +33,10 @@ MATH_OPS: dict[str, tuple[int, int]] = {   # op -> (min arity, max arity)
 STOP_KINDS = ("atr", "percent")
 TARGET_KINDS = ("rr", "percent")
 MAX_DEPTH = 8
+# Every group key the grammar admits, in one tuple. Four call sites (the
+# validator, the evaluator, the canonicalizer and the describe renderer) used
+# to spell this inline and three of them failed silently on an unknown key.
+GROUP_KEYS = ("all", "any", "not")
 MAX_CONDITIONS = 30
 MAX_NODES = 40           # indicator + primitive nodes per spec
 # The risk and exit blocks are the one part of the grammar whose bounds and
@@ -75,7 +79,15 @@ class _Budget:
 
 
 def _check_args(name: str, given: dict, schema: dict, path: str, errs: list[str],
+                budget: _Budget, vocabulary: Vocabulary, depth: int,
                 skip: tuple[str, ...] = ()) -> None:
+    # A condition-typed arg may not declare a default (N3-D13), so its
+    # ABSENCE is itself an error, unlike every other arg here: those fall back
+    # to term.defaults at evaluation time, so the spec is free to omit them
+    # and the loop below only ever walks the keys the spec actually supplied.
+    for arg, rule in schema.items():
+        if is_condition_rule(rule) and arg not in given:
+            errs.append(f"{path}: {name} needs {arg} = {{lhs, op, rhs}}")
     for arg, v in given.items():
         if arg in skip:
             continue
@@ -83,13 +95,57 @@ def _check_args(name: str, given: dict, schema: dict, path: str, errs: list[str]
             errs.append(f"{path}: {name} takes no arg {arg!r} (valid: {sorted(schema)})")
             continue
         rule = schema[arg]
-        if is_choice_rule(rule):
+        # The condition branch must run BEFORE the choice/range branches, not
+        # as a third one after them: rule is the bare string "condition", and
+        # the range branch's `lo, hi = rule` raises ValueError unpacking it.
+        if is_condition_rule(rule):
+            _check_condition_arg(name, arg, v, given, path, errs, budget,
+                                 vocabulary, depth)
+        elif is_choice_rule(rule):
             if v not in rule:
                 errs.append(f"{path}: {name}.{arg} must be one of {rule}, got {v!r}")
         else:
             lo, hi = rule
             if isinstance(v, bool) or not isinstance(v, (int, float)) or not lo <= v <= hi:
                 errs.append(f"{path}: {name}.{arg} must be a number in [{lo}, {hi}], got {v!r}")
+
+
+def _check_condition_arg(name: str, arg: str, cond, given: dict, path: str,
+                         errs: list[str], budget: _Budget,
+                         vocabulary: Vocabulary, depth: int) -> None:
+    """The four guards N3-D5 requires on every condition-typed arg, generic
+    over the term and the arg name rather than written once per bars_since.
+
+    Guard 1, shape. Guard 2, no cross ops (the accumulating primitives this
+    guards ffill over an elementwise mask, not a momentary crossing event).
+    Guard 3, no end-anchored primitive anywhere inside: those are NaN outside
+    the span they are evaluated over, so a reader reaching outside it gets a
+    span-dependent answer, the same bar counting differently depending on
+    which walk-forward window replayed it. Guard 4, no session-scoped
+    primitive inside a `tf`-qualified use: the node's own `tf` reframes this
+    subtree onto a foreign frame, which would smuggle a session-scoped
+    primitive there. All four apply unconditionally per N3-D5: refusing a
+    spec that would have been safe is recoverable, admitting one that reaches
+    outside its evaluated span is not.
+    """
+    if not isinstance(cond, dict) or not {"lhs", "op", "rhs"} <= set(cond):
+        errs.append(f"{path}: {name} needs {arg} = {{lhs, op, rhs}}")
+        return
+    if cond.get("op") in CROSS_OPS:
+        errs.append(f"{path}: {name}.{arg} conditions use comparison ops only")
+    else:
+        _check_condition(cond, f"{path}.{arg}", errs, budget, vocabulary,
+                         depth + 1)
+    end_anchored = {n for n, t in vocabulary.primitives.items() if t.end_anchored}
+    for bad in sorted(_prims_in(cond, end_anchored)):
+        errs.append(f"{path}: {bad} is anchored to the end of the frame and "
+                    f"cannot sit inside {name}.{arg}")
+    if "tf" in given:
+        session_scoped = {n for n, t in vocabulary.primitives.items()
+                          if t.session_scoped}
+        for bad in sorted(_prims_in(cond, session_scoped)):
+            errs.append(f"{path}: {bad} is session-scoped and cannot sit "
+                        f"inside {name}.{arg} with tf")
 
 
 def _prims_in(node, names) -> set[str]:
@@ -258,7 +314,8 @@ def _check_expr(node, path: str, errs: list[str], budget: _Budget,
             else:
                 _check_expr(node["of"], f"{path}.of", errs, budget,
                             vocabulary, depth + 1)
-        _check_args(name, node, term.args, path, errs, skip=("ind", "of", "tf"))
+        _check_args(name, node, term.args, path, errs, budget, vocabulary,
+                    depth, skip=("ind", "of", "tf"))
         _check_tf(node, path, errs)
         return
     if "prim" in node:
@@ -278,41 +335,8 @@ def _check_expr(node, path: str, errs: list[str], budget: _Budget,
             # _cross_prev is symmetric, so it would now fire.
             errs.append(f"{path}: the left side of a cross must be a series; "
                         f"{name} is a level read from the end of the frame")
-        schema = term.args
-        if name == "bars_since":
-            cond = node.get("cond")
-            if not isinstance(cond, dict) or not {"lhs", "op", "rhs"} <= set(cond):
-                errs.append(f"{path}: bars_since needs cond = {{lhs, op, rhs}}")
-            elif cond.get("op") in CROSS_OPS:
-                errs.append(f"{path}: bars_since conditions use comparison ops only")
-            else:
-                _check_condition(cond, f"{path}.cond", errs, budget,
-                                 vocabulary, depth + 1)
-            if isinstance(cond, dict):
-                # End-anchored primitives are NaN outside the span they are
-                # evaluated over, so any reader that reaches rows outside it
-                # gets a span-dependent answer: the same bar counts differently
-                # depending on which walk-forward window replayed it, which
-                # breaks replay's contract that the same bars and spec give the
-                # same trades. bars_since is one such reader, because it ffills
-                # over the WHOLE mask. A cross with a nested end-anchored
-                # operand was the other; _check_condition refuses that one.
-                end_anchored = {n for n, t in vocabulary.primitives.items()
-                                if t.end_anchored}
-                for bad in sorted(_prims_in(cond, end_anchored)):
-                    errs.append(f"{path}: {bad} is anchored to the end of the "
-                                f"frame and cannot sit inside a bars_since")
-            if "tf" in node:
-                # A tf'd bars_since evaluates its cond on that frame, which
-                # would smuggle session-scoped prims onto a foreign timeframe.
-                session_scoped = {n for n, t in vocabulary.primitives.items()
-                                  if t.session_scoped}
-                for bad in sorted(_prims_in(cond, session_scoped)):
-                    errs.append(f"{path}: {bad} is session-scoped and cannot "
-                                f"sit inside a bars_since with tf")
-            _check_args(name, node, {}, path, errs, skip=("prim", "cond", "tf"))
-        else:
-            _check_args(name, node, schema, path, errs, skip=("prim", "tf"))
+        _check_args(name, node, term.args, path, errs, budget, vocabulary,
+                    depth, skip=("prim", "tf"))
         if "tf" in node and term.session_scoped:
             errs.append(f"{path}: {name} is session-scoped and takes no tf")
         _check_tf(node, path, errs)
@@ -577,17 +601,24 @@ def _expr_text(node, vocabulary: Vocabulary) -> str:
             text += f"[{node['tf']}]"
         return f"{text}.{field}" if field else text
     name = node["prim"]
-    if name == "bars_since":
-        text = f"bars_since({_condition_text(node['cond'], vocabulary)})"
+    term = vocabulary.primitives[name]
+    condition_args = {a for a, rule in term.args.items() if is_condition_rule(rule)}
+    args = {**term.defaults,
+            **{k: v for k, v in node.items()
+               if k not in ("prim", "tf", *condition_args)}}
+    if "minutes" in args:
+        minutes = args.pop("minutes")
+        parts = [f"{minutes}m"] + [f"{v}" for v in args.values()]
     else:
-        args = {**vocabulary.primitives[name].defaults,
-                **{k: v for k, v in node.items() if k not in ("prim", "cond", "tf")}}
-        if "minutes" in args:
-            minutes = args.pop("minutes")
-            inner = ", ".join([f"{minutes}m"] + [f"{v}" for v in args.values()])
-        else:
-            inner = ", ".join(f"{v}" for v in args.values())
-        text = f"{name}({inner})" if inner else name
+        parts = [f"{v}" for v in args.values()]
+    # Rendered in readable {lhs op rhs} form via _condition_text, not the
+    # generic f"{v}" path just above: that would stringify the condition dict
+    # with Python's default repr, which is what a user approves before saving
+    # or backtesting an imported or NL-built strategy.
+    parts += [_condition_text(node[a], vocabulary)
+              for a in sorted(condition_args) if a in node]
+    inner = ", ".join(parts)
+    text = f"{name}({inner})" if inner else name
     if "tf" in node:
         text += f"[{node['tf']}]"
     return text

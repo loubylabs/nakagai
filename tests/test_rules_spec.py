@@ -1,9 +1,13 @@
+import inspect
+from pathlib import Path
+
 import pytest
 
 from nakagai.data.schema import DEFAULT_TIMEFRAMES
 from nakagai.strategies.rules import (
     canonical_spec, describe_spec, spec_hash, validate_spec,
 )
+from nakagai.strategies.rules import spec as rules_spec
 from nakagai.strategies.rules.spec import TIMEFRAMES, validate_condition_group
 
 ORB = {
@@ -412,3 +416,16 @@ def test_trailing_mult_changes_hash():
     b = copy.deepcopy(ORB)
     b["exits"]["trailing"]["mult"] = 3.0
     assert spec_hash(ORB) != spec_hash(b)
+
+
+def test_check_expr_has_no_bespoke_bars_since_branch():
+    """Acceptance item 1, half one."""
+    src = inspect.getsource(rules_spec._check_expr)
+    assert '"bars_since"' not in src
+
+
+def test_spec_module_has_zero_bars_since_special_cases():
+    """The literal acceptance-item-1 search: spec.py has no == "bars_since"
+    left anywhere, validator or describe."""
+    src = Path(rules_spec.__file__).read_text()
+    assert '== "bars_since"' not in src

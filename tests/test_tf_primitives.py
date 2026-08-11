@@ -126,8 +126,8 @@ def test_validate_rejects_session_prim_inside_tf_bars_since():
                                         "cond": {"lhs": {"prim": "day_of_week"},
                                                  "op": "<", "rhs": 1}},
                                 "op": "<=", "rhs": 1}))
-    assert any("day_of_week is session-scoped and cannot sit inside a bars_since with tf" in e
-               for e in errs)
+    assert any("day_of_week is session-scoped and cannot sit inside "
+               "bars_since.cond with tf" in e for e in errs), errs
 
 
 def test_validate_rejects_session_prim_nested_deep_in_tf_bars_since():
