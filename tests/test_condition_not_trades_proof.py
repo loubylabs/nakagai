@@ -535,6 +535,38 @@ def test_the_frame_covers_every_spec_in_the_golden_table():
     assert set(_specs()) == set(GOLDEN)
 
 
+def _diagnostic(name, market, result):
+    """What a digest mismatch cannot say on its own: which numbers moved.
+
+    A digest reports one bit. When it flips the next question is always whether
+    the TRADES moved or the MACHINE did, and answering it needs the values, a
+    fingerprint of the frames they were computed from, and the platform that
+    computed them. Without those a red proof sends its reader to re-derive the
+    table, which is the one response that cannot distinguish the two.
+    """
+    import platform
+
+    _, frames = market
+    lines = [
+        f"{name}: the digest moved. n={len(result.trades)}, which MATCHES the "
+        f"golden count if the assertion above passed.",
+        f"  platform: {platform.machine()} {platform.system()} "
+        f"python {platform.python_version()} "
+        f"numpy {np.__version__} pandas {pd.__version__}",
+    ]
+    for key, frame in sorted(frames.items()):
+        blob = json.dumps([[_cell(v) for v in row]
+                           for row in frame.to_numpy().tolist()])
+        lines.append(f"  input {key[1]:>3}: {len(frame)} rows, sha256 "
+                     f"{hashlib.sha256(blob.encode()).hexdigest()[:16]}")
+    for trade in result.trades[:2]:
+        cells = {f.name: _cell(getattr(trade, f.name))
+                 for f in dataclasses.fields(PortfolioTrade)}
+        lines.append(f"  trade {trade.trade_ordinal}: "
+                     f"{json.dumps(cells, sort_keys=True)}")
+    return "\n".join(lines)
+
+
 @pytest.mark.parametrize("name", sorted(GOLDEN))
 def test_every_spec_produces_the_golden_trades(name, market):
     _, result = replay(name, market)
@@ -542,4 +574,4 @@ def test_every_spec_produces_the_golden_trades(name, market):
     want_n, want_digest = GOLDEN[name]
     assert n >= 1, f"{name}: zero trades proves nothing"
     assert n == want_n, f"{name}: trade count moved from {want_n} to {n}"
-    assert digest == want_digest, f"{name}: trades changed (n={n})"
+    assert digest == want_digest, _diagnostic(name, market, result)
