@@ -1,9 +1,12 @@
 """Hard rule 3's core half: every existing catalog spec and fixture produces
 byte-identical trades before and after node 03.
 
-The frame is built once, seeded, session-shaped, and pinned here rather than
-generated per test run: "deterministic and committed" is what a fixed seed in
-the test file means, and a frame randomized per run would make this test's own
+The instrument is the one public replay door, `run_portfolio`. Engine Phase 1
+retired the singleton `Engine` this proof used to drive, so the harness below
+builds what that door now requires: an exchange schedule, its context bars, and
+one frame per declared timeframe. Everything it builds is derived from two
+constants and a seed, so "deterministic and committed" is what the fixed seeds
+in this file mean, and a frame randomized per run would make this test's own
 result irreproducible.
 
 A comparison that compares nothing is the failure mode this guards against: a
@@ -15,12 +18,18 @@ The digest is over EXACT values. Prices go in through repr(), which round-trips
 a float bit-for-bit, and the sha256 is not truncated, because the requirement
 is byte-identical trades: a rounded price and a shortened digest both admit a
 change this test exists to refuse.
+
+Nothing is excluded from the digest, including the four identity fields
+`PortfolioTrade` gained in Phase 1. That is a measured fact rather than a
+convenience, and `test_the_identities_are_derived_and_never_generated` is what
+holds it: every identity is a digest over the request and the signal, so a
+moved identity always means a moved input and never a flaky run.
 """
 
 import dataclasses
 import hashlib
 import json
-import tempfile
+from datetime import date, timedelta
 from enum import Enum
 from pathlib import Path
 
@@ -28,27 +37,202 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from nakagai.data.cache import BarCache
-from nakagai.data.resample import resample_bars
-from nakagai.data.schema import DEFAULT_TIMEFRAMES as TFS
-from nakagai.engine.engine import Engine, Trade
-from nakagai.strategies.catalog import load_catalog
-from nakagai.strategies.rules import RuleStrategy, core_vocabulary
+from nakagai.engine.bars import PortfolioBars
+from nakagai.engine.canonical import (
+    definition_digest,
+    expected_replay_id,
+    schedule_digest,
+    trade_id,
+)
+from nakagai.engine.portfolio_types import (
+    PlayRequest,
+    PortfolioTrade,
+    ReplaySchedule,
+    ReplayWindow,
+    ScheduledContextBar,
+)
+from nakagai.engine.registry import (
+    FrozenStrategyRegistry,
+    dependencies_for,
+    rules_definition,
+    spec_base_digest,
+)
+from nakagai.engine.replay import run_portfolio
+from nakagai.strategies.catalog import load_entries
+from nakagai.strategies.rules import core_vocabulary
+from tests.portfolio_fixtures import (
+    base_identity,
+    base_request,
+    daily_session_dates,
+    frictionless_execution,
+    replay_account,
+    scheduled_labels,
+    session_intervals,
+)
 
 CATALOG_SPECS = (Path(__file__).resolve().parents[1]
                  / "nakagai" / "strategies" / "catalog" / "specs")
 FIXTURE_SPECS = Path(__file__).resolve().parent / "fixtures" / "rules"
 
-SESSIONS = 260  # clears bollinger_breakout's sma(200) on daily bars
+SYMBOL = "SPY"
+PLAY_ID = "play-p"
+# The spec the two machinery guards below drive. Named rather than read off
+# GOLDEN, because both ask whether the DIGEST can see a change and neither is
+# about the table: reading `sorted(GOLDEN)[0]` made them raise IndexError on an
+# underived table, which reads as a broken guard where the real fault is one
+# missing derivation. `test_the_frame_covers_every_spec_in_the_golden_table` is
+# the one guard that owns GOLDEN's emptiness, and it is not parametrized.
+PROBE = "catalog:macd_trend"
+TZ = "America/New_York"
+SESSION_OPEN = "09:30"
+SESSION_INTERVALS = 26  # 09:30 to 16:00 Eastern, on the 15-minute base clock
+
+# 340 weekday sessions, warming up on the first 210. The warmup is set by the
+# hungriest spec rather than by taste: bollinger_breakout reads sma(200) on
+# DAILY bars, so it cannot produce a signal until 200 sessions have closed, and
+# a shorter train range would leave it with zero trades and this file would
+# prove nothing about it. The 130 sessions that remain are what every other
+# spec trades over.
+#
+# The test range is sized to make every spec fire, and not beyond it. A
+# regression in the grammar shows up on the FIRST bar it touches, so a longer
+# run buys more trades rather than more discrimination, and the nine replays
+# below already compare 442 of them field by field. Doubling the range triples
+# this module's runtime, because every evaluation re-reads its own prefix.
+SESSIONS = 340
+TRAIN_SESSIONS = 210
 
 
-def _index(days, bars_per_session, start_hm=(9, 30), step_minutes=15):
-    stamps = [d + pd.Timedelta(hours=start_hm[0], minutes=start_hm[1])
-              + i * pd.Timedelta(minutes=step_minutes)
-              for d in days for i in range(bars_per_session)]
-    idx = pd.DatetimeIndex(stamps).tz_convert("UTC")
-    idx.name = "ts"
-    return idx
+# ------------------------------------------------------------ the schedule
+
+
+def _session_open(session: date) -> pd.Timestamp:
+    """The session's first base open, as an instant.
+
+    Built from Eastern wall clock rather than from a UTC literal, because a
+    year of sessions crosses both 2026 transitions and 09:30 in New York is
+    14:30Z in January and 13:30Z in July. A schedule that fixed the UTC hour
+    would put half its sessions an hour off their own opening bell.
+    """
+    return pd.Timestamp(f"{session.isoformat()} {SESSION_OPEN}",
+                        tz=TZ).tz_convert("UTC")
+
+
+def _local(session: date, hour: int) -> pd.Timestamp:
+    """An Eastern wall-clock hour on `session`, as an instant."""
+    day = session + timedelta(days=hour // 24)
+    return pd.Timestamp(f"{day.isoformat()} {hour % 24:02d}:00",
+                        tz=TZ).tz_convert("UTC")
+
+
+def _covers(intervals, start, end):
+    """The scheduled base intervals a context period covers.
+
+    The same overlap `_require_session_coverage` walks: an interval is covered
+    when it closes after the period opens and opens before the period ends.
+    """
+    return [row for row in intervals if row.close_ts > start and row.open_ts < end]
+
+
+def _fresh_at(intervals, period_end, base_step=pd.Timedelta(minutes=15)):
+    """The scheduled base close in `[period_end, period_end + one base bar)`.
+
+    None where there is none, which is what a period ending on a session's last
+    close would produce if the next session opened more than one base bar away.
+    """
+    for row in intervals:
+        if row.close_ts < period_end:
+            continue
+        return row.close_ts if row.close_ts < period_end + base_step else None
+    return None
+
+
+def _hourly_bars(intervals, blocks):
+    """One bar per UTC hour that covers at least one scheduled interval.
+
+    A 1h label is a cached UTC left edge, so the grid is a UTC one: a session
+    opening at 14:30Z has its first bar labeled 14:00Z, and it covers the two
+    intervals that open inside that hour.
+    """
+    rows = []
+    for session, block in blocks:
+        edge = block[0].open_ts.floor("h")
+        while edge < block[-1].close_ts:
+            end = edge + pd.Timedelta(hours=1)
+            if _covers(block, edge, end):
+                rows.append(ScheduledContextBar(
+                    timeframe="1h", session_date=session, label_ts=edge,
+                    period_start=edge, period_end=end, available_at=end,
+                    fresh_context_at=_fresh_at(intervals, end),
+                    source="fetched_left_edge"))
+            edge = end
+    return rows
+
+
+def _four_hour_bars(intervals, blocks):
+    """The Eastern-midnight-anchored buckets a regular session falls inside.
+
+    Two of the six, and which two is a property of the session rather than a
+    choice: 08:00 to 12:00 Eastern holds the morning and 12:00 to 16:00 holds
+    the afternoon, and the other four buckets cover no scheduled interval at
+    all. Both edges are built from wall clock, so each period is four hours on
+    the exchange's clock whatever the offset is that week.
+    """
+    rows = []
+    for session, block in blocks:
+        for hour in range(0, 24, 4):
+            start, end = _local(session, hour), _local(session, hour + 4)
+            if not _covers(block, start, end):
+                continue
+            rows.append(ScheduledContextBar(
+                timeframe="4h", session_date=session, label_ts=start,
+                period_start=start, period_end=end, available_at=end,
+                fresh_context_at=_fresh_at(intervals, end),
+                source="derived_1h_et_midnight"))
+    return rows
+
+
+def _daily_bars(blocks):
+    """One bar a session, spanning it, released at the NEXT session's open.
+
+    The last session has no next session and therefore no release, which is
+    why the loop stops one short rather than emitting a bar the schedule
+    validator would refuse.
+    """
+    rows = []
+    for position, (session, block) in enumerate(blocks[:-1]):
+        following = blocks[position + 1][1]
+        rows.append(ScheduledContextBar(
+            timeframe="1d", session_date=session,
+            label_ts=_local(session, 0),
+            period_start=block[0].open_ts, period_end=block[-1].close_ts,
+            available_at=following[0].open_ts,
+            fresh_context_at=following[0].close_ts,
+            source="session_aligned"))
+    return rows
+
+
+def build_schedule(sessions: int | None = None) -> ReplaySchedule:
+    """A full regular-session schedule and every context bar it supports.
+
+    Context bars are emitted in `CONTEXT_TIMEFRAMES` order, which the schedule
+    validator requires of the tuple as a whole rather than of each session.
+    """
+    blocks = [(session, session_intervals(session, _session_open(session),
+                                          SESSION_INTERVALS))
+              for session in daily_session_dates(SESSIONS if sessions is None
+                                                 else sessions)]
+    intervals = tuple(row for _, block in blocks for row in block)
+    context = tuple([*_hourly_bars(intervals, blocks),
+                     *_four_hour_bars(intervals, blocks),
+                     *_daily_bars(blocks)])
+    draft = ReplaySchedule(identity=base_identity(), base_intervals=intervals,
+                           context_bars=context)
+    return dataclasses.replace(draft,
+                               identity=base_identity(schedule_digest(draft)))
+
+
+# --------------------------------------------------------------- the frames
 
 
 def _ohlcv(idx, seed, trend_amp=3.0, vol_spike_every=40, displacement_every=14,
@@ -74,34 +258,108 @@ def _ohlcv(idx, seed, trend_amp=3.0, vol_spike_every=40, displacement_every=14,
     base_vol = 800 + rng.integers(0, 400, n).astype(float)
     spike_rows = rng.choice(n, size=max(1, n // vol_spike_every), replace=False)
     base_vol[spike_rows] *= rng.uniform(4, 8, size=len(spike_rows))
+    index = pd.DatetimeIndex(list(idx), tz="UTC", name="ts")
     return pd.DataFrame({"open": open_, "high": high, "low": low,
-                         "close": close, "volume": base_vol}, index=idx)
+                         "close": close, "volume": base_vol}, index=index,
+                        dtype="float64")
 
 
-def build_cache():
-    """The frame, in one place, so the derivation harness and the tests cannot
-    build different ones. Returns (BarCache, start, end)."""
-    c = BarCache(Path(tempfile.mkdtemp()))
-    days = pd.bdate_range("2026-01-05", periods=SESSIONS, tz="America/New_York")
-    m15 = _ohlcv(_index(days, 26, step_minutes=15), seed=7)
-    h1 = _ohlcv(_index(days, 7, step_minutes=60), seed=11, trend_amp=4.0)
-    d1 = _ohlcv(_index(days, 1, start_hm=(9, 30), step_minutes=0), seed=13,
-                trend_amp=25.0, vol_spike_every=8, displacement_every=6,
-                cycles=2)
-    c.upsert("SPY", "15m", m15)
-    c.upsert("SPY", "1h", h1)
-    c.upsert("SPY", "1d", d1)
-    c.upsert("SPY", "4h", resample_bars(h1, "4h"))
-    return c, m15.index[0], m15.index[-1] + TFS.step
+# One seed a timeframe, and each frame is generated in its own right rather
+# than resampled from another. The four are inputs, not a claim that one
+# market produced all of them: what this file measures is that a spec reads
+# the same numbers before and after node 03, and an arbitrary fixed frame
+# answers that as well as a consistent one would.
+_FRAME_SHAPES = {
+    "15m": dict(seed=7),
+    "1h": dict(seed=11, trend_amp=4.0),
+    "4h": dict(seed=17, trend_amp=8.0, vol_spike_every=20,
+               displacement_every=10, cycles=4),
+    "1d": dict(seed=13, trend_amp=25.0, vol_spike_every=8,
+               displacement_every=6, cycles=2),
+}
+
+
+def build_frames(schedule: ReplaySchedule, boundary: pd.Timestamp) -> dict:
+    """One frame per timeframe, on exactly the labels the schedule declares."""
+    return {
+        (SYMBOL, timeframe): _ohlcv(
+            scheduled_labels(schedule, timeframe, boundary), **shape)
+        for timeframe, shape in _FRAME_SHAPES.items()
+    }
+
+
+# ---------------------------------------------------------------- the specs
+
+
+def _specs():
+    """The nine spec bodies this file replays, keyed by where they ship from.
+
+    The shipped catalog goes through its own loader rather than through a
+    glob, so a spec this proof covers is a spec the catalog actually serves:
+    a file the loader would refuse is a file that never reaches a user, and
+    reading the directory directly would quietly proof-cover it anyway.
+    """
+    out = {f"catalog:{name}": entry["spec"]
+           for name, entry in load_entries(CATALOG_SPECS,
+                                           core_vocabulary).items()}
+    for path in sorted(FIXTURE_SPECS.glob("*.json")):
+        out[f"fixture:{path.stem}"] = json.loads(path.read_text())
+    return out
 
 
 @pytest.fixture(scope="module")
-def cache():
-    return build_cache()
+def market():
+    """The schedule and its frames, built once for all nine replays."""
+    schedule = build_schedule()
+    boundary = schedule.base_intervals[-1].close_ts
+    return schedule, build_frames(schedule, boundary)
+
+
+def _request(spec: dict, schedule: ReplaySchedule):
+    intervals = schedule.base_intervals
+    split = TRAIN_SESSIONS * SESSION_INTERVALS
+    base = spec_base_digest(spec, core_vocabulary)
+    return base_request(
+        plays=(PlayRequest(play_id=PLAY_ID, strategy=spec["name"],
+                           definition_digest=definition_digest(base, {}),
+                           params={}, priority=100),),
+        symbols=(SYMBOL,),
+        window=ReplayWindow(
+            train_start=intervals[0].open_ts,
+            train_end=intervals[split].open_ts,
+            test_start=intervals[split].open_ts,
+            test_end=intervals[-1].close_ts,
+        ),
+        schedule_identity=schedule.identity,
+        ic_tail_end=intervals[-1].close_ts,
+        account=replay_account(),
+        execution=frictionless_execution(),
+    ), base
+
+
+def replay(name: str, market):
+    """One spec's replay, through the public door and nothing else.
+
+    Shared by the golden table and by every guard below, so the two cannot
+    disagree about how a spec is run.
+    """
+    schedule, frames = market
+    spec = _specs()[name]
+    request, base = _request(spec, schedule)
+    registry = FrozenStrategyRegistry.from_definitions(
+        (rules_definition(spec["name"], base, spec=spec,
+                          vocabulary_factory=core_vocabulary),))
+    declared = dependencies_for(request, registry).timeframes
+    bars = PortfolioBars({key: frame for key, frame in frames.items()
+                          if key[1] in declared})
+    return request, run_portfolio(request, bars, registry, schedule)
+
+
+# --------------------------------------------------------------- the digest
 
 
 def _cell(v):
-    """Deterministic, lossless, and total over Trade's field types.
+    """Deterministic, lossless, and total over PortfolioTrade's field types.
 
     repr() on floats rather than str(), because str() rounds and a digest
     that rounds cannot see a change below the rounding. Enums by name, so
@@ -120,23 +378,24 @@ def _cell(v):
 
 
 def _trade_digest(trades):
-    """Every field on Trade, discovered rather than listed.
+    """Every field on PortfolioTrade, discovered rather than listed.
 
     An earlier draft hand-listed seven fields, which left stop, target, qty,
     symbol, r_multiple, setup_tags, fees, mae and mfe uncompared: a trade
     whose target moved would have produced an identical digest, so hard rule
     3's "byte-identical trades" would have been proven over a subset while
     claiming the whole. Reading dataclasses.fields() also means a field added
-    to Trade later joins the digest with nobody remembering to come back here.
+    to PortfolioTrade later joins the digest with nobody remembering to come
+    back here, which is how Phase 1's four new identity fields joined it.
     """
-    names = [f.name for f in dataclasses.fields(Trade)]
+    names = [f.name for f in dataclasses.fields(PortfolioTrade)]
     rows = [{n: _cell(getattr(t, n)) for n in names} for t in trades]
     blob = json.dumps(rows, sort_keys=True)
     return len(rows), hashlib.sha256(blob.encode()).hexdigest()
 
 
 def _perturb(v):
-    """A different value of the same type, for every type Trade holds.
+    """A different value of the same type, for every type PortfolioTrade holds.
 
     Total by construction rather than by a chain of isinstance checks that
     silently returns the input for an unhandled type: a _perturb that handed
@@ -163,25 +422,27 @@ def _perturb(v):
     raise AssertionError(f"_perturb has no case for {type(v).__name__}; add one")
 
 
-def _specs():
-    out = {}
-    for name, cls in load_catalog(CATALOG_SPECS, core_vocabulary).items():
-        out[f"catalog:{name}"] = cls({})
-    for path in sorted(FIXTURE_SPECS.glob("*.json")):
-        spec = json.loads(path.read_text())
-        out[f"fixture:{path.stem}"] = RuleStrategy({"spec": spec})
-    return out
+def _with_field(trade: PortfolioTrade, name: str, value) -> PortfolioTrade:
+    """A real PortfolioTrade carrying one changed field, built around __init__.
+
+    `dataclasses.replace` cannot be used and the reason is not stylistic.
+    `PortfolioTrade.__post_init__` refuses most of the perturbations above at
+    construction: a direction outside {long, short}, an identity that is not a
+    prefixed digest, an entry whose stop now sits on the wrong side of it. A
+    replace-based guard would raise on those fields instead of measuring them,
+    and a guard that raises tells you nothing about whether the digest would
+    have noticed. Building the instance field by field is what makes the
+    question askable at all, and the object is still exactly the type the
+    digest reads.
+    """
+    clone = object.__new__(PortfolioTrade)
+    for field in dataclasses.fields(PortfolioTrade):
+        object.__setattr__(clone, field.name, getattr(trade, field.name))
+    object.__setattr__(clone, name, value)
+    return clone
 
 
-def _replay(name, cache):
-    """One spec's trades. The single replay path, shared by the golden table
-    and by the per-field digest guard, so the two cannot disagree about how a
-    spec is run."""
-    bar_cache, start, end = cache
-    return Engine(_specs()[name], bar_cache, "SPY", start, end).run().trades
-
-
-def test_the_digest_notices_a_change_in_every_trade_field(cache):
+def test_the_digest_notices_a_change_in_every_trade_field(market):
     """The digest's discriminating power, field by field.
 
     This is the guard that would have caught the seven-field draft. It fails
@@ -192,45 +453,73 @@ def test_the_digest_notices_a_change_in_every_trade_field(cache):
     inside the loop: an in-loop assert stops at the FIRST field that misses
     and reports only that one, which reads as a single oversight where the
     real fault is a whole class of fields left uncompared. Watched failing by
-    hand-listing the seven-field draft again, and it reported all nine:
-    ['symbol', 'qty', 'stop', 'target', 'r_multiple', 'setup_tags', 'fees',
-    'mae', 'mfe'].
+    hand-listing a subset again, and it reported every field left out.
     """
-    assert GOLDEN, "GOLDEN is empty: derive it before this test means anything"
-    trades = _replay(sorted(GOLDEN)[0], cache)
-    assert trades, "need at least one real trade to perturb"
-    base = trades[0]
+    _, result = replay(PROBE, market)
+    assert result.trades, "need at least one real trade to perturb"
+    base = result.trades[0]
     d0 = _trade_digest([base])[1]
     missed = []
-    for f in dataclasses.fields(Trade):
-        before = getattr(base, f.name)
-        bumped = dataclasses.replace(base, **{f.name: _perturb(before)})
+    for field in dataclasses.fields(PortfolioTrade):
+        before = getattr(base, field.name)
+        bumped = _with_field(base, field.name, _perturb(before))
         if _trade_digest([bumped])[1] == d0:
-            missed.append(f.name)
+            missed.append(field.name)
     assert not missed, (
         f"these fields do not reach the digest, so a change to them is "
         f"invisible: {missed}")
 
 
-# DERIVED, NOT TRANSCRIBED. Printed by running this module's build_cache() and
-# _trade_digest() over _specs(), then re-printed with the node 03 production
-# diff stashed out of nakagai/ and confirmed identical. That second run is what
-# makes the table a measurement of "this node moved no trade" rather than a
-# stamp of "this node produced these numbers".
+def test_the_identities_are_derived_and_never_generated(market):
+    """Why the four Phase 1 identity fields are safe to digest.
+
+    An identity that were minted per run would make this whole table flap: the
+    digest covers every field, so a fresh `trade_id` on every replay would
+    change it every time and the golden numbers would be unreproducible by
+    construction. They are not minted. Every one is a digest over the request
+    and the signal, so this asserts the formulas rather than trusting them, and
+    a future change that generated an identity would fail HERE, naming the
+    cause, instead of showing up as nine unexplained digest drifts.
+
+    `replay_id` carries the vocabulary through `definition_digest`, which is
+    the other half of the same point: it moves when the GRAMMAR moves. Node 03
+    declares no new term and changes no term's schema, so it does not move, and
+    the golden table can be compared across the node at all.
+    """
+    request, result = replay(PROBE, market)
+    assert result.trades
+    assert request.replay_id == expected_replay_id(request)
+    for ordinal, trade in enumerate(result.trades):
+        assert trade.replay_id == request.replay_id
+        assert trade.trade_ordinal == ordinal
+        assert trade.play_id == PLAY_ID
+        assert trade.trade_id == trade_id(
+            request.replay_id, trade.play_id, trade.symbol,
+            trade.signal_ordinal)
+
+
+# DERIVED, NOT TRANSCRIBED. Printed by running this module's harness over
+# _specs() at core 992f55e with the node 03 production diff ABSENT, then
+# re-printed on the node's own branch and confirmed identical. That second run
+# is what makes the table a measurement of "this node moved no trade" rather
+# than a stamp of "this node produced these numbers".
 #
-# Trade counts survive independently: they match the counts recorded before the
-# digest was widened to every Trade field, and the digest does not affect what
-# the engine does. If a COUNT moves, that is a real finding.
+# The counts are not carried over from the table this file held before engine
+# Phase 1. That engine replayed each spec on its own timeframe with no account
+# between the signal and the trade; this one drives a 15-minute base clock,
+# funds every fill out of one account, and closes the window at its end. The
+# numbers moved because the replay model moved, and the baseline run above is
+# what attributes that rather than assuming it.
 GOLDEN = {
-    "catalog:macd_trend": (123, "1b61d3909e02791c4dbb1482e086bdc494b85716fe449af5dfaf6a9142021cd0"),
-    "catalog:rsi_reversion": (11, "6cc3472eac6433035a7c3faeae12582d24ea1b3804d5c6709637cb66e1c95cd3"),
-    "catalog:sma_cross": (66, "f2d7eeb8d53e12fe8543406622d1cb9b021a14ca78986e58afee7aa17bd46bf6"),
-    "fixture:bollinger_breakout": (1, "42d438c1c25614d86a3eb639bd0f7966c17e4926ff98f479eee9bcbbdf182cd5"),
-    "fixture:discount_pullback": (33, "c862cb01391d4e3c8254d7ba94a13179d06886b94c0fa1507722881683b8986e"),
-    "fixture:ifvg_reversal": (92, "27317685494d80d5bdeb092d318c0960d4b6ff75c45390de997ec0b5103af903"),
-    "fixture:ob_bounce": (79, "b47ab8ca093f04cec8491597a997188c4954c8de6c1a30a896f0194a7aa1f4e6"),
-    "fixture:orb": (228, "537a8be31cdcd09353432d631de9a8675eb70ca84aa467e495b48dbff18e2602"),
-    "fixture:sma_cross": (66, "f2d7eeb8d53e12fe8543406622d1cb9b021a14ca78986e58afee7aa17bd46bf6"),
+    "catalog:macd_trend": (65, "da47b163f57e00fa10b9b7862e3ad422fca7e8a5d0abfbc10c3868db56e5b515"),
+    "catalog:rsi_reversion": (4, "493b6c0a7b7bb3943150994d6b63cc989d78ba64b993a047a7e5016d57cc6950"),
+    "catalog:sma_cross": (45, "efd6ebbf285e4ff09f89126986a0b896e02715a3bf04670d64a035d7d5a0b1f4"),
+    "fixture:bollinger_breakout": (2, "a071d23ac35e834d2a5b3694093760fb11efa1825e76469cdb84f6caa7eb81ad"),
+    "fixture:discount_pullback": (19, "9ee81fb8862f974d1286a0e13626f4c9647bf45070be10f6087de49e39551079"),
+    "fixture:ifvg_reversal": (70, "a3312c485ff1c8ace511c60257475b29e8f8d103d97f42392a26536b04d0943d"),
+    "fixture:ob_bounce": (58, "f7d0365f68909a59bdd5f8e8a5251c8e9d0a3c587d29ae49fa1cd6a03d2fd3fa"),
+    "fixture:orb": (134, "2ed7aa5998d4f4d1a3a9fac4cce83619d145bdd4aa6e864d88339bbd0b6ad0f1"),
+    "fixture:sma_cross": (45, "efd6ebbf285e4ff09f89126986a0b896e02715a3bf04670d64a035d7d5a0b1f4"),
 }
 
 
@@ -247,10 +536,8 @@ def test_the_frame_covers_every_spec_in_the_golden_table():
 
 
 @pytest.mark.parametrize("name", sorted(GOLDEN))
-def test_every_spec_produces_the_golden_trades(name, cache):
-    bar_cache, start, end = cache
-    strat = _specs()[name]
-    result = Engine(strat, bar_cache, "SPY", start, end).run()
+def test_every_spec_produces_the_golden_trades(name, market):
+    _, result = replay(name, market)
     n, digest = _trade_digest(result.trades)
     want_n, want_digest = GOLDEN[name]
     assert n >= 1, f"{name}: zero trades proves nothing"
