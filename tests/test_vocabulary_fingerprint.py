@@ -27,11 +27,12 @@ canonicalization that is unstable, or simply wrong, for `any`, for `not`, for a
 double negation, for the short side or for an exits group would be invisible to
 a single `all`-shaped spec.
 
-The grammar names each test reads (`GROUP_KEYS`, `validate_spec`,
-`is_condition_rule`) are imported inside the test that uses them rather than at
-module scope. All three arrive with this node, so a module-scope import would
-turn every failing state below into one collection error against the branch
-point, and the failure each test is written to see would never be watched.
+The grammar names read below (`GROUP_KEYS`, `validate_spec`,
+`is_condition_rule`) are imported inside the test or helper that uses them
+rather than at module scope. All three arrive with this node, so a
+module-scope import would turn every failing state below into one collection
+error against the branch point, and the failure each test is written to see
+would never be watched.
 """
 
 import hashlib
@@ -142,6 +143,37 @@ def _condition_taking_terms():
             if any(is_condition_rule(r) for r in t.args.values())}
 
 
+def _condition_terms_used_by(spec) -> set[str]:
+    """Which condition-taking terms `spec`'s RULES call, name field excluded.
+
+    ONE predicate, called by the shape assertion below and by the guard that
+    proves the shape assertion can fail. The guard must CALL this rather than
+    restate it: the two previous versions of that guard each re-implemented
+    the check against a locally built dict, so they agreed with a copy and a
+    simplification of the real predicate reddened nothing. This is the third
+    version, and calling is the whole of what makes it different.
+
+    Only the three rule groups are searched. The spec's own `name` is the
+    substring trap this predicate exists to avoid, since the corpus entry is
+    called "condition-arg", and `risk` and `timeframe` cannot name a term.
+
+    The floor lives HERE, in the shared predicate, rather than in either
+    caller. `any(...)` over an empty set of terms is vacuously False, so an
+    empty vocabulary reads as "no condition in this spec" to a caller and
+    silently satisfies the negative half. Measured: with `is_condition_rule`
+    mutated to `return False`, the guard below PASSED while the shape
+    assertion failed, which is exactly the shape of a test that guards
+    nothing.
+    """
+    terms = _condition_taking_terms()
+    assert terms, (
+        "no condition-taking term exists, so this predicate has nothing to "
+        "look for and would answer 'no condition here' about every spec")
+    rules = json.dumps([spec.get("long"), spec.get("short"),
+                        spec.get("exits", {}).get("exit")])
+    return {name for name in terms if f'"{name}"' in rules}
+
+
 def test_the_condition_arg_shape_actually_carries_a_condition():
     """acceptance item 10 requires 'one spec per grammar shape INCLUDING a
     condition argument'. Editing that entry's leaf to an ordinary one is a
@@ -157,30 +189,34 @@ def test_the_condition_arg_shape_actually_carries_a_condition():
 
     Assert against the LEAF, by asking the vocabulary which terms declare a
     condition-typed arg and requiring one of them to appear in the group.
+    That question is `_condition_terms_used_by`, shared with the guard below
+    so the guard reddens on a change to it.
     """
-    condition_terms = _condition_taking_terms()
-    assert condition_terms, "no condition-taking term exists to build the shape from"
-
-    leaves = json.dumps(SHAPE_CORPUS["condition-arg"]["long"])
-    assert any(f'"{name}"' in leaves for name in condition_terms), (
-        f"the condition-arg corpus entry's long group declares none of "
-        f"{sorted(condition_terms)}, so the fingerprint covers no condition "
-        f"argument and acceptance item 10 is unmet")
+    used = _condition_terms_used_by(SHAPE_CORPUS["condition-arg"])
+    assert used, (
+        f"the condition-arg corpus entry's rules declare none of "
+        f"{sorted(_condition_taking_terms())}, so the fingerprint covers no "
+        f"condition argument and acceptance item 10 is unmet")
 
 
 def test_the_condition_arg_guard_is_not_satisfied_by_the_spec_name():
-    """The guard above, watched failing, since its predecessor could not.
+    """The predicate above, watched refusing, since its two predecessors could
+    not: both re-implemented it here instead of calling it, so neither could
+    see a change to the real one.
 
-    Builds the same entry with an ordinary leaf and requires the check to
-    reject it. Without this, a future simplification back to a substring
-    search reads as equivalent and is not.
+    Takes the corpus entry itself and swaps in an ordinary leaf, so the name
+    supplying the "cond" substring is the corpus's own rather than a copy that
+    could drift from it, and requires `_condition_terms_used_by` to answer
+    empty. Simplify that predicate back to a substring search over the whole
+    spec and this goes red on its own; empty the vocabulary of
+    condition-taking terms and its floor takes this red too.
     """
-    condition_terms = _condition_taking_terms()
-    bad = _spec("condition-arg", long={"all": [_LEAF]})
-    leaves = json.dumps(bad["long"])
-    assert not any(f'"{name}"' in leaves for name in condition_terms)
+    bad = dict(SHAPE_CORPUS["condition-arg"], long={"all": [_LEAF]})
     assert "cond" in json.dumps(bad), (
         "the substring form would have passed this, which is why it is gone")
+    assert not _condition_terms_used_by(bad), (
+        "a spec whose rules call no condition-taking term reads as carrying "
+        "a condition argument, so the assertion above proves nothing")
 
 
 def test_fingerprint_agrees_across_a_spawn_start_pool():
