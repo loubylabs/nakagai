@@ -309,6 +309,13 @@ def verify_term(term: Term, bars: pd.DataFrame) -> TermVerdict:
     pass. Vacuity is judged PER ARGUMENT SET: one mandated set that is NaN at every
     probe makes the term vacuous, because the set proves nothing and the schema
     said it had to be tested.
+
+    Every way out of the work below is a verdict, including the ways that are
+    this module failing rather than the term. Enumerating the schema, calling the
+    term, reading what it returned and probing it are each guarded, because node
+    02 runs 100+ terms in one batch and one traceback would end the batch and
+    leave the other 99 unreported. The verdict's `cause` is what tells a reject
+    that peeked apart from one the gate could not read.
     """
     reason = exemption_reason(term)
     if reason is not None:
