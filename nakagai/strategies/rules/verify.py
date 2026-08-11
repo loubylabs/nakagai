@@ -30,9 +30,17 @@ TermVerdict carrying a status and a reason.
 import itertools
 from dataclasses import dataclass
 
+import numpy as np
 import pandas as pd
 
 from nakagai.strategies.rules.vocabulary import Term, Vocabulary, is_choice_rule
+
+# The cross-repo contract, which is a different and much smaller thing than the
+# module's public surface. Node 02 lives in another repository and reaches this
+# module through the rev-pinned git dependency; these are the names it may hold
+# on to. Everything else here is internal to the gate and free to change.
+__all__ = ["CHECKED", "EXEMPT", "FAILED", "VACUOUS",
+           "TermVerdict", "reference_bars", "verify_vocabulary"]
 
 # The arg rule that marks a condition-taking term. A bare string rather than a
 # tuple, so `is_choice_rule` is False for it. Node 03 promotes this to an
@@ -407,3 +415,50 @@ def verify_vocabulary(vocabulary: Vocabulary,
     reads as coverage.
     """
     return tuple(verify_term(term, bars) for term in vocabulary.all_terms())
+
+
+# The frame the gate is meant to be run on, shipped in the wheel rather than
+# left in tests/, because `[tool.hatch.build.targets.wheel] packages` is
+# ["nakagai"] and node 02 lives in another repository: it gets
+# verify_vocabulary through the rev-pinned git dependency and cannot get the
+# test fixture. Both of this frame's load-bearing properties were discovered by
+# running the gate rather than by reading it, so a hand-rebuilt frame would
+# rediscover them as two silent holes rather than as errors.
+BARS_PER_SESSION = 26
+EXCHANGE_TZ = "America/New_York"
+
+
+def reference_bars(sessions: int = 160) -> pd.DataFrame:
+    """Multi-session RTH-shaped 15m bars: 26 a day, `sessions` weekdays, no weekends.
+
+    160 sessions by default rather than a round 40 because core's widest range
+    rule is rvol's `sessions: (5, 60)`, and a mandated argument set that is NaN
+    at every probe row proves nothing about the term. A vocabulary that adds a
+    wider session-denominated bound has to widen this. Each bar opens at the
+    previous close so bodies take both signs, which keeps order_block and any
+    close-against-open condition from being constant. Seeded, so the gate's own
+    result is reproducible.
+
+    ANCHORED IN EXCHANGE-LOCAL TIME, not at a fixed UTC hour. A frame pinned to
+    14:30 UTC is the 09:30 bell only until daylight saving moves, and 160
+    sessions from January crosses that boundary in March. Measured: the
+    UTC-pinned version leaves opening_range_high and opening_range_low NaN at
+    every probe row, because the bars no longer start at the open, and the gate
+    reports VACUOUS for terms that are perfectly causal.
+    """
+    rng = np.random.default_rng(19)
+    days = pd.bdate_range("2026-01-05", periods=sessions, tz=EXCHANGE_TZ)
+    stamps = [d + pd.Timedelta(hours=9, minutes=30) + i * pd.Timedelta(minutes=15)
+              for d in days for i in range(BARS_PER_SESSION)]
+    idx = pd.DatetimeIndex(stamps).tz_convert("UTC")
+    idx.name = "ts"
+    n = len(idx)
+    close = 100 + np.cumsum(rng.normal(0, 0.3, n))
+    open_ = np.concatenate([[close[0] - 0.05], close[:-1]])
+    return pd.DataFrame(
+        {"open": open_,
+         "high": np.maximum(open_, close) + np.abs(rng.normal(0, 0.15, n)),
+         "low": np.minimum(open_, close) - np.abs(rng.normal(0, 0.15, n)),
+         "close": close,
+         "volume": 1000.0 + rng.integers(0, 500, n)},
+        index=idx)

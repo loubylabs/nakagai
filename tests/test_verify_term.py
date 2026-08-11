@@ -1,7 +1,6 @@
 # tests/test_verify_term.py
 """The per-term causality gate, and its honesty about what it cannot test."""
 
-import numpy as np
 import pandas as pd
 import pytest
 
@@ -10,7 +9,7 @@ from nakagai.strategies.rules.vocabulary import Term, core_vocabulary
 from nakagai.strategies.rules.verify import (
     CHECKED, CONDITION_ARG, EXEMPT, FAILED, MAX_ARG_SETS, PROBE_COUNT,
     TermVerdict, VACUOUS, arg_sets, evaluate_term, exemption_reason,
-    field_mismatch, probe_rows, verify_term, verify_vocabulary,
+    field_mismatch, probe_rows, reference_bars, verify_term, verify_vocabulary,
 )
 
 
@@ -46,6 +45,9 @@ def test_exactly_these_core_terms_are_exempt():
     assert exempt == {"fvg_nearest", "order_block", "bars_since"}
 
 
+# Expectations of the shipped frame, held here as literals rather than imported
+# from verify.py, so these tests read its properties off the frame instead of
+# agreeing with it by construction.
 SESSIONS = 160
 BARS_PER_SESSION = 26
 EXCHANGE_TZ = "America/New_York"
@@ -53,37 +55,27 @@ EXCHANGE_TZ = "America/New_York"
 
 @pytest.fixture(scope="module")
 def bars():
-    """Multi-session RTH-shaped 15m bars: 26 a day, 160 weekdays, no weekends.
+    """The reference frame the gate ships, which is what node 02 will run it on.
 
-    160 sessions rather than a round 40 because the vocabulary's widest range rule
-    is rvol's `sessions: (5, 60)`, and a mandated argument set that is NaN at every
-    probe row proves nothing about the term. Each bar opens at the previous close
-    so bodies take both signs, which keeps order_block and any close-against-open
-    condition from being constant. Seeded, so the gate's own result is reproducible.
-
-    ANCHORED IN EXCHANGE-LOCAL TIME, not at a fixed UTC hour. A frame pinned to
-    14:30 UTC is the 09:30 bell only until daylight saving moves, and 160 sessions
-    from January crosses that boundary in March. Measured: the UTC-pinned version
-    leaves opening_range_high and opening_range_low NaN at every probe row, because
-    the bars no longer start at the open; this version checks all 34 non-exempt
-    terms.
+    The body lives in verify.py rather than here because the wheel ships
+    `nakagai` and not `tests/`, and node 02 is a platform node consuming core
+    through the rev-pinned git dependency: it gets verify_vocabulary and cannot
+    get this fixture. Both load-bearing properties of the frame were discovered
+    by running the gate rather than by reading it, so a hand-rebuilt frame over
+    there would rediscover them as two silent holes. The tests below assert
+    those properties against the shipped function.
     """
-    rng = np.random.default_rng(19)
-    days = pd.bdate_range("2026-01-05", periods=SESSIONS, tz=EXCHANGE_TZ)
-    stamps = [d + pd.Timedelta(hours=9, minutes=30) + i * pd.Timedelta(minutes=15)
-              for d in days for i in range(BARS_PER_SESSION)]
-    idx = pd.DatetimeIndex(stamps).tz_convert("UTC")
-    idx.name = "ts"
-    n = len(idx)
-    close = 100 + np.cumsum(rng.normal(0, 0.3, n))
-    open_ = np.concatenate([[close[0] - 0.05], close[:-1]])
-    return pd.DataFrame(
-        {"open": open_,
-         "high": np.maximum(open_, close) + np.abs(rng.normal(0, 0.15, n)),
-         "low": np.minimum(open_, close) - np.abs(rng.normal(0, 0.15, n)),
-         "close": close,
-         "volume": 1000.0 + rng.integers(0, 500, n)},
-        index=idx)
+    return reference_bars(SESSIONS)
+
+
+def test_the_shipped_default_is_the_frame_these_tests_assert_against(bars):
+    """Node 02 calls reference_bars() with no argument, so the default is the contract.
+
+    Every test in this file passes SESSIONS explicitly. A default that drifted
+    smaller would leave them all green while node 02 got a frame too short to
+    clear rvol's 60-session bound and read VACUOUS for a causal term.
+    """
+    assert reference_bars().equals(bars)
 
 
 def test_the_fixture_is_session_shaped_with_two_sided_bodies(bars):
