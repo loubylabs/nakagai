@@ -8,7 +8,8 @@ from nakagai.strategies.rules import (
     canonical_spec, describe_spec, spec_hash, validate_spec,
 )
 from nakagai.strategies.rules import spec as rules_spec
-from nakagai.strategies.rules.spec import TIMEFRAMES, validate_condition_group
+from nakagai.strategies.rules.spec import (
+    TIMEFRAMES, _expr_text, validate_condition_group)
 
 ORB = {
     "version": 2, "name": "orb-volume", "timeframe": "15m",
@@ -429,3 +430,76 @@ def test_spec_module_has_zero_bars_since_special_cases():
     left anywhere, validator or describe."""
     src = Path(rules_spec.__file__).read_text()
     assert '== "bars_since"' not in src
+
+
+# A second condition-taking term, count_where, registered only by the
+# count_where_vocab fixture and named nowhere in nakagai/. Its condition arg is
+# called "when", so a validator keyed on the primitive's name or on the literal
+# arg key "cond" reaches none of it. Together these are the acceptance claim
+# N3-D5 makes: all four guards, and the readable rendering, come to a term the
+# validator has never heard of, with no new validator code. The evaluation half
+# lives in test_rules_vocabulary.py, beside the injection it proves.
+
+
+def _count_where_spec(node):
+    return {"version": 2, "name": "x", "timeframe": "15m",
+            "long": {"all": [{"lhs": node, "op": ">", "rhs": 3}]},
+            "risk": ORB["risk"]}
+
+
+def test_a_second_condition_taking_term_validates_with_no_new_validator_code(
+        count_where_vocab):
+    """The positive control the four refusals below need: a well-formed use of
+    this term is ACCEPTED, so each guard is refusing its own case rather than
+    the validator refusing count_where on sight."""
+    node = {"prim": "count_where",
+            "when": {"lhs": {"src": "close"}, "op": ">", "rhs": {"src": "open"}}}
+    assert validate_spec(_count_where_spec(node), count_where_vocab) == []
+
+
+def test_a_second_condition_taking_term_inherits_guard_1_shape(count_where_vocab):
+    """A condition-typed arg may declare no default (N3-D13), so its absence is
+    an error rather than a fallback."""
+    errs = validate_spec(_count_where_spec({"prim": "count_where"}),
+                         count_where_vocab)
+    assert any("count_where needs when" in e for e in errs), errs
+
+
+def test_a_second_condition_taking_term_inherits_guard_2_no_cross_ops(
+        count_where_vocab):
+    node = {"prim": "count_where",
+            "when": {"lhs": {"src": "close"}, "op": "crosses_above",
+                     "rhs": {"src": "open"}}}
+    errs = validate_spec(_count_where_spec(node), count_where_vocab)
+    assert any("count_where.when conditions use comparison ops only" in e
+               for e in errs), errs
+
+
+def test_a_second_condition_taking_term_inherits_guard_3_no_end_anchored(
+        count_where_vocab):
+    node = {"prim": "count_where",
+            "when": {"lhs": {"src": "close"}, "op": ">", "rhs": FVG}}
+    errs = validate_spec(_count_where_spec(node), count_where_vocab)
+    assert any("fvg_nearest is anchored to the end of the frame and cannot "
+               "sit inside count_where.when" in e for e in errs), errs
+
+
+def test_a_second_condition_taking_term_inherits_guard_4_no_session_scoped_with_tf(
+        count_where_vocab):
+    node = {"prim": "count_where", "tf": "1h",
+            "when": {"lhs": {"prim": "day_of_week"}, "op": "<", "rhs": 1}}
+    errs = validate_spec(_count_where_spec(node), count_where_vocab)
+    assert any("day_of_week is session-scoped and cannot sit inside "
+               "count_where.when with tf" in e for e in errs), errs
+
+
+def test_describe_renders_a_second_condition_taking_terms_condition_readably(
+        count_where_vocab):
+    """Describe is what a user approves before saving or backtesting an
+    imported or NL-built strategy. The generic args path stringifies a value
+    with f"{v}", which on a condition dict prints its repr; the condition args
+    have to reach _condition_text by type instead."""
+    node = {"prim": "count_where",
+            "when": {"lhs": {"src": "close"}, "op": ">", "rhs": {"src": "open"}}}
+    assert (_expr_text(node, count_where_vocab)
+            == "count_where(5, close is above open)")

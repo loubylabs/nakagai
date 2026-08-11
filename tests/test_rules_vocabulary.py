@@ -171,32 +171,12 @@ def test_a_condition_typed_arg_is_refused_outside_primitive_kind():
     Term("ok_kind", "primitive", {"cond": CONDITION_ARG}, {}, lambda *a: None)
 
 
-def _count_where_vocab():
-    """A second condition-taking term, registered only here, whose condition
-    arg is named something other than "cond".
-
-    The two sites this exercises were gated on a name: the evaluator injection
-    on the PRIMITIVE's name, canon on the literal ARG key "cond". A term whose
-    condition arg is called "when" is what tells a reader keyed on the arg's
-    declared type from one keyed on either name.
-    """
-
-    def count_where(ctx, bars, when, n=5, eval_fn=None):
-        if eval_fn is None:
-            raise ValueError("count_where needs the evaluator's eval_fn")
-        return (eval_fn(when, bars).astype(float)
-                .rolling(int(n), min_periods=1).sum())
-
-    return core_vocabulary().with_terms(
-        Term("count_where", "primitive", {"when": CONDITION_ARG, "n": (1, 50)},
-             {"n": 5}, count_where))
-
-
-def test_a_condition_typed_arg_gets_the_evaluator_injected_by_type(make_bars):
+def test_a_condition_typed_arg_gets_the_evaluator_injected_by_type(
+        make_bars, count_where_vocab):
     """N3-D9. The injection is keyed on the arg's declared type, so a term
     registered outside core evaluates with no new evaluator code. Keyed on the
     name "bars_since" instead, this validates clean and then raises."""
-    vocab = _count_where_vocab()
+    vocab = count_where_vocab
     bars = make_bars(n=30)  # close is above open on every bar
     node = {"prim": "count_where",
             "when": {"lhs": {"src": "close"}, "op": ">", "rhs": {"src": "open"}}}
@@ -205,14 +185,15 @@ def test_a_condition_typed_arg_gets_the_evaluator_injected_by_type(make_bars):
     assert out.iloc[-1] == 5.0
 
 
-def test_canon_rekeys_a_second_condition_taking_terms_condition_arg():
+def test_canon_rekeys_a_second_condition_taking_terms_condition_arg(
+        count_where_vocab):
     """Case 4, the subtle one. Keyed on the literal key "cond", a condition
     arg named anything else falls into the generic args merge, where _num
     passes a dict straight through: nothing INSIDE the condition is
     canonicalized, so two nodes whose conditions differ only in an omitted
     default or an int-versus-float literal canonicalize apart and hash apart.
     """
-    vocab = _count_where_vocab()
+    vocab = count_where_vocab
     implicit = {"prim": "count_where",
                 "when": {"lhs": {"ind": "sma", "n": 20}, "op": ">", "rhs": 1}}
     explicit = {"prim": "count_where", "n": 5,
