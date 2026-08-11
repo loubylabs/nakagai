@@ -1,10 +1,30 @@
-"""Point-in-time MarketContext assembly. The ONLY door strategies get to data."""
+"""Point-in-time MarketContext assembly. The ONLY door strategies get to data.
+
+Two doors, and they answer to different clocks. `build_context` serves the
+live scanner and the screener, which have no schedule and reconstruct
+visibility from the bar labels themselves through `closed_before`.
+`build_scheduled_context` serves the portfolio replay, which has an embedded
+`ReplaySchedule` and therefore asks it: a bar is visible when the schedule
+says it became available, never because label arithmetic put it in the past.
+"""
 
 import numpy as np
 import pandas as pd
 
 from nakagai.data.cache import BarCache
 from nakagai.data.schema import DEFAULT_TIMEFRAMES, EXCHANGE_TZ, TimeframeSet
+from nakagai.engine.bars import (
+    BASE_TIMEFRAME,
+    ReplayDependencies,
+    _ValidatedPortfolioBars,
+)
+from nakagai.engine.portfolio_types import (
+    ReplayInputError,
+    _require_instance,
+    _require_symbol,
+    _require_timestamp,
+)
+from nakagai.engine.schedule import ValidatedSchedule
 from nakagai.strategies.base import MarketContext
 from nakagai.strategies.rules.vocabulary import Vocabulary, resolve_vocabulary
 
@@ -121,5 +141,67 @@ def build_context(cache: BarCache, symbol: str, now: pd.Timestamp,
         for tf in tfs.all:
             n = len(bars[tf])
             fe.set_span(tf, max(n - 1, 0), n)
+    return MarketContext(symbol=symbol, now=now, tfs=tfs, bars=bars, fe=fe,
+                         cursor={tf: len(bars[tf]) - 1 for tf in tfs.all})
+
+
+def _scheduled_timeframes(dependencies: ReplayDependencies) -> TimeframeSet:
+    """The declared timeframes as a `TimeframeSet`, for the grammar's use only.
+
+    `FrameEval` and `ctx.driving_bars` both need one. Nothing in the scheduled
+    path reads its deltas or its session-aligned set to decide visibility;
+    that answer comes from the schedule and only from the schedule.
+    """
+    return TimeframeSet(
+        driving=BASE_TIMEFRAME,
+        higher=tuple(tf for tf in dependencies.timeframes if tf != BASE_TIMEFRAME),
+        deltas=DEFAULT_TIMEFRAMES.deltas,
+        session_aligned=DEFAULT_TIMEFRAMES.session_aligned,
+    )
+
+
+def build_scheduled_context(prepared: _ValidatedPortfolioBars, symbol: str,
+                            now: pd.Timestamp, schedule: ValidatedSchedule,
+                            dependencies: ReplayDependencies) -> MarketContext:
+    """One symbol's causal context at the scheduled base close `now`.
+
+    Each frame is cut to the rows the schedule has released: base bars that
+    have fully closed, and context bars whose `available_at` has arrived. The
+    cut is a prefix because a prepared frame's labels ARE the schedule's
+    labels, in the schedule's order.
+
+    The prefixes are views rather than copies, which is safe and deliberate.
+    Under copy-on-write, writing into one of them copies first, so a strategy
+    that mutates `ctx.bars[tf]` changes its own view and never the engine's
+    frame. Copying per bar per timeframe would cost a replay dearly for a
+    guarantee pandas already gives.
+    """
+    from nakagai.strategies.rules.frame_eval import FrameEval
+    _require_instance(prepared, "prepared", _ValidatedPortfolioBars)
+    _require_instance(schedule, "schedule", ValidatedSchedule)
+    _require_instance(dependencies, "dependencies", ReplayDependencies)
+    symbol = _require_symbol(symbol, "symbol")
+    now = _require_timestamp(now, "now")
+    closed = schedule.closed_base_count(now)
+    if not closed or schedule.base_intervals[closed - 1].close_ts != now:
+        raise ReplayInputError(
+            "invalid_context_time",
+            "a context is built at a scheduled base interval close",
+            {"field": "now", "now": now.isoformat()},
+        )
+    bars = {
+        tf: prepared.frame(symbol, tf).iloc[:(
+            closed if tf == BASE_TIMEFRAME
+            else schedule.available_context_count(tf, now))]
+        for tf in dependencies.timeframes
+    }
+    tfs = _scheduled_timeframes(dependencies)
+    fe = FrameEval(bars, tfs, vocabulary=resolve_vocabulary(None))
+    # The span is not optional, for the same reason it is not optional in
+    # build_context: without one, the end-anchored primitives walk the whole
+    # frame to produce values no caller can read.
+    for tf in tfs.all:
+        rows = len(bars[tf])
+        fe.set_span(tf, max(rows - 1, 0), rows)
     return MarketContext(symbol=symbol, now=now, tfs=tfs, bars=bars, fe=fe,
                          cursor={tf: len(bars[tf]) - 1 for tf in tfs.all})

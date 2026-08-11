@@ -16,6 +16,7 @@ from datetime import date
 
 import pandas as pd
 
+from nakagai.engine.bars import PortfolioBars, ReplayDependencies
 from nakagai.engine.canonical import (
     definition_digest,
     expected_candidate_id,
@@ -50,6 +51,7 @@ from nakagai.engine.portfolio_types import (
     SlippageSpec,
     TradeStats,
 )
+from nakagai.engine.schedule import ValidatedSchedule, validate_schedule
 
 BATCH_ID = "0198b1c2-3d4e-7f80-8123-456789abcdef"
 REGISTRY_DIGEST = "1f" * 32
@@ -169,14 +171,32 @@ def base_context_bars() -> tuple[ScheduledContextBar, ...]:
     )
 
 
-def base_schedule() -> ReplaySchedule:
-    """A schedule whose identity carries its own recomputed digest."""
+def schedule_with(
+    intervals: tuple[ScheduledBaseInterval, ...] | None = None,
+    context_bars: tuple[ScheduledContextBar, ...] | None = None,
+) -> ReplaySchedule:
+    """A schedule whose identity carries its own recomputed digest.
+
+    Every refusal fixture goes through here rather than editing a built
+    schedule in place. Editing in place would leave the old digest on the
+    identity, so `validate_schedule` would refuse for the digest and the test
+    would pass without ever reaching the rule it names.
+    """
     draft = ReplaySchedule(
         identity=base_identity(),
-        base_intervals=base_intervals(),
-        context_bars=base_context_bars(),
+        base_intervals=base_intervals() if intervals is None else intervals,
+        context_bars=base_context_bars() if context_bars is None else context_bars,
     )
     return dataclasses.replace(draft, identity=base_identity(schedule_digest(draft)))
+
+
+def base_schedule() -> ReplaySchedule:
+    return schedule_with()
+
+
+def base_validated_schedule() -> ValidatedSchedule:
+    """The base schedule, already through `validate_schedule`."""
+    return validate_schedule(base_request(), base_schedule())
 
 
 def base_plays() -> tuple[PlayRequest, ...]:
@@ -411,3 +431,227 @@ def base_result(request: PortfolioReplayRequest | None = None) -> PortfolioRepla
         metrics=base_metrics(),
     )
     return dataclasses.replace(draft, result_digest=result_digest(draft))
+
+
+# ------------------------------------------------ daylight saving schedules
+
+# Two more real XNYS pairs, each straddling one 2026 transition, because a
+# boundary rule that reads a UTC hour is correct on exactly one side of a
+# transition and silently wrong on the other. Every timestamp below is a
+# literal: a fixture that computed these from the same arithmetic the
+# validator uses could not fail when that arithmetic is wrong.
+#
+# 2026-03-08 moves New York from EST to EDT, so the Friday before opens at
+# 14:30Z and the Monday after opens at 13:30Z. 2026-11-01 moves it back, so
+# that Friday opens at 13:30Z and that Monday at 14:30Z. The same 12:00
+# Eastern four-hour bucket is therefore labeled 17:00Z under EST and 16:00Z
+# under EDT, and a daily bar labeled at Eastern midnight moves the same way.
+SPRING_SESSION_ONE = date(2026, 3, 6)
+SPRING_SESSION_TWO = date(2026, 3, 9)
+FALL_SESSION_ONE = date(2026, 10, 30)
+FALL_SESSION_TWO = date(2026, 11, 2)
+FULL_SESSION_INTERVALS = 26
+
+
+def session_intervals(
+    session: date, first_open: pd.Timestamp, count: int,
+) -> tuple[ScheduledBaseInterval, ...]:
+    """One session's contiguous 15-minute regular-session grid."""
+    return tuple(
+        ScheduledBaseInterval(
+            session_date=session,
+            interval_ordinal=ordinal,
+            open_ts=first_open + pd.Timedelta(minutes=15 * ordinal),
+            close_ts=first_open + pd.Timedelta(minutes=15 * (ordinal + 1)),
+        )
+        for ordinal in range(count)
+    )
+
+
+def _dst_schedule(
+    first: date, first_open: str, second: date, second_open: str,
+    hour_labels: tuple[str, str], four_hour: tuple[tuple[str, str], ...],
+    daily_label: str, daily_period: tuple[str, str],
+    daily_available: str, daily_fresh: str,
+) -> ReplaySchedule:
+    intervals = (
+        session_intervals(first, ts(first_open), FULL_SESSION_INTERVALS)
+        + session_intervals(second, ts(second_open), FULL_SESSION_INTERVALS)
+    )
+    context = (
+        ScheduledContextBar(
+            timeframe="1h", session_date=first, label_ts=ts(hour_labels[0]),
+            period_start=ts(hour_labels[0]),
+            period_end=ts(hour_labels[0]) + pd.Timedelta(hours=1),
+            available_at=ts(hour_labels[0]) + pd.Timedelta(hours=1),
+            fresh_context_at=ts(hour_labels[0]) + pd.Timedelta(hours=1),
+            source="fetched_left_edge",
+        ),
+        ScheduledContextBar(
+            timeframe="1h", session_date=second, label_ts=ts(hour_labels[1]),
+            period_start=ts(hour_labels[1]),
+            period_end=ts(hour_labels[1]) + pd.Timedelta(hours=1),
+            available_at=ts(hour_labels[1]) + pd.Timedelta(hours=1),
+            fresh_context_at=ts(hour_labels[1]) + pd.Timedelta(hours=1),
+            source="fetched_left_edge",
+        ),
+    ) + tuple(
+        ScheduledContextBar(
+            timeframe="4h", session_date=session, label_ts=ts(label),
+            period_start=ts(label), period_end=ts(end),
+            available_at=ts(end), fresh_context_at=ts(end),
+            source="derived_1h_et_midnight",
+        )
+        for session, (label, end) in zip((first, second), four_hour, strict=True)
+    ) + (
+        ScheduledContextBar(
+            timeframe="1d", session_date=first, label_ts=ts(daily_label),
+            period_start=ts(daily_period[0]), period_end=ts(daily_period[1]),
+            available_at=ts(daily_available), fresh_context_at=ts(daily_fresh),
+            source="session_aligned",
+        ),
+    )
+    draft = ReplaySchedule(
+        identity=base_identity(), base_intervals=intervals, context_bars=context,
+    )
+    return dataclasses.replace(draft, identity=base_identity(schedule_digest(draft)))
+
+
+def spring_schedule() -> ReplaySchedule:
+    """The 2026-03-06 EST session and the 2026-03-09 EDT session."""
+    return _dst_schedule(
+        SPRING_SESSION_ONE, "2026-03-06T14:30:00Z",
+        SPRING_SESSION_TWO, "2026-03-09T13:30:00Z",
+        hour_labels=("2026-03-06T14:00:00Z", "2026-03-09T13:00:00Z"),
+        four_hour=(
+            ("2026-03-06T17:00:00Z", "2026-03-06T21:00:00Z"),
+            ("2026-03-09T16:00:00Z", "2026-03-09T20:00:00Z"),
+        ),
+        daily_label="2026-03-06T05:00:00Z",
+        daily_period=("2026-03-06T14:30:00Z", "2026-03-06T21:00:00Z"),
+        daily_available="2026-03-09T13:30:00Z",
+        daily_fresh="2026-03-09T13:45:00Z",
+    )
+
+
+def fall_schedule() -> ReplaySchedule:
+    """The 2026-10-30 EDT session and the 2026-11-02 EST session."""
+    return _dst_schedule(
+        FALL_SESSION_ONE, "2026-10-30T13:30:00Z",
+        FALL_SESSION_TWO, "2026-11-02T14:30:00Z",
+        hour_labels=("2026-10-30T13:00:00Z", "2026-11-02T14:00:00Z"),
+        four_hour=(
+            ("2026-10-30T16:00:00Z", "2026-10-30T20:00:00Z"),
+            ("2026-11-02T17:00:00Z", "2026-11-02T21:00:00Z"),
+        ),
+        daily_label="2026-10-30T04:00:00Z",
+        daily_period=("2026-10-30T13:30:00Z", "2026-10-30T20:00:00Z"),
+        daily_available="2026-11-02T14:30:00Z",
+        daily_fresh="2026-11-02T14:45:00Z",
+    )
+
+
+def spring_request() -> PortfolioReplayRequest:
+    """Warm up on the EST session, trade the EDT session that follows."""
+    return base_request(
+        window=ReplayWindow(
+            train_start=ts("2026-03-06T14:30:00Z"),
+            train_end=ts("2026-03-09T13:30:00Z"),
+            test_start=ts("2026-03-09T13:30:00Z"),
+            test_end=ts("2026-03-09T20:00:00Z"),
+        ),
+        schedule_identity=spring_schedule().identity,
+        ic_tail_end=ts("2026-03-09T20:00:00Z"),
+    )
+
+
+def fall_request() -> PortfolioReplayRequest:
+    """Warm up on the EDT session, trade the EST session that follows."""
+    return base_request(
+        window=ReplayWindow(
+            train_start=ts("2026-10-30T13:30:00Z"),
+            train_end=ts("2026-11-02T14:30:00Z"),
+            test_start=ts("2026-11-02T14:30:00Z"),
+            test_end=ts("2026-11-02T21:00:00Z"),
+        ),
+        schedule_identity=fall_schedule().identity,
+        ic_tail_end=ts("2026-11-02T21:00:00Z"),
+    )
+
+
+# ------------------------------------------------------------- bar fixtures
+
+
+def base_dependencies() -> ReplayDependencies:
+    """Every supported timeframe and no external symbol."""
+    return ReplayDependencies(
+        timeframes=("15m", "1h", "4h", "1d"), external_symbols=(),
+    )
+
+
+def bar_frame(labels, base: float = 100.0) -> pd.DataFrame:
+    """A valid OHLCV frame on exactly `labels`, gently rising from `base`.
+
+    Geometry is deliberately generous (the high clears every other price by
+    0.15 and the low undercuts every other price by the same), so a test that
+    breaks the geometry has to break it on purpose.
+    """
+    index = pd.DatetimeIndex(list(labels), tz="UTC", name="ts")
+    opens = [base + 0.1 * step for step in range(len(index))]
+    return pd.DataFrame(
+        {
+            "open": opens,
+            "high": [price + 0.2 for price in opens],
+            "low": [price - 0.2 for price in opens],
+            "close": [price + 0.05 for price in opens],
+            "volume": [1_000.0 + step for step in range(len(index))],
+        },
+        index=index,
+        dtype="float64",
+    )
+
+
+def scheduled_labels(schedule: ReplaySchedule, timeframe: str,
+                     boundary: pd.Timestamp) -> tuple[pd.Timestamp, ...]:
+    """Every scheduled label of `timeframe` that starts before `boundary`."""
+    if timeframe == "15m":
+        return tuple(row.open_ts for row in schedule.base_intervals
+                     if row.open_ts < boundary)
+    return tuple(row.label_ts for row in schedule.context_bars
+                 if row.timeframe == timeframe and row.label_ts < boundary)
+
+
+def frames_for(request: PortfolioReplayRequest, schedule: ReplaySchedule,
+               dependencies: ReplayDependencies) -> dict:
+    """One valid frame for every pair the request and dependencies declare."""
+    built = {}
+    for symbol in request.symbols:
+        for timeframe in dependencies.timeframes:
+            built[(symbol, timeframe)] = bar_frame(
+                scheduled_labels(schedule, timeframe, request.ic_tail_end),
+            )
+    for symbol in dependencies.external_symbols:
+        for timeframe in dependencies.timeframes:
+            built.setdefault((symbol, timeframe), bar_frame(
+                scheduled_labels(schedule, timeframe, request.window.test_end),
+            ))
+    benchmark = request.benchmark.symbol
+    if benchmark is not None:
+        built.setdefault((benchmark, "15m"), bar_frame(
+            scheduled_labels(schedule, "15m", request.window.test_end),
+        ))
+    return built
+
+
+def base_frames() -> dict:
+    return frames_for(base_request(), base_schedule(), base_dependencies())
+
+
+def base_bars() -> PortfolioBars:
+    return PortfolioBars(base_frames())
+
+
+def without_pair(frames: dict, symbol: str, timeframe: str) -> dict:
+    kept = dict(frames)
+    del kept[(symbol, timeframe)]
+    return kept
