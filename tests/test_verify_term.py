@@ -310,8 +310,19 @@ def test_arg_sets_refuses_a_list_of_choices_rather_than_testing_two_of_three(bar
 
 
 def test_no_core_term_exceeds_the_argument_set_cap():
-    worst = max(core_vocabulary().all_terms(), key=lambda t: len(arg_sets(t)))
-    assert len(arg_sets(worst)) <= MAX_ARG_SETS, worst.name
+    """Headroom, asserted explicitly, because arg_sets polices the cap itself.
+
+    The previous form asked for the worst term by len(arg_sets(t)), which calls
+    arg_sets on every term, and arg_sets raises past the cap. So the assertion
+    after it could only ever be reached when it was already true. This one goes
+    red on its own as core grows: a term landing exactly on the cap enumerates
+    without raising and fails here.
+    """
+    widths = {t.name: len(arg_sets(t)) for t in core_vocabulary().all_terms()}
+    worst = max(widths, key=widths.get)
+    assert widths[worst] < MAX_ARG_SETS, (
+        f"{worst} generates {widths[worst]} argument sets against a cap of "
+        f"{MAX_ARG_SETS}; widen the cap deliberately or narrow the schema")
 
 
 def test_a_term_over_the_cap_is_refused_loudly_not_sampled():
@@ -642,11 +653,6 @@ def test_an_exempt_verdict_names_the_term_and_gives_a_reason(bars):
     verdict = verify_term(core_vocabulary().primitives["bars_since"], bars)
     assert verdict.name == "bars_since"
     assert "condition" in verdict.reason and "evaluator" in verdict.reason
-
-
-def test_a_condition_taking_term_is_exempt_rather_than_raising(bars):
-    """bars_since cannot be called without eval_fn, so the gate refuses it early."""
-    assert verify_term(core_vocabulary().primitives["bars_since"], bars).status == EXEMPT
 
 
 # The exempt set is declared, not counted. A term going silently exempt is how a

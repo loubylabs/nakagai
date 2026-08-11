@@ -112,6 +112,16 @@ def field_mismatch(term: Term, out) -> str | None:
     which columns actually get evaluated. A term declaring three fields while
     returning four leaves the fourth unevaluated and unmentioned, which is what a
     generated signature gets wrong and what a schema-only reading cannot see.
+
+    THE HOLE THIS LEAVES OPEN, named rather than left to be rediscovered: a term
+    that declares `field` choices and returns something other than a DataFrame
+    is not checked here at all. The gate then verifies it once per declared
+    field against one and the same computation and reports CHECKED with
+    arg_sets_checked equal to the number of fields, a count that overstates what
+    actually varied. Today that is exactly the two end-anchored primitives,
+    which select their field inside the function and return a float, and both
+    are exempt anyway. Closing it would change what happens to them, which the
+    exemption tests pin, so it is a separate decision and not this node's.
     """
     if not isinstance(out, pd.DataFrame):
         return None
@@ -314,7 +324,7 @@ def verify_term(term: Term, bars: pd.DataFrame) -> TermVerdict:
     # over one wide schema, instead of reporting one refused term among many.
     try:
         every_arg_set = arg_sets(term)
-    except Exception as exc:                           # noqa: BLE001
+    except Exception as exc:
         return TermVerdict(term.name, FAILED,
                            f"cannot enumerate this term's arguments: {exc}",
                            cause="unenumerable")
@@ -336,7 +346,7 @@ def verify_term(term: Term, bars: pd.DataFrame) -> TermVerdict:
     for args in every_arg_set:
         try:
             raw = _raw_call(term, bars, args)
-        except Exception as exc:                       # noqa: BLE001
+        except Exception as exc:
             return TermVerdict(term.name, FAILED,
                                f"args {args}: whole-frame call raised {exc}",
                                checked, "uncallable")
