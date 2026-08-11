@@ -15,12 +15,19 @@ module covers terms that do not appear in any list, which that test cannot.
 
 WHAT THIS CANNOT TEST, and why it says so out loud rather than passing:
 
-- `end_anchored` terms. `primitives.end_anchored_series` computes row i as
-  `term.fn(bars[:i+1])`, so the whole-frame path IS the per-prefix loop and
-  comparing them compares a value to itself. There is no whole-frame broadcast
-  to compare against, because the function returns a scalar for a frame.
+- `end_anchored` terms. `term.fn` returns a SCALAR for a frame, not a series, so
+  there is no whole-frame value at row i to compare a prefix against. What the
+  gate would compare is that one scalar, read off the whole frame, against the
+  scalar the same function returns for each prefix, and those are two different
+  numbers. Measured with the exemption neutralized: `fvg_nearest` comes back
+  FAILED, "whole-frame 88.44637561140192 != prefix 93.37990812403403", and the
+  cause reads "lookahead". So the hazard is a FALSE FAILURE on an honest term,
+  not a comparison of a value to itself that could never fail.
+  `primitives.end_anchored_series` is what the evaluator really runs for these,
+  computing row i as `term.fn(bars[:i+1])`, which is causal by construction.
 - Terms taking a condition, today only `bars_since`, which needs the evaluator
-  handed back to it and cannot be called without one.
+  handed back to it and cannot be called without one. This exemption is
+  temporary and node 03 deletes it, for the reason recorded at CONDITION_ARG.
 
 A boolean return would make those two indistinguishable from a genuine pass,
 which is the one failure this gate cannot afford, so every answer is a
@@ -43,8 +50,21 @@ __all__ = ["CHECKED", "EXEMPT", "FAILED", "VACUOUS",
            "TermVerdict", "reference_bars", "verify_vocabulary"]
 
 # The arg rule that marks a condition-taking term. A bare string rather than a
-# tuple, so `is_choice_rule` is False for it. Node 03 promotes this to an
-# official arg type; keying on the string means this module needs no edit then.
+# tuple, so `is_choice_rule` is False for it.
+#
+# THIS EXEMPTION IS TEMPORARY, AND NODE 03 DELETES IT. A condition-taking term
+# is exempt only because there is no evaluator here to inject, so the term
+# cannot be called at all; it is not exempt because it is uncheckable in
+# principle. Node 03 supplies a synthetic row-local causal mask, which makes the
+# call possible, and removes the exemption rather than surviving it.
+#
+# That deletion is load-bearing, not tidying. Node 03 makes a platform-registered
+# condition-taking term possible with no core PR, so an exemption left standing
+# would see such a term registered, validated, evaluated and reported EXEMPT,
+# which is to say never causality checked, in direct breach of hard rule 1: no
+# term enters the vocabulary without passing verify_term. Read the exemption as
+# true at node 01 and false from node 03 on, and leave the two end_anchored ones
+# as the only survivors.
 CONDITION_ARG = "condition"
 
 # A term whose schema generates more than this is refused rather than sampled.
@@ -96,13 +116,17 @@ class TermVerdict:
 def exemption_reason(term: Term) -> str | None:
     """Why this term cannot be checked by whole-frame-against-prefix, or None."""
     if term.end_anchored:
-        return ("end_anchored: the whole-frame path is already the per-prefix "
-                "loop (primitives.end_anchored_series), so this check would "
-                "compare a value to itself")
+        return ("end_anchored: term.fn returns a scalar for a frame, not a "
+                "series, so there is no whole-frame value at row i to compare a "
+                "prefix against and the comparison would fail an honest term; "
+                "the evaluator runs these through "
+                "primitives.end_anchored_series, which is causal by "
+                "construction")
     for name, rule in term.args.items():
         if rule == CONDITION_ARG:
             return (f"takes a condition in {name!r}, which needs an evaluator "
-                    f"injected before the term can be called at all")
+                    f"injected before the term can be called at all; exempt "
+                    f"only until one exists, and node 03 deletes this exemption")
     return None
 
 
