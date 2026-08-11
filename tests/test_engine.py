@@ -170,3 +170,33 @@ def test_a_gap_past_the_stop_before_the_fill_takes_no_position(tmp_path):
     res = run(cache, sig, rows)
     assert res.trades == []
     assert res.rejected_unsettled == 0   # nothing was proposed to the ledger
+
+
+def test_the_entry_bar_closing_below_the_stop_books_a_loss_not_an_abort(tmp_path):
+    """The fill is at bar1's open and exits are not tested until bar2, so
+    bar1's close is the one `manage` sees while the position is live. That
+    close sits below the live stop, and the strategy's stock hold claims
+    nothing about it: the replay must book the loss rather than abort."""
+    cache = BarCache(tmp_path)
+    sig = Signal("SPY", Direction.LONG, BAR0_CLOSE, stop=98.0, target=104.0,
+                 confidence=1.0, setup_tags=("t",), rationale="closes under water")
+    rows = [(100, 100.5, 99.5, 100),   # bar0: signalled at this close
+            (100, 100.5, 96.5, 97),    # bar1: fills at the open, closes below 98
+            (97, 97.5, 96.5, 97)]      # bar2: gap exit at this open
+    res = run(cache, sig, rows)
+    assert [t.exit_reason for t in res.trades] == ["stop"]
+    assert res.trades[0].pnl < 0
+
+
+def test_the_entry_bar_closing_above_the_target_still_manages(tmp_path):
+    """The mirror on the winning side: bar1 rallies through the target and
+    closes above it, which is equally none of the strategy's doing."""
+    cache = BarCache(tmp_path)
+    sig = Signal("SPY", Direction.LONG, BAR0_CLOSE, stop=98.0, target=104.0,
+                 confidence=1.0, setup_tags=("t",), rationale="closes through it")
+    rows = [(100, 100.5, 99.5, 100),
+            (100, 106.0, 99.9, 105),
+            (105, 105.5, 104.5, 105)]
+    res = run(cache, sig, rows)
+    assert [t.exit_reason for t in res.trades] == ["target"]
+    assert res.trades[0].pnl > 0

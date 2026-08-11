@@ -285,6 +285,37 @@ def test_null_levels_keep_the_live_levels():
     assert (decision.stop, decision.target) == (None, None)
 
 
+@pytest.mark.parametrize("position,close", [
+    pytest.param(long_position_view(live_stop=99.0, live_target=103.0), 97.0,
+                 id="long_closed_below_its_stop"),
+    pytest.param(long_position_view(live_stop=99.0, live_target=103.0), 105.0,
+                 id="long_closed_above_its_target"),
+    pytest.param(short_position_view(live_stop=101.0, live_target=97.0), 103.0,
+                 id="short_closed_above_its_stop"),
+    pytest.param(short_position_view(live_stop=101.0, live_target=97.0), 95.0,
+                 id="short_closed_beyond_its_target"),
+])
+def test_holding_a_position_whose_close_left_its_levels_is_not_the_strategys_fault(
+        position, close):
+    """Where the close sits against a level the decision did not touch is the
+    engine's own state. A stock hold claimed nothing about it, so refusing
+    here would abort an ordinary losing trade and blame the strategy."""
+    assert validate_management_decision(HOLD, position=position,
+                                        deciding_close=close) is HOLD
+
+
+def test_a_replacement_is_judged_against_the_close_not_an_untouched_level():
+    """A long whose bar rallied through its target and closed above it can
+    still ratchet its stop: the stop is a real protective level at that
+    close, and the untouched target is the engine's business."""
+    decision = validate_management_decision(
+        ManagementDecision(action="hold", stop=101.85, target=None),
+        position=long_position_view(live_stop=99.0, live_target=104.0),
+        deciding_close=105.0,
+    )
+    assert decision.stop == 101.85
+
+
 @pytest.mark.parametrize("bad", [
     pytest.param("exit", id="a_string"),
     pytest.param(None, id="none"),
@@ -308,11 +339,26 @@ def test_manage_must_return_a_management_decision(bad):
     pytest.param(ManagementDecision(action="exit", stop=None, target=101.0),
                  101.0, id="long_target_on_the_close"),
 ])
-def test_a_replacement_must_bracket_the_deciding_close(decision, close):
+def test_a_replacement_must_protect_the_deciding_close(decision, close):
     with pytest.raises(StrategyOutputError):
         validate_management_decision(decision,
                                      position=long_position_view(live_stop=99.0),
                                      deciding_close=close)
+
+
+@pytest.mark.parametrize("decision,close", [
+    pytest.param(ManagementDecision(action="hold", stop=None, target=103.0),
+                 99.0, id="short_target_above_the_close"),
+    pytest.param(ManagementDecision(action="hold", stop=98.0, target=None),
+                 99.0, id="short_stop_below_the_close"),
+    pytest.param(ManagementDecision(action="hold", stop=99.0, target=None),
+                 99.0, id="short_stop_on_the_close"),
+])
+def test_a_short_replacement_is_the_mirror(decision, close):
+    with pytest.raises(StrategyOutputError):
+        validate_management_decision(
+            decision, position=short_position_view(live_stop=101.0),
+            deciding_close=close)
 
 
 @pytest.mark.parametrize("bad", [float("nan"), float("inf"), 0.0, -1.0, True])

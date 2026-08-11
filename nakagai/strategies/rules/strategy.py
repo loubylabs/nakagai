@@ -150,4 +150,11 @@ class RuleStrategy(Strategy):
             stop = ratchet(ref - dist if long else ref + dist)
         if stop == position.live_stop:
             return HOLD
+        # A ratchet that lands ON the deciding close is not a stop, it is the
+        # price. ATR is exactly zero over a window of zero-range bars (a halt,
+        # an illiquid tape, a flat fixture), which makes `dist` zero and the
+        # candidate the close itself. Hold the existing stop rather than hand
+        # the boundary a level it is required to refuse.
+        if not (stop < ref if long else stop > ref):
+            return HOLD
         return ManagementDecision(action="hold", stop=stop, target=None)

@@ -63,12 +63,13 @@ from nakagai.engine.portfolio_types import (
     ReplayWindow,
     ScheduledBaseInterval,
     ScheduledContextBar,
+    Signal,
     SlippageSpec,
     StrategyOutputError,
     StrategyRuntimeError,
     TradeStats,
 )
-from nakagai.strategies.base import Direction, Signal
+from nakagai.strategies.base import Direction
 from pandas import Timestamp
 from tests.portfolio_fixtures import (
     PLACEHOLDER_DIGEST,

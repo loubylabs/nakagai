@@ -6,7 +6,9 @@ import pytest
 from nakagai.data.cache import BarCache
 from nakagai.engine.engine import Engine
 from nakagai.engine.portfolio_types import ManagementDecision, PositionView
-from nakagai.strategies.base import Direction, MarketContext
+from nakagai.strategies.base import (
+    Direction, MarketContext, validate_management_decision,
+)
 from nakagai.strategies.rules import RuleStrategy
 from nakagai.strategies.rules.frame_eval import FrameEval
 from nakagai.strategies.rules.vocabulary import core_vocabulary
@@ -190,3 +192,38 @@ def test_the_engine_applies_a_returned_stop_to_the_live_position(tmp_path):
     t = res.trades[0]
     assert t.stop > t.entry * 1.0        # the live stop moved above the entry
     assert t.stop != t.entry * 0.95      # and is no longer the initial 5% stop
+
+
+def _flat_ctx(price=110.0, n=20):
+    """Zero-range bars: a halt, an illiquid tape, or a flat fixture. ATR over
+    this window is exactly 0.0, which is what drives the trailing distance to
+    nothing."""
+    idx = pd.date_range("2026-01-05 14:30", periods=n, freq="15min", tz="UTC")
+    bars = pd.DataFrame({"open": price, "high": price, "low": price,
+                         "close": price, "volume": 1000.0}, index=idx)
+    return MarketContext(symbol="SPY", now=idx[-1] + pd.Timedelta(minutes=15),
+                         bars={"15m": bars, "1h": bars, "1d": bars})
+
+
+def test_a_zero_range_window_does_not_ratchet_the_stop_onto_the_close():
+    """A zero ATR puts the trailing candidate exactly on the deciding close,
+    which is the price rather than a level protecting it. The boundary refuses
+    such a stop, so the producer must not hand it one."""
+    strategy = RuleStrategy({"spec": _spec({"trailing": {"kind": "atr", "n": 14,
+                                                         "mult": 2.0}})})
+    ctx = _flat_ctx()
+    position = _view()
+    decision = strategy.manage(position, ctx)
+    assert decision.stop is None
+    assert validate_management_decision(decision, position=position,
+                                        deciding_close=110.0) is decision
+
+
+def test_a_short_zero_range_window_holds_too():
+    strategy = RuleStrategy({"spec": _short_spec({"trailing": {"kind": "atr",
+                                                              "n": 14,
+                                                              "mult": 2.0}})})
+    position = _view(direction="short", initial_stop=115.0, initial_target=90.0,
+                     live_stop=115.0, live_target=90.0)
+    decision = strategy.manage(position, _flat_ctx())
+    assert decision.stop is None
