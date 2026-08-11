@@ -7,7 +7,8 @@ import pytest
 
 import nakagai.strategies.rules.verify as verify_module
 from nakagai.strategies import indicators as ind
-from nakagai.strategies.rules.vocabulary import Term, core_vocabulary
+from nakagai.strategies.rules.vocabulary import (
+    CONDITION_ARG, Term, core_vocabulary)
 from nakagai.strategies.rules.verify import (
     CAUSES, CHECKED, EXEMPT, FAILED, MAX_ARG_SETS, PROBE_COUNT, VACUOUS,
     WARMUP_PROBE_COUNT, _raw_call, arg_sets, evaluate_term, exemption_reason,
@@ -20,13 +21,6 @@ def test_an_end_anchored_term_is_exempt_and_says_why():
     reason = exemption_reason(v.primitives["fvg_nearest"])
     assert reason is not None
     assert "end_anchored" in reason
-
-
-def test_a_condition_taking_term_is_exempt_and_says_why():
-    v = core_vocabulary()
-    reason = exemption_reason(v.primitives["bars_since"])
-    assert reason is not None
-    assert "condition" in reason
 
 
 def test_an_ordinary_term_is_not_exempt():
@@ -44,7 +38,12 @@ def test_exactly_these_core_terms_are_exempt():
     """
     exempt = {t.name for t in core_vocabulary().all_terms()
               if exemption_reason(t) is not None}
-    assert exempt == {"fvg_nearest", "order_block", "bars_since"}
+    assert exempt == {"fvg_nearest", "order_block"}
+    # N3-D12 retired the condition exemption, so the declared constant has to
+    # lose bars_since in the same change the computed set does. Asserted here
+    # rather than in a test of its own, which would be a third statement of the
+    # same two-member set.
+    assert "bars_since" not in EXPECTED_EXEMPT
 
 
 # Expectations of the shipped frame, held here as literals rather than imported
@@ -268,9 +267,17 @@ def test_arg_sets_is_deduplicated_and_stable():
     assert arg_sets(term) == sets
 
 
-def test_arg_sets_skips_a_condition_arg():
+def test_arg_sets_supplies_a_condition_arg():
+    """N3-D12's inverse of node 01's skip: supplied, not skipped.
+
+    A skipped condition arg made the term uncallable, which is the only reason
+    it was exempt. Every mandated set now carries the same synthetic mask, so
+    the argument space does not grow and both evaluation paths see the arg.
+    """
     term = core_vocabulary().primitives["bars_since"]
-    assert all("cond" not in s for s in arg_sets(term))
+    sets = arg_sets(term)
+    assert sets
+    assert all(s.get("cond") == verify_module.SYNTHETIC_CONDITION for s in sets), sets
 
 
 def test_arg_sets_of_a_term_with_no_args_is_one_empty_set():
@@ -878,7 +885,7 @@ def test_a_verdict_that_is_not_a_failure_carries_no_cause(bars):
     checked = verify_term(core_vocabulary().indicators["sma"], bars)
     assert checked.status == CHECKED and checked.cause == ""
 
-    exempt = verify_term(core_vocabulary().primitives["bars_since"], bars)
+    exempt = verify_term(core_vocabulary().primitives["fvg_nearest"], bars)
     assert exempt.status == EXEMPT and exempt.cause == ""
 
     vacuous = verify_term(Term("always_nan", "series", {}, {},
@@ -1040,15 +1047,116 @@ def test_an_end_anchored_term_returns_a_scalar_not_a_series(bars):
 def test_an_exempt_term_is_never_reported_as_checked_or_failed(bars):
     """One assertion that can fail on its own, not a restatement of EXEMPT."""
     statuses = {name: verify_term(core_vocabulary().primitives[name], bars).status
-                for name in ("fvg_nearest", "order_block", "bars_since")}
+                for name in ("fvg_nearest", "order_block")}
     assert set(statuses.values()) == {EXEMPT}, statuses
 
 
 def test_an_exempt_verdict_names_the_term_and_gives_a_reason(bars):
     """arg_sets_checked is the dataclass default, so assert what the code sets."""
+    verdict = verify_term(core_vocabulary().primitives["fvg_nearest"], bars)
+    assert verdict.name == "fvg_nearest"
+    assert "end_anchored" in verdict.reason and "scalar" in verdict.reason
+
+
+def test_bars_since_is_checked_not_exempt(bars):
+    """N3-D12: the condition exemption is retired.
+
+    bars_since is a normal CHECKED term now, verified against the same
+    whole-frame-against-prefix proof every other term gets, via a synthetic
+    causal mask rather than the real grammar evaluator.
+    """
+    v = core_vocabulary()
+    verdict = verify_term(v.primitives["bars_since"], bars)
+    assert verdict.status == CHECKED, verdict.reason
+
+
+def test_exemption_reason_no_longer_mentions_condition():
+    v = core_vocabulary()
+    assert exemption_reason(v.primitives["bars_since"]) is None
+
+
+def test_both_evaluation_paths_receive_the_condition_argument(bars, monkeypatch):
+    """The behavioral replacement for the source-text guard node 01 made moot.
+
+    A guard counting `term.fn(` occurrences in verify_term's source reads zero
+    already, because node 01 extracted _raw_call, so it could never go red.
+    This one can: it records what every call actually received, and a path that
+    stopped supplying `cond` shows up as a call with `cond` missing rather than
+    as an unchanged count.
+
+    The mutation this catches has to be at a CALL SITE, not inside _raw_call.
+    `seen` is appended as _raw_call receives its arguments, so a drop performed
+    inside _raw_call's own body happens after the recording and is invisible
+    here. The divergence being guarded is between the two call sites.
+
+    Measured with the whole-frame call site mutated to drop "cond": bars_since
+    is called without its required positional, raises TypeError, and the gate
+    turns that into FAILED/uncallable, so this test and
+    test_bars_since_is_checked_not_exempt both redden on their CHECKED
+    assertion. The `seen` assertions are the backstop for a divergence that
+    does NOT raise (a term with a defaulted condition arg, which N3-D13 refuses
+    today but a generated vocabulary could reintroduce).
+    """
+    seen = []
+    real = verify_module._raw_call
+
+    def recording(term, b, args):
+        seen.append((len(b), dict(args)))
+        return real(term, b, args)
+
+    monkeypatch.setattr(verify_module, "_raw_call", recording)
     verdict = verify_term(core_vocabulary().primitives["bars_since"], bars)
-    assert verdict.name == "bars_since"
-    assert "condition" in verdict.reason and "evaluator" in verdict.reason
+
+    assert verdict.status == CHECKED, verdict.reason
+    assert len(seen) > 1, "expected a whole-frame call and at least one prefix call"
+    assert all("cond" in args for _, args in seen), (
+        f"a call reached the term without its condition: {seen}")
+    assert len({length for length, _ in seen}) > 1, (
+        "every call saw the same frame length, so no prefix pass ran")
+
+
+def test_a_future_reading_condition_term_is_caught_by_the_synthetic_mask(bars):
+    """The falsification test N3-D12 names.
+
+    A condition-taking term that reads one row into the future against the
+    synthetic mask must come back FAILED, proving the gate is capable of
+    catching such a term now that it is exercised at all.
+    """
+    def peeking_bars_since(ctx, b, cond, eval_fn=None):
+        mask = eval_fn(cond, b).astype(bool)
+        return mask.shift(-1).astype(float)     # reads one row into the future
+
+    peeker = Term("peeking_bars_since", "primitive", {"cond": CONDITION_ARG},
+                  {}, peeking_bars_since)
+    verdict = verify_term(peeker, bars)
+    assert verdict.status == FAILED, verdict.reason
+    # FAILED alone is too weak to carry this. verify.py returns FAILED for six
+    # causes, and five of them mean NO ROW WAS EVER COMPARED. Measured against a
+    # half-implemented N3-D12 (exemption retired, arg_sets' skip left in
+    # place), this peeker comes back cause="uncallable", because it is called
+    # without cond and raises TypeError; a perfectly causal term returns the
+    # identical verdict, so status alone cannot tell a caught peek from a term
+    # the gate could not call. Only "lookahead" means a whole-frame row was
+    # compared against a prefix row and disagreed.
+    assert verdict.cause == "lookahead", (
+        f"expected a detected peek, got cause={verdict.cause!r}: {verdict.reason}")
+
+
+def test_an_honest_condition_term_is_checked_not_merely_not_failed(bars):
+    """The other half of the falsification pair, and what makes it a pair.
+
+    Without it, the peeker above is satisfied by a gate that fails EVERY
+    condition-taking term for any reason at all.
+    """
+    def honest_bars_since(ctx, b, cond, eval_fn=None):
+        mask = eval_fn(cond, b).astype(bool)
+        return mask.astype(float)               # reads row i only
+
+    honest = Term("honest_bars_since", "primitive", {"cond": CONDITION_ARG},
+                  {}, honest_bars_since)
+    verdict = verify_term(honest, bars)
+    assert verdict.status == CHECKED, f"{verdict.cause}: {verdict.reason}"
+    assert verdict.arg_sets_checked >= 1, "checked nothing and said CHECKED"
 
 
 # The exempt set is declared, not counted. A term going silently exempt is how a
@@ -1056,7 +1164,6 @@ def test_an_exempt_verdict_names_the_term_and_gives_a_reason(bars):
 EXPECTED_EXEMPT = {
     "fvg_nearest": "end_anchored",
     "order_block": "end_anchored",
-    "bars_since": "condition",
 }
 
 

@@ -25,23 +25,27 @@ WHAT THIS CANNOT TEST, and why it says so out loud rather than passing:
   not a comparison of a value to itself that could never fail.
   `primitives.end_anchored_series` is what the evaluator really runs for these,
   computing row i as `term.fn(bars[:i+1])`, which is causal by construction.
-- Terms taking a condition, today only `bars_since`, which needs the evaluator
-  handed back to it and cannot be called without one. This exemption is
-  temporary and node 03 deletes it, for the reason recorded at CONDITION_ARG.
 
-A boolean return would make those two indistinguishable from a genuine pass,
+That is the only exemption. A term taking a condition used to be the second one,
+because it needs an evaluator handed back to it and cannot be called without
+one; N3-D12 supplies SYNTHETIC_CONDITION and the callback that reads it, so such
+a term is checked like any other rather than waved through.
+
+A boolean return would make an exemption indistinguishable from a genuine pass,
 which is the one failure this gate cannot afford, so every answer is a
 TermVerdict carrying a status and a reason.
 """
 
 import itertools
+import json
 import numbers
 from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
 
-from nakagai.strategies.rules.vocabulary import Term, Vocabulary, is_choice_rule
+from nakagai.strategies.rules.vocabulary import (
+    Term, Vocabulary, is_choice_rule, is_condition_rule)
 
 # The cross-repo contract, which is a different and much smaller thing than the
 # module's public surface. Node 02 lives in another repository and reaches this
@@ -50,23 +54,23 @@ from nakagai.strategies.rules.vocabulary import Term, Vocabulary, is_choice_rule
 __all__ = ["CAUSES", "CHECKED", "EXEMPT", "FAILED", "VACUOUS",
            "TermVerdict", "reference_bars", "verify_vocabulary"]
 
-# The arg rule that marks a condition-taking term. A bare string rather than a
-# tuple, so `is_choice_rule` is False for it.
+# The value handed to every condition-typed arg, so the term is callable here.
 #
-# THIS EXEMPTION IS TEMPORARY, AND NODE 03 DELETES IT. A condition-taking term
-# is exempt only because there is no evaluator here to inject, so the term
-# cannot be called at all; it is not exempt because it is uncheckable in
-# principle. Node 03 supplies a synthetic row-local causal mask, which makes the
-# call possible, and removes the exemption rather than surviving it.
+# Deterministic and ROW-LOCAL: `close > open` reads only the current row, so it
+# needs no grammar evaluator and cannot itself introduce a peek. The question
+# this module asks is whether THE TERM reads only rows <= i, and handing it a
+# known-causal condition isolates that question. The condition's own causality
+# is N3-D5's four guards' job, and test_whole_frame_equivalence.py's.
 #
-# That deletion is load-bearing, not tidying. Node 03 makes a platform-registered
-# condition-taking term possible with no core PR, so an exemption left standing
-# would see such a term registered, validated, evaluated and reported EXEMPT,
-# which is to say never causality checked, in direct breach of hard rule 1: no
-# term enters the vocabulary without passing verify_term. Read the exemption as
-# true at node 01 and false from node 03 on, and leave the two end_anchored ones
-# as the only survivors.
-CONDITION_ARG = "condition"
+# It replaces an exemption rather than sitting beside one. Node 01 exempted a
+# condition-taking term because there was no evaluator here to inject, so the
+# term could not be called at all; it was never uncheckable in principle. With
+# N3-D9 a platform-registered condition-taking term needs no core PR, so an
+# exemption left standing would see such a term registered, validated,
+# evaluated and reported EXEMPT, which is to say never causality checked, in
+# direct breach of hard rule 1: no term enters the vocabulary without passing
+# verify_term.
+SYNTHETIC_CONDITION = {"lhs": {"src": "close"}, "op": ">", "rhs": {"src": "open"}}
 
 # A term whose schema generates more than this is refused rather than sampled.
 # Measured on core: ichimoku is the worst non-exempt term at 36, fvg_nearest is
@@ -117,7 +121,14 @@ class TermVerdict:
 
 
 def exemption_reason(term: Term) -> str | None:
-    """Why this term cannot be checked by whole-frame-against-prefix, or None."""
+    """Why this term cannot be checked by whole-frame-against-prefix, or None.
+
+    N3-D12 retired the condition exemption: a condition-typed arg now gets
+    SYNTHETIC_CONDITION and the evaluator callback that reads it, so the term is
+    callable here and is checked like any other. end_anchored is unchanged;
+    term.fn returns a scalar for a frame there, so the whole-frame path IS the
+    per-prefix loop and the comparison would fail an honest term.
+    """
     if term.end_anchored:
         return ("end_anchored: term.fn returns a scalar for a frame, not a "
                 "series, so there is no whole-frame value at row i to compare a "
@@ -125,11 +136,6 @@ def exemption_reason(term: Term) -> str | None:
                 "the evaluator runs these through "
                 "primitives.end_anchored_series, which is causal by "
                 "construction")
-    for name, rule in term.args.items():
-        if rule == CONDITION_ARG:
-            return (f"takes a condition in {name!r}, which needs an evaluator "
-                    f"injected before the term can be called at all; exempt "
-                    f"only until one exists, and node 03 deletes this exemption")
     return None
 
 
@@ -179,7 +185,17 @@ def _raw_call(term: Term, bars: pd.DataFrame, args: dict):
     One function rather than a copy at each of the three call sites. A gate that
     reached a term by a different convention than the evaluator does would be
     verifying something the DSL never runs.
+
+    A condition-typed arg additionally needs an evaluator callback, which is
+    injected HERE rather than at either call site, so verify_term's whole-frame
+    pass and evaluate_term's per-prefix pass cannot receive different ones. It
+    reads SYNTHETIC_CONDITION off the frame it is handed, which is row-local, so
+    the callback cannot introduce a peek of its own. Keyed on the arg's declared
+    type, exactly as `frame_eval.py:281` keys the real injection, so a term
+    registered outside core reaches it the same way.
     """
+    if any(is_condition_rule(rule) for rule in term.args.values()):
+        args = {**args, "eval_fn": lambda cond, b: b["close"] > b["open"]}
     if term.kind == "primitive":
         return term.fn(None, bars, **args)
     if term.kind == "bar":
@@ -278,8 +294,10 @@ def arg_sets(term: Term) -> tuple[dict, ...]:
     than crossed with each other, which would be exponential in the range-argument
     count and buys much less: a numeric bound rarely selects a code path.
 
-    A condition arg is skipped rather than sampled: a term declaring one is exempt
-    anyway, and there is no value to sample.
+    A condition arg is SUPPLIED rather than skipped, per N3-D12: every candidate
+    carries the same SYNTHETIC_CONDITION, so the argument space does not grow
+    and both evaluation paths see the arg. Skipping it left the term uncallable,
+    which was the whole of its exemption.
 
     A rule of any other shape is refused here rather than guessed at. Reading
     "everything that is not a choice rule is a range" and then indexing rule[0]
@@ -290,9 +308,10 @@ def arg_sets(term: Term) -> tuple[dict, ...]:
     terms come from a generator, and a generator getting the schema shape wrong
     is exactly what this gate is supposed to catch.
     """
-    choices, ranges = {}, {}
+    choices, ranges, conditions = {}, {}, {}
     for name, rule in term.args.items():
-        if rule == CONDITION_ARG:
+        if is_condition_rule(rule):
+            conditions[name] = SYNTHETIC_CONDITION
             continue
         if is_choice_rule(rule):
             choices[name] = rule
@@ -320,8 +339,20 @@ def arg_sets(term: Term) -> tuple[dict, ...]:
         Raising from inside the loop also bounds the work: the walk stops at the
         cap instead of materializing a pathological schema's whole cross product
         first.
+
+        The key is a canonical encoding rather than a tuple of items, because a
+        condition-typed arg's value is a dict and hashing one raises. Measured
+        with SYNTHETIC_CONDITION supplied and the old key left in place:
+        verify_term(bars_since) came back status=failed cause=unenumerable,
+        "cannot enumerate this term's arguments: unhashable type: 'dict'", which
+        is every condition-taking term rejected rather than checked.
+        `sort_keys=True` keeps two orderings of the same candidate equal, which
+        is what `sorted(...)` bought; `default=repr` keeps the key total over
+        values json cannot encode, so a future non-JSON arg value degrades to a
+        coarser key rather than raising. Canonicalized rather than special-cased
+        on the condition, so the next nested value needs no third branch.
         """
-        key = tuple(sorted(candidate.items()))
+        key = json.dumps(candidate, sort_keys=True, default=repr)
         if key in seen:
             return
         if len(seen) >= MAX_ARG_SETS:
@@ -349,7 +380,7 @@ def arg_sets(term: Term) -> tuple[dict, ...]:
                for values in itertools.product(*choices.values()))
               if choices else iter([{}]))
     for combo in combos:
-        base = {**supplied, **term.defaults, **combo}
+        base = {**supplied, **term.defaults, **combo, **conditions}
         add(base)
         for name, rule in ranges.items():
             for value in (rule[0], rule[1]):
