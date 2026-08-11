@@ -1,7 +1,17 @@
+"""The unscheduled door: a point-in-time context reconstructed from labels.
+
+A scanner, a screener, and the legacy replay have no `ReplaySchedule`, so this
+door answers both causal questions from the bar labels themselves. Visibility
+is `closed_before`; the emission gate is `strategies/util.label_freshness`. The
+portfolio replay answers the same two questions from its schedule instead, and
+`tests/test_portfolio_contexts.py` is where that door is pinned.
+"""
+
 import pandas as pd
 
 from nakagai.data.cache import BarCache
 from nakagai.engine.context import build_context
+from nakagai.strategies.rules import RuleStrategy
 
 
 def _fill(cache, make_bars):
@@ -42,3 +52,49 @@ def test_same_day_daily_bar_excluded(tmp_path, make_bars):
     # today's bar is look-ahead: it must NOT be visible (rule is strict <)
     assert pd.Timestamp("2026-06-01 04:00", tz="UTC") not in ctx.bars["1d"].index
     assert ctx.bars["1d"].index.max() == pd.Timestamp("2026-05-30 04:00", tz="UTC")
+
+
+# ------------------------------------------------------------ the emission gate
+
+
+def test_a_context_declares_which_higher_timeframes_may_be_decided_on(
+        tmp_path, make_bars):
+    """Readable and decidable are two different questions.
+
+    The 14:00 hourly bar is readable at every close from 15:00 through 15:45,
+    and it entitles an hourly play to decide at 15:00 alone. The daily gate is
+    the driving bar that OPENS the session, which is 13:45 here rather than any
+    close an hourly bar lands on, so the two cannot be one answer. Nothing is
+    declared for the driving frame itself: a play decided on the frame the
+    engine replays is fresh on every step of it.
+    """
+    cache = BarCache(tmp_path)
+    _fill(cache, make_bars)
+    gates = {
+        stamp: build_context(cache, "SPY", pd.Timestamp(stamp, tz="UTC")).fresh
+        for stamp in ("2026-06-01 13:45", "2026-06-01 15:00", "2026-06-01 15:15")
+    }
+    assert gates["2026-06-01 13:45"] == {"1h": False, "4h": False, "1d": True}
+    assert gates["2026-06-01 15:00"] == {"1h": True, "4h": False, "1d": False}
+    assert gates["2026-06-01 15:15"] == {"1h": False, "4h": False, "1d": False}
+
+
+def test_an_hourly_play_decides_only_where_the_context_says_it_may(
+        tmp_path, make_bars):
+    """The gate reaches the play, which is the only reason it is computed.
+
+    A rule play off the driving frame asks its context and emits nowhere else,
+    so an hourly play walks four driving closes an hour and decides on one.
+    """
+    cache = BarCache(tmp_path)
+    _fill(cache, make_bars)
+    strategy = RuleStrategy({"spec": {
+        "version": 2, "name": "hourly", "timeframe": "1h",
+        "long": {"all": [{"lhs": {"src": "close"}, "op": ">", "rhs": 0}]},
+        "risk": {"stop": {"kind": "percent", "pct": 2.0},
+                 "target": {"kind": "rr", "rr": 2.0}},
+    }})
+    closes = pd.date_range("2026-06-01 14:45", periods=5, freq="15min", tz="UTC")
+    decided = [now for now in closes
+               if strategy._fresh(build_context(cache, "SPY", now))]
+    assert decided == [pd.Timestamp("2026-06-01 15:00", tz="UTC")]

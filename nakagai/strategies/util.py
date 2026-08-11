@@ -2,8 +2,16 @@
 
 The engine replays driving-timeframe bars, so a condition computed on a
 higher timeframe stays true for every driving-timeframe step inside that bar.
-Templates gate on these freshness checks to fire exactly once per
-driving-timeframe bar.
+A play decided off the driving frame therefore needs a gate that fires exactly
+once per higher-timeframe bar, and `MarketContext.fresh` carries the answer.
+
+Everything here reconstructs that answer from bar labels, which is what a
+caller with no schedule has to do and what `engine/context.build_context`
+calls. It is NOT what a portfolio replay does: a replay's schedule names
+`fresh_context_at` for every context bar, and that is the only correct answer
+once early closes, holidays, and daylight saving are in play. Do not reach for
+these from a scheduled path, and do not reintroduce a strategy-side call: a
+gate a strategy recomputes is a gate the schedule cannot decide.
 """
 
 import math
@@ -15,8 +23,34 @@ from nakagai.engine.portfolio_types import Signal
 from nakagai.strategies.base import Direction, MarketContext
 
 
+def label_freshness(ctx: MarketContext) -> dict[str, bool]:
+    """Every higher timeframe's emission gate, reconstructed from labels.
+
+    The unscheduled door's whole answer, in one place, so the two ways a
+    timeframe can be gated live beside each other rather than inside a
+    strategy. A session-aligned timeframe carries a date rather than a close
+    time, so it is gated on the driving bar that opens the session; every other
+    one is gated on its own label plus its delta.
+
+    The driving timeframe is absent on purpose. It has no gate: a play decided
+    on the frame it is replayed on is fresh on every step of it, and an entry
+    here would invite a caller to ask a question with only one answer.
+    """
+    return {
+        tf: (first_bar_of_session(ctx) if tf in ctx.tfs.session_aligned
+             else fresh_bar(ctx, tf))
+        for tf in ctx.tfs.higher
+    }
+
+
 def fresh_bar(ctx: MarketContext, timeframe: str) -> bool:
-    """True only on the first driving step after a `timeframe` bar completes."""
+    """True only on the first driving step after a `timeframe` bar completes.
+
+    Label plus a fixed absolute delta, which is exact for an hourly bar and
+    exact for a four-hour bucket that does not span a daylight-saving change.
+    A schedule answers this from `fresh_context_at` instead and is authoritative
+    wherever one exists; see the module docstring.
+    """
     bars = ctx.bars[timeframe]
     if bars.empty:
         return False

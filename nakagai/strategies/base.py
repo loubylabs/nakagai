@@ -21,8 +21,9 @@ portfolio replay that cannot tell them apart reports contention it never had.
 """
 
 from abc import ABC, abstractmethod
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
+from copy import deepcopy
 from dataclasses import FrozenInstanceError, dataclass, field
 from enum import StrEnum
 from typing import ClassVar
@@ -63,7 +64,7 @@ class Direction(StrEnum):
 class MarketContext:
     symbol: str
     now: pd.Timestamp
-    bars: dict[str, pd.DataFrame]
+    bars: Mapping[str, pd.DataFrame]
     tfs: TimeframeSet = DEFAULT_TIMEFRAMES
     # Whole-frame node evaluation, the one walker over the rule grammar.
     # build_context always supplies one: a replay's covers the untruncated
@@ -72,7 +73,20 @@ class MarketContext:
     # the strategies that never touch the grammar. `cursor[tf]` is the row index
     # of the bar closing at `now`, or -1 when that timeframe has nothing visible.
     fe: object | None = None
-    cursor: dict[str, int] = field(default_factory=dict)
+    cursor: Mapping[str, int] = field(default_factory=dict)
+    # The EMISSION GATE, one entry per higher timeframe: is that timeframe's
+    # newest visible bar newly complete at `now`, so a play decided on it may
+    # signal here and nowhere else. A separate question from visibility, which
+    # `bars` answers, and it is data rather than something a strategy derives.
+    #
+    # Both doors fill it, because they know different things. A scheduled
+    # replay reads `fresh_context_at` off the schedule, which is the only
+    # correct answer once early closes, holidays, and daylight saving are in
+    # play. A scanner or screener has no schedule and reconstructs it from the
+    # bar labels, in `strategies/util.label_freshness`, which is all a caller
+    # with no clock can do. A strategy asks this and never reconstructs it,
+    # so a schedule cannot be overruled by arithmetic downstream of it.
+    fresh: Mapping[str, bool] = field(default_factory=dict)
 
     @property
     def driving_bars(self) -> pd.DataFrame:
@@ -155,7 +169,13 @@ class Strategy(ABC):
         }
 
     def __init__(self, params: dict | None = None):
-        self.params = {**self.DEFAULT_PARAMS, **(params or {})}
+        # The defaults are CLASS state, so a shallow merge would hand every
+        # instance of a strategy the same nested object: one play symbol
+        # appending to a defaulted list would be read by every other play
+        # symbol, in every replay in the process, and nothing would report it.
+        # Copied rather than forbidden, because the values live on a class a
+        # caller writes and refusing one there would fail at import.
+        self.params = {**deepcopy(self.DEFAULT_PARAMS), **(params or {})}
 
     @abstractmethod
     def on_bar(self, ctx: MarketContext) -> Sequence[Signal]:

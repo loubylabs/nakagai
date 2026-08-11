@@ -52,6 +52,7 @@ from nakagai.engine.portfolio_types import (
     ReplayRejection,
     ScheduledBaseInterval,
     Signal,
+    StrategyOutputError,
     _fail,
     _require_instance,
     _set_positive,
@@ -428,6 +429,15 @@ class _PortfolioRuntime:
         Resolution is core's own refusal and stays outside the wrapper; only the
         call INTO the definition's factory is strategy code, and anything it
         raises is a runtime error naming the play symbol it was building.
+
+        Every construction is verified against its definition, because a
+        factory is the one place a bundle's promises stop being checkable by
+        the registry: it never calls one, so a definition that hands back a
+        strategy calling itself something else is only discoverable here.
+        Nothing downstream would notice on its own. The declared name reaches
+        an operator only through an error's details, so a mislabeled runtime
+        replays silently and blames another definition the one time something
+        does go wrong.
         """
         stamp = self._request.window.test_start.isoformat()
         runtimes: dict[PositionKey, Strategy] = {}
@@ -436,7 +446,17 @@ class _PortfolioRuntime:
             definition = registry.resolve(play.strategy)
             with strategy_operation("construct", strategy=play.strategy,
                                     play_id=key[0], symbol=key[1], event_ts=stamp):
-                runtimes[key] = definition.factory(play.params)
+                runtime = definition.factory(play.params)
+            declared = getattr(runtime, "name", None)
+            if declared != definition.name:
+                raise StrategyOutputError(
+                    "strategy_name_mismatch",
+                    "a factory returned a strategy that names another definition",
+                    {"operation": "construct", "strategy": definition.name,
+                     "declared": declared if isinstance(declared, str) else None,
+                     "play_id": key[0], "symbol": key[1], "event_ts": stamp},
+                )
+            runtimes[key] = runtime
         return runtimes
 
     def _bars_at(self, interval: ScheduledBaseInterval) -> dict[str, _Bar]:

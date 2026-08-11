@@ -6,7 +6,16 @@ visibility from the bar labels themselves through `closed_before`.
 `build_scheduled_context` serves the portfolio replay, which has an embedded
 `ReplaySchedule` and therefore asks it: a bar is visible when the schedule
 says it became available, never because label arithmetic put it in the past.
+
+Each door answers two questions, not one. VISIBILITY is which rows a strategy
+may read, and the EMISSION GATE is which close a play decided off the driving
+frame may signal at, which `ctx.fresh` carries. They are genuinely different:
+an hourly bar is readable for every base close of the hour after it and
+entitles a decision at exactly one of them. A strategy asks the context for
+both and derives neither, so a schedule cannot be overruled downstream of it.
 """
+
+from types import MappingProxyType
 
 import numpy as np
 import pandas as pd
@@ -27,6 +36,7 @@ from nakagai.engine.portfolio_types import (
 from nakagai.engine.schedule import ValidatedSchedule
 from nakagai.strategies.base import MarketContext
 from nakagai.strategies.rules.vocabulary import Vocabulary, resolve_vocabulary
+from nakagai.strategies.util import label_freshness
 
 
 class PreloadedBars:
@@ -141,16 +151,24 @@ def build_context(cache: BarCache, symbol: str, now: pd.Timestamp,
         for tf in tfs.all:
             n = len(bars[tf])
             fe.set_span(tf, max(n - 1, 0), n)
-    return MarketContext(symbol=symbol, now=now, tfs=tfs, bars=bars, fe=fe,
-                         cursor={tf: len(bars[tf]) - 1 for tf in tfs.all})
+    ctx = MarketContext(
+        symbol=symbol, now=now, tfs=tfs, bars=MappingProxyType(bars), fe=fe,
+        cursor=MappingProxyType({tf: len(bars[tf]) - 1 for tf in tfs.all}))
+    # Assigned after the context exists because the label rule reads a context:
+    # the session gate asks the driving frame which bar opened the session. The
+    # door owns the value either way, and nothing downstream may replace it.
+    ctx.fresh = MappingProxyType(label_freshness(ctx))
+    return ctx
 
 
 def _scheduled_timeframes(dependencies: ReplayDependencies) -> TimeframeSet:
     """The declared timeframes as a `TimeframeSet`, for the grammar's use only.
 
-    `FrameEval` and `ctx.driving_bars` both need one. Nothing in the scheduled
-    path reads its deltas or its session-aligned set to decide visibility;
-    that answer comes from the schedule and only from the schedule.
+    `FrameEval` and `ctx.driving_bars` both need one. Which rows a strategy
+    sees, and which close it may decide on, come from the schedule and only
+    from the schedule; the deltas here are the grammar's, for lifting one
+    frame's series onto another's index, and no visibility or freshness rule
+    reads them.
     """
     return TimeframeSet(
         driving=BASE_TIMEFRAME,
@@ -216,5 +234,40 @@ def build_scheduled_context(prepared: _ValidatedPortfolioBars, symbol: str,
     for tf in tfs.all:
         rows = len(bars[tf])
         fe.set_span(tf, max(rows - 1, 0), rows)
-    return MarketContext(symbol=symbol, now=now, tfs=tfs, bars=bars, fe=fe,
-                         cursor={tf: len(bars[tf]) - 1 for tf in tfs.all})
+    # Read-only, because ONE context per symbol serves every play at this
+    # close. The sharing is deliberate, since two plays reading one symbol at
+    # one instant are entitled to the same view of it, and what makes it safe
+    # is that neither can rebind an entry out from under the other.
+    return MarketContext(
+        symbol=symbol, now=now, tfs=tfs, bars=MappingProxyType(bars), fe=fe,
+        cursor=MappingProxyType({tf: len(bars[tf]) - 1 for tf in tfs.all}),
+        fresh=MappingProxyType(_scheduled_freshness(schedule, tfs, now)))
+
+
+def _scheduled_freshness(schedule: ValidatedSchedule, tfs: TimeframeSet,
+                         now: pd.Timestamp) -> dict[str, bool]:
+    """Which higher timeframes the SCHEDULE says may be decided on at `now`.
+
+    The newest bar released at `now`, and whether the schedule calls it fresh
+    here. Freshness is the emission gate and it is not availability: an hourly
+    bar is readable for every base close of the hour after it and entitles a
+    decision at exactly one of them, the close its own `fresh_context_at`
+    names. A bar whose `fresh_context_at` is null, which is what an early close
+    does to the noon four-hour bucket, entitles no decision at all.
+
+    Only the newest released bar can be the one: freshness sits inside
+    `[period_end, period_end + one base bar)` and a bar is released at its own
+    period end, so a bar fresh at `now` was released at or within one base bar
+    of it and nothing later can have been released yet.
+
+    This is why the replay does not reconstruct the instant. A four-hour bucket
+    is four EASTERN WALL-CLOCK hours, so across a daylight-saving change it is
+    three absolute hours or five, and `label + 4h` names an instant an hour
+    away from the one the bucket actually ended at. The schedule already
+    carries the answer; asking it is the whole point of carrying it.
+    """
+    fresh: dict[str, bool] = {}
+    for tf in tfs.higher:
+        released = schedule.available_context(tf, now)
+        fresh[tf] = bool(released) and released[-1].fresh_context_at == now
+    return fresh

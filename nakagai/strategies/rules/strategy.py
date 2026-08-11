@@ -21,7 +21,7 @@ from nakagai.strategies.rules.spec import (
 from nakagai.strategies.rules.vocabulary import (
     Vocabulary, VocabularyFactory, core_vocabulary, resolve_vocabulary,
 )
-from nakagai.strategies.util import fresh_bar, first_bar_of_session, rr_signal
+from nakagai.strategies.util import rr_signal
 
 # The frame a spec is evaluated on when it names none. One spelling, because
 # the dependency walk and the evaluator have to agree about which frames a
@@ -99,12 +99,20 @@ class RuleStrategy(Strategy):
         return ctx.bars[self.spec.get("timeframe", SPEC_TIMEFRAME_DEFAULT)]
 
     def _fresh(self, ctx: MarketContext) -> bool:
+        """May this play decide at `ctx.now`, given the frame it is decided on.
+
+        Asked of the context, never reconstructed. A play decided on the frame
+        the engine replays is fresh on every step of it; every other one is
+        fresh where its context says so, which for a portfolio replay is the
+        schedule's own `fresh_context_at` and for a caller with no schedule is
+        the label rule in `strategies/util.label_freshness`.
+
+        A missing key is a spec naming a frame nobody hydrated, and it raises
+        here rather than reading False. Going quiet would make the play emit
+        nothing for the whole replay and report it as a market with no setups.
+        """
         tf = self.spec.get("timeframe", SPEC_TIMEFRAME_DEFAULT)
-        if tf == ctx.tfs.driving:
-            return True
-        if tf in ctx.tfs.session_aligned:
-            return first_bar_of_session(ctx)
-        return fresh_bar(ctx, tf)
+        return tf == ctx.tfs.driving or ctx.fresh[tf]
 
     def _stop_target(self, ctx: MarketContext, bars: pd.DataFrame,
                      direction: Direction) -> tuple[float, float | None, float]:

@@ -25,6 +25,7 @@ from nakagai.engine.bars import (
     PortfolioBars,
     ReplayDependencies,
     prepare_portfolio_bars,
+    _ValidatedPortfolioBars,
 )
 from nakagai.engine.canonical import (
     canonical_replay_bytes,
@@ -607,6 +608,110 @@ def fall_request() -> PortfolioReplayRequest:
     )
 
 
+# ------------------------------------ a transition INSIDE a four-hour bucket
+
+# The two pairs above straddle a transition across a weekend, which is what
+# XNYS does: the clocks move at 02:00 on a Sunday, so no exchange session and
+# no bucket derived from one ever spans the change. Both label conventions
+# therefore still satisfy `label + 4h == period_end` on every row, which makes
+# those schedules silent about the rule the architecture actually freezes: a
+# four-hour bucket is four EASTERN WALL-CLOCK hours, not four absolute ones.
+#
+# The only bucket that can span a US transition is the one anchored at Eastern
+# midnight, on the Sunday itself. So these two carry a continuous session on
+# the transition day. That is an ordinary core input rather than a liberty:
+# core takes the schedule as data and never consults an installed calendar, and
+# a continuously traded calendar is simply the only one that can put a base
+# interval on the far side of the change from its own bucket's label.
+#
+# Fall back, 2026-11-01: 00:00 Eastern is 04:00Z and 04:00 Eastern is 09:00Z,
+# five absolute hours later, so `label + 4h` lands an hour SHORT of the
+# bucket's own end. Spring forward, 2026-03-08: 00:00 Eastern is 05:00Z and
+# 04:00 Eastern is 08:00Z, three absolute hours, so `label + 4h` lands an hour
+# PAST it. Every timestamp below is a literal, for the same reason the pairs
+# above are: a fixture computed from the arithmetic under test cannot fail.
+SPRING_BUCKET_SESSION = date(2026, 3, 8)
+FALL_BUCKET_SESSION = date(2026, 11, 1)
+
+
+def _bucket_schedule(
+    session: date, first_open: str, count: int,
+    buckets: tuple[tuple[str, str], ...],
+) -> ReplaySchedule:
+    """One continuous session and the four-hour buckets it derives.
+
+    Only 4h context bars, because the base timeframe and the spanning bucket
+    are the whole subject. A schedule carries exactly the timeframes a replay
+    declares, so leaving 1h and 1d out is a smaller fixture rather than a
+    partial one.
+    """
+    intervals = session_intervals(session, ts(first_open), count)
+    context = tuple(
+        ScheduledContextBar(
+            timeframe="4h", session_date=session, label_ts=ts(start),
+            period_start=ts(start), period_end=ts(end),
+            available_at=ts(end), fresh_context_at=ts(end),
+            source="derived_1h_et_midnight",
+        )
+        for start, end in buckets
+    )
+    draft = ReplaySchedule(
+        identity=base_identity(), base_intervals=intervals, context_bars=context,
+    )
+    return dataclasses.replace(draft, identity=base_identity(schedule_digest(draft)))
+
+
+def spring_bucket_schedule() -> ReplaySchedule:
+    """2026-03-08, 00:00 through 08:00 Eastern: 05:00Z through 12:00Z."""
+    return _bucket_schedule(
+        SPRING_BUCKET_SESSION, "2026-03-08T05:00:00Z", 28,
+        (("2026-03-08T05:00:00Z", "2026-03-08T08:00:00Z"),
+         ("2026-03-08T08:00:00Z", "2026-03-08T12:00:00Z")),
+    )
+
+
+def fall_bucket_schedule() -> ReplaySchedule:
+    """2026-11-01, 00:00 through 08:00 Eastern: 04:00Z through 13:00Z."""
+    return _bucket_schedule(
+        FALL_BUCKET_SESSION, "2026-11-01T04:00:00Z", 36,
+        (("2026-11-01T04:00:00Z", "2026-11-01T09:00:00Z"),
+         ("2026-11-01T09:00:00Z", "2026-11-01T13:00:00Z")),
+    )
+
+
+def spring_bucket_request() -> PortfolioReplayRequest:
+    """Trade from 07:00Z, so the 08:00Z bucket end lands inside the test."""
+    return base_request(
+        window=ReplayWindow(
+            train_start=ts("2026-03-08T05:00:00Z"),
+            train_end=ts("2026-03-08T07:00:00Z"),
+            test_start=ts("2026-03-08T07:00:00Z"),
+            test_end=ts("2026-03-08T12:00:00Z"),
+        ),
+        schedule_identity=spring_bucket_schedule().identity,
+        ic_tail_end=ts("2026-03-08T12:00:00Z"),
+    )
+
+
+def fall_bucket_request() -> PortfolioReplayRequest:
+    """Trade from 08:00Z, so the 09:00Z bucket end lands inside the test."""
+    return base_request(
+        window=ReplayWindow(
+            train_start=ts("2026-11-01T04:00:00Z"),
+            train_end=ts("2026-11-01T08:00:00Z"),
+            test_start=ts("2026-11-01T08:00:00Z"),
+            test_end=ts("2026-11-01T13:00:00Z"),
+        ),
+        schedule_identity=fall_bucket_schedule().identity,
+        ic_tail_end=ts("2026-11-01T13:00:00Z"),
+    )
+
+
+def bucket_dependencies() -> ReplayDependencies:
+    """The base timeframe and the four-hour bucket, and nothing else."""
+    return ReplayDependencies(timeframes=("15m", "4h"), external_symbols=())
+
+
 # ------------------------------------------------------------- bar fixtures
 
 
@@ -697,6 +802,24 @@ def base_frames() -> dict:
 
 def base_bars() -> PortfolioBars:
     return PortfolioBars(base_frames())
+
+
+def prepared_for(
+    request: PortfolioReplayRequest, schedule: ReplaySchedule,
+    dependencies: ReplayDependencies, *,
+    build: Callable[[tuple], pd.DataFrame] = bar_frame,
+) -> tuple[ValidatedSchedule, _ValidatedPortfolioBars]:
+    """One validated schedule and the engine-owned bars that match it.
+
+    The two travel together everywhere: a prepared frame's rows are the
+    schedule's labels, in the schedule's order, so a caller holding one without
+    the other cannot read a row. Built through the real doors, so a fixture
+    cannot hand a context module bars the bar preflight would have refused.
+    """
+    validated = validate_schedule(request, schedule)
+    frames = frames_for(request, schedule, dependencies, build=build)
+    return (validated, prepare_portfolio_bars(
+        request, PortfolioBars(frames), validated, dependencies))
 
 
 def without_pair(frames: dict, symbol: str, timeframe: str) -> dict:
@@ -795,6 +918,13 @@ def counting_registry() -> tuple[FrozenStrategyRegistry, FactoryCalls]:
     calls = FactoryCalls()
     definitions = base_definitions(lambda item: _counted(item, calls))
     return (FrozenStrategyRegistry.from_definitions(definitions), calls)
+
+
+def counting_definitions(
+    calls: FactoryCalls,
+) -> Callable[[StrategyDefinition], StrategyDefinition]:
+    """A `wrap` for `replay_fixture` that counts and collects every runtime."""
+    return lambda definition: _counted(definition, calls)
 
 
 def _counted(definition: StrategyDefinition,
@@ -1047,6 +1177,11 @@ class StrategyCall:
     now: pd.Timestamp
     visible: tuple[tuple[str, int], ...]
     last_base_label: pd.Timestamp | None
+    # This runtime's OWN call count, counting from one. It is the only field
+    # here that is per instance rather than per event, so it is what tells two
+    # runtimes apart from one shared between them: two isolated runtimes each
+    # start at one, and one shared runtime counts straight through.
+    sequence: int = 0
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1067,6 +1202,10 @@ class ScriptedPlay:
     manage_raises: str | None = None
     factory_raises: str | None = None
     raises_at: pd.Timestamp | None = None
+    # What the built runtime CALLS itself, when that is not the name its
+    # definition is registered under. Only a test that wants the two to
+    # disagree sets it; a real definition names its own runtime.
+    runtime_name: str | None = None
 
 
 class ScriptedStrategy(Strategy):
@@ -1086,6 +1225,9 @@ class ScriptedStrategy(Strategy):
         self.name = name
         self._play = play
         self._calls = calls
+        # Per instance and never shared: the counter a leaked runtime would
+        # carry across the play symbol it does not belong to.
+        self._sequence = 0
 
     def on_bar(self, ctx: MarketContext):
         self._record("on_bar", ctx)
@@ -1119,6 +1261,9 @@ class ScriptedStrategy(Strategy):
             raise RuntimeError(message)
 
     def _record(self, operation: str, ctx: MarketContext) -> None:
+        # Counted whether or not anyone is listening, so a replay driven
+        # without a call log still isolates the same way one driven with it does.
+        self._sequence += 1
         if self._calls is None:
             return
         base = ctx.bars[ctx.tfs.driving]
@@ -1127,6 +1272,7 @@ class ScriptedStrategy(Strategy):
             now=ctx.now,
             visible=tuple((tf, len(ctx.bars[tf])) for tf in ctx.tfs.all),
             last_base_label=base.index[-1] if len(base.index) else None,
+            sequence=self._sequence,
         ))
 
 
@@ -1166,7 +1312,8 @@ def scripted_definition(play: ScriptedPlay, *, timeframes: tuple[str, ...] = ("1
     def factory(params: Mapping) -> Strategy:
         if play.factory_raises is not None:
             raise RuntimeError(play.factory_raises)
-        return ScriptedStrategy(params, play=play, name=name, calls=calls)
+        return ScriptedStrategy(params, play=play, calls=calls,
+                                name=play.runtime_name or name)
 
     return StrategyDefinition(
         name=name, definition_digest=scripted_digest(play.play_id),
@@ -1234,6 +1381,7 @@ def replay_fixture(
     dependencies: ReplayDependencies | None = None,
     drive_dependencies: ReplayDependencies | None = None,
     window: ReplayWindow | None = None,
+    wrap: Callable[[StrategyDefinition], StrategyDefinition] | None = None,
     calls: list | None = None,
 ) -> ReplayEvents:
     """One complete replay over the real internal components.
@@ -1247,7 +1395,12 @@ def replay_fixture(
     `drive_dependencies` drives the loop with a closure the bars were NOT
     prepared under, which is the one miswiring the runtime has to refuse and
     which nothing else can stage.
+
+    `wrap` decorates every definition on its way into the registry, the way
+    `base_definitions` does, so a caller that wants each construction counted
+    or each runtime collected gets it without a second assembler here.
     """
+    hook = (lambda definition: definition) if wrap is None else wrap
     scripted = (default_plays(at=signal_at, stop=signal_stop, target=signal_target)
                 if plays is None else tuple(plays))
     declared = BASE_ONLY if dependencies is None else dependencies
@@ -1270,8 +1423,9 @@ def replay_fixture(
     if reverse_param_keys:
         frames = dict(reversed(list(frames.items())))
     registry = FrozenStrategyRegistry.from_definitions(tuple(
-        scripted_definition(play, timeframes=declared.timeframes,
-                            external_symbols=declared.external_symbols, calls=calls)
+        hook(scripted_definition(
+            play, timeframes=declared.timeframes,
+            external_symbols=declared.external_symbols, calls=calls))
         for play in supplied
     ))
     prepared = prepare_portfolio_bars(
