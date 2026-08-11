@@ -30,6 +30,9 @@ from functools import cache
 from types import MappingProxyType
 from typing import Protocol, TypeAlias, runtime_checkable
 
+import pandas as pd
+
+from nakagai.data.schema import DEFAULT_TIMEFRAMES, TimeframeSet
 from nakagai.engine.bars import BAR_TIMEFRAMES, BASE_TIMEFRAME, _require_timeframe
 from nakagai.engine.canonical import _digest
 from nakagai.engine.portfolio_types import (
@@ -45,7 +48,12 @@ from nakagai.engine.portfolio_types import (
 )
 from nakagai.strategies.base import Strategy
 from nakagai.strategies.composite.strategy import CompositeStrategy, member_blocks
-from nakagai.strategies.rules.strategy import RuleStrategy, spec_timeframes
+from nakagai.strategies.rules.margins import spec_margin
+from nakagai.strategies.rules.strategy import (
+    SPEC_TIMEFRAME_DEFAULT,
+    RuleStrategy,
+    spec_timeframes,
+)
 from nakagai.strategies.rules.vocabulary import (
     Term,
     VocabularyFactory,
@@ -58,10 +66,17 @@ REGISTRY_CONTRACT_VERSION = "1"
 
 # The graded factor: params, symbol, a read-only causal view clipped at
 # `test_end`, and the observation timestamps, returning one finite or null
-# margin per timestamp in the same order. The view type arrives with the IC
-# lens, so the parameters stay unconstrained here rather than being named
-# after a type this module would have to invent.
+# margin per timestamp in the same order. The view type is `CausalFactorBars`
+# in `engine/ic.py`, which imports this module to resolve definitions, so it
+# is reached here through its attributes rather than by name: the dependency
+# stays one-way and the parameters stay unconstrained.
 IcFactor: TypeAlias = Callable[..., tuple[float | None, ...]]
+
+# The observation axis that factor is graded on, from the same canonical
+# params. It is a function rather than a value because a private play carries
+# its spec in `params`, so the frame its conditions are evaluated on is not
+# known until a play names it.
+IcTimeframe: TypeAlias = Callable[[Mapping[str, JSONValue]], str]
 
 
 @dataclass(frozen=True)
@@ -114,6 +129,13 @@ class StrategyDefinition:
     definitions of the strategies it votes over, a leaf carries none. It is
     the tree its factory builds from, so the registry can prove the closure is
     complete and acyclic without calling anything.
+
+    `ic_factor` and `ic_timeframe` are one thing in two fields and arrive
+    together or not at all. A margin series says nothing without the axis it
+    was graded on: the IC lens has to know which schedule record supplies the
+    observation instants, and which series the realized forward return is
+    taken over. A factor without an axis would leave the lens guessing, and an
+    axis without a factor would describe a measurement nobody can take.
     """
 
     name: str
@@ -121,6 +143,7 @@ class StrategyDefinition:
     dependencies: Callable[[Mapping[str, JSONValue]], StrategyDependencies]
     factory: Callable[[Mapping[str, JSONValue]], Strategy]
     ic_factor: IcFactor | None
+    ic_timeframe: IcTimeframe | None = None
     members: tuple["StrategyDefinition", ...] = ()
 
     def __post_init__(self) -> None:
@@ -130,8 +153,15 @@ class StrategyDefinition:
         for field in ("dependencies", "factory"):
             if not callable(getattr(self, field)):
                 raise _fail("invalid_type", "value must be callable", field=field)
-        if self.ic_factor is not None and not callable(self.ic_factor):
-            raise _fail("invalid_type", "value must be callable", field="ic_factor")
+        for field in ("ic_factor", "ic_timeframe"):
+            value = getattr(self, field)
+            if value is not None and not callable(value):
+                raise _fail("invalid_type", "value must be callable", field=field)
+        if (self.ic_factor is None) != (self.ic_timeframe is None):
+            raise _fail(
+                "invalid_value", "a graded factor and its axis arrive together",
+                field="ic_timeframe", name=self.name,
+            )
         _require_items(self.members, "members", StrategyDefinition)
 
 
@@ -389,7 +419,6 @@ def rules_definition(
     *,
     spec: Mapping[str, JSONValue] | None = None,
     vocabulary_factory: VocabularyFactory = core_vocabulary,
-    ic_factor: IcFactor | None = None,
 ) -> StrategyDefinition:
     """A definition over one RuleSpec.
 
@@ -397,6 +426,12 @@ def rules_definition(
     private play whose spec travels in `params`. Supplying both is refused at
     the factory rather than merged: a play that could replace the spec its
     digest was taken over would replay something the digest does not describe.
+
+    Every RuleSpec definition is graded, and the factor is not a parameter.
+    The graded margin of a rule tree is `spec_margin`, there is exactly one of
+    it, and a definition that could be built without it would report a null
+    correlation over zero observations, which reads as a lens that measured
+    and found nothing rather than as one that never ran.
     """
     bound = None if spec is None else _require_params(spec, "spec")
     digest = vocabulary_digest(vocabulary_factory)
@@ -414,10 +449,80 @@ def rules_definition(
         return RuleStrategy(_rules_params(bound, params),
                             vocabulary=vocabulary_factory(), name=name)
 
+    def ic_timeframe(params: Mapping[str, JSONValue]) -> str:
+        return _spec_axis(_rules_params(bound, params).get("spec") or {})
+
+    def ic_factor(params: Mapping[str, JSONValue], symbol: str, bars,
+                  timestamps: tuple) -> tuple[float | None, ...]:
+        return _spec_margins(
+            _rules_params(bound, params).get("spec") or {},
+            bars, vocabulary_factory,
+        )
+
     return StrategyDefinition(
         name=name, definition_digest=definition_digest,
-        dependencies=dependencies, factory=factory, ic_factor=ic_factor,
+        dependencies=dependencies, factory=factory,
+        ic_factor=ic_factor, ic_timeframe=ic_timeframe,
     )
+
+
+def _spec_axis(spec: Mapping[str, JSONValue]) -> str:
+    """The frame a spec's conditions are evaluated on, and observed at.
+
+    An EMPTY spec is the inert strategy, which reads nothing and grades
+    nothing, so it answers with the base timeframe rather than the grammar's
+    default. `spec_timeframes` returns nothing for it too, so a definition
+    declaring only the base frame would otherwise carry an axis outside its
+    own data closure and the lens would refuse the replay over a play that
+    can only ever report an empty measurement.
+    """
+    if not spec:
+        return BASE_TIMEFRAME
+    return spec.get("timeframe", SPEC_TIMEFRAME_DEFAULT)
+
+
+def _spec_margins(spec: Mapping[str, JSONValue], bars,
+                  vocabulary_factory: VocabularyFactory) -> tuple[float | None, ...]:
+    """`spec_margin` over the IC lens's causal view, one value per label.
+
+    `bars` is the lens's `CausalFactorBars`: frames already cut at `test_end`,
+    the axis those observations lie on, and the axis row each one is labeled
+    at. Nothing here reaches for a bar the view does not carry, which is what
+    keeps the IC tail out of a graded margin.
+
+    The span is not optional. Without one the end-anchored primitives default
+    to the whole frame and walk every row of history to produce values no
+    observation reads; with it they produce the values the selected rows
+    themselves would have seen. `FrameEval` refuses a span that moves after
+    anything is cached, so this builds one evaluator per call.
+
+    `spec_margin` answers on the index it was handed, row for row, so the
+    values travel out in the order they arrived and nothing realigns them. An
+    inert spec is the one exception: it grades an EMPTY series rather than a
+    series of nulls, which means the same thing to the lens and is spelled out
+    here rather than left to an alignment step.
+    """
+    from nakagai.strategies.rules.frame_eval import FrameEval
+    frames = dict(bars.frames)
+    axis = bars.timeframe
+    index = pd.DatetimeIndex(list(bars.labels))
+    evaluator = FrameEval(
+        frames,
+        TimeframeSet(
+            driving=BASE_TIMEFRAME,
+            higher=tuple(tf for tf in frames if tf != BASE_TIMEFRAME),
+            deltas=DEFAULT_TIMEFRAMES.deltas,
+            session_aligned=DEFAULT_TIMEFRAMES.session_aligned,
+        ),
+        vocabulary=vocabulary_factory(),
+    )
+    rows = frames[axis].index
+    evaluator.set_span(axis, int(rows.searchsorted(index[0], side="left")),
+                       int(rows.searchsorted(index[-1], side="right")))
+    margin = spec_margin(spec, evaluator, index)
+    if margin.empty:
+        return (None,) * len(index)
+    return tuple(None if pd.isna(value) else float(value) for value in margin)
 
 
 def composite_definition(
@@ -477,7 +582,8 @@ def composite_definition(
 
     return StrategyDefinition(
         name=name, definition_digest=definition_digest,
-        dependencies=dependencies, factory=factory, ic_factor=None,
+        dependencies=dependencies, factory=factory,
+        ic_factor=None, ic_timeframe=None,
         members=tuple(resolved[key] for key in sorted(resolved)),
     )
 

@@ -400,12 +400,41 @@ def test_a_definition_without_a_bound_spec_is_inert_without_one():
     assert built.name == "private_rules"
 
 
-def test_an_ic_factor_is_optional():
-    assert strategy_registry().resolve("combo").ic_factor is None
-    marker = ("marker",)
-    definition = rules_definition(
-        "ic_rules", DEFINITION_BASE_D, ic_factor=lambda *args: marker)
-    assert definition.ic_factor(PARAMS, "SPY", None, ()) is marker
+def test_a_rule_spec_definition_is_graded_and_a_composite_is_not():
+    """A composite has no single margin series, so it declares no factor.
+
+    Grading is not a parameter of `rules_definition`: the graded margin of a
+    rule tree is `spec_margin` and there is exactly one of it, so a definition
+    that could be built without it would report zero observations and read as
+    a lens that measured nothing rather than one that never ran.
+    """
+    combo = strategy_registry().resolve("combo")
+    assert (combo.ic_factor, combo.ic_timeframe) == (None, None)
+
+    graded = strategy_registry().resolve("sma_cross")
+    assert graded.ic_factor is not None
+    assert graded.ic_timeframe(PARAMS) == "1h"
+
+
+def test_a_definition_refuses_a_factor_without_its_observation_axis():
+    """The two are one thing. A margin series says nothing without its axis."""
+    with pytest.raises(ReplayInputError) as caught:
+        StrategyDefinition(
+            name="broken", definition_digest=DEFINITION_BASE_D,
+            dependencies=lambda params: None, factory=lambda params: None,
+            ic_factor=lambda *args: (), ic_timeframe=None,
+        )
+    assert caught.value.code == "invalid_value"
+
+
+def test_a_definition_refuses_an_observation_axis_without_its_factor():
+    with pytest.raises(ReplayInputError) as caught:
+        StrategyDefinition(
+            name="broken", definition_digest=DEFINITION_BASE_D,
+            dependencies=lambda params: None, factory=lambda params: None,
+            ic_factor=None, ic_timeframe=lambda params: "15m",
+        )
+    assert caught.value.code == "invalid_value"
 
 
 def test_a_definition_refuses_a_factory_that_is_not_callable():

@@ -41,6 +41,7 @@ from nakagai.engine.canonical import (
 )
 from nakagai.engine.benchmark import ReplayCurve, _equity_series
 from nakagai.engine.execution import ReplayEvents, _PortfolioRuntime
+from nakagai.engine.ic import _ic_map, _portfolio_slices
 from nakagai.engine.metrics import _portfolio_metrics, _slice_accumulators
 from nakagai.engine.portfolio import EntryProposal, PositionKey, _Ledger
 from nakagai.engine.portfolio_types import (
@@ -764,6 +765,32 @@ def scheduled_labels(schedule: ReplaySchedule, timeframe: str,
                  if row.timeframe == timeframe and row.label_ts < boundary)
 
 
+def ramp_frame(labels, base: float = 100.0) -> pd.DataFrame:
+    """One flat opening print and a close that widens away from it, row by row.
+
+    Built so a REAL spec margin is hand-derivable. `close - open` rises
+    strictly with the row, so a graded `close > open` ranks the rows in their
+    own order, while the forward return `0.01k / close[t]` falls strictly with
+    the row because the close climbs. The two rankings are exact reverses, so
+    the rank correlation of that spec over this frame is exactly -1 at every
+    horizon.
+    """
+    index = pd.DatetimeIndex(list(labels), tz="UTC", name="ts")
+    opens = [base] * len(index)
+    closes = [base + 0.01 * step for step in range(len(index))]
+    return pd.DataFrame(
+        {
+            "open": opens,
+            "high": [price + 0.2 for price in closes],
+            "low": [base - 0.2] * len(index),
+            "close": closes,
+            "volume": [1_000.0 + step for step in range(len(index))],
+        },
+        index=index,
+        dtype="float64",
+    )
+
+
 def flat_frame(labels, price: float = 100.0) -> pd.DataFrame:
     """A frame whose every bar is one flat print at `price`.
 
@@ -871,6 +898,24 @@ PRIVATE_RULES_SPEC = {
 }
 
 PRIVATE_RULES_PARAMS = {"spec": PRIVATE_RULES_SPEC}
+
+# A spec evaluated on the BASE timeframe, so its IC observations are the
+# scheduled base closes rather than a handful of context freshness instants.
+# The wiring test needs a real spec on the axis that carries enough
+# observations to reach a correlation at all.
+#
+# Two raw prices and no indicator, on purpose. An indicator leaves its first
+# rows undefined, and an ungraded observation drops its own pair, so a moving
+# average would quietly cost the first observations and make an exact count
+# impossible to state. Over `ramp_frame` this spec's margin rises strictly
+# with the row, which is what makes its coefficient an exact number.
+IC_RULES_SPEC = {
+    "version": 2, "name": "ic_rules", "timeframe": "15m",
+    "long": {"all": [{"lhs": {"src": "close"}, "op": ">",
+                      "rhs": {"src": "open"}}]},
+    "risk": {"stop": {"kind": "atr", "n": 14, "mult": 2.0},
+             "target": {"kind": "rr", "rr": 2.0}},
+}
 
 # Block ids out of alphabetical order on purpose: members are built and voted
 # in declared block order, never in sorted order.
@@ -1225,6 +1270,17 @@ class ScriptedPlay:
     # engine's data, so what it reaches is whatever else holds the same frame
     # object, which is the only way one play's write can become another's.
     writes_first_open: float | None = None
+    # The graded factor, as data. `ic_timeframe` is the observation axis and
+    # its presence is what makes the definition graded at all; a play that
+    # leaves it None carries no factor, which is the composite's case and the
+    # default. `ic_margin` grades one observation from its position in the
+    # selected series and the instant it was taken at.
+    ic_timeframe: str | None = None
+    ic_margin: Callable[[int, pd.Timestamp], float | None] | None = None
+    # A raw value to hand back instead of one margin per timestamp, so the
+    # lens's own contract checks have something to refuse.
+    ic_returns: object = _UNSET
+    ic_raises: str | None = None
 
 
 class ScriptedStrategy(Strategy):
@@ -1311,9 +1367,31 @@ def scripted_digest(play_id: str) -> str:
     return hashlib.sha256(scripted_name(play_id).encode("utf-8")).hexdigest()
 
 
+@dataclasses.dataclass(frozen=True)
+class FactorCall:
+    """One question the IC lens asked a graded factor, and what it could see.
+
+    The causal view is the whole subject, so the row counts and the last label
+    of each frame are recorded rather than the frames themselves: a tail bar
+    inside the view moves `rows` and `last_label`, and nothing else here can.
+    """
+
+    play_id: str
+    symbol: str
+    timeframe: str
+    timestamps: tuple[pd.Timestamp, ...]
+    labels: tuple[pd.Timestamp, ...]
+    rows: tuple[tuple[str, int], ...]
+    last_label: pd.Timestamp | None
+    # The highest close in the causal view of the axis frame. A price rather
+    # than a count, so one symbol's bars are distinguishable from another's.
+    highest_close: float | None
+
+
 def scripted_definition(play: ScriptedPlay, *, timeframes: tuple[str, ...] = ("15m",),
                         external_symbols: tuple[str, ...] = (),
-                        calls: list | None = None) -> StrategyDefinition:
+                        calls: list | None = None,
+                        factor_calls: list | None = None) -> StrategyDefinition:
     """One definition per scripted play, built the way a real one is.
 
     Both halves of the closure are parameters, and `replay_fixture` feeds them
@@ -1322,6 +1400,10 @@ def scripted_definition(play: ScriptedPlay, *, timeframes: tuple[str, ...] = ("1
     surface at the C11 re-point, where `dependencies_for` derives the closure
     from these declarations instead: the bar set would change and the golden
     bytes would move.
+
+    The graded factor arrives with its axis or not at all, which is the
+    definition's own invariant: a play that names no `ic_timeframe` carries no
+    factor and its slice reports no measurement.
     """
     name = scripted_name(play.play_id)
     digest = vocabulary_digest(core_vocabulary)
@@ -1337,9 +1419,40 @@ def scripted_definition(play: ScriptedPlay, *, timeframes: tuple[str, ...] = ("1
         return ScriptedStrategy(params, play=play, calls=calls,
                                 name=play.runtime_name or name)
 
+    def ic_timeframe(params: Mapping) -> str:
+        return play.ic_timeframe
+
+    def ic_factor(params: Mapping, symbol: str, bars, timestamps: tuple):
+        if factor_calls is not None:
+            factor_calls.append(_factor_call(play, symbol, bars, timestamps))
+        if play.ic_raises is not None:
+            raise RuntimeError(play.ic_raises)
+        if play.ic_returns is not _UNSET:
+            return play.ic_returns
+        grade = play.ic_margin or (lambda position, at: float(position))
+        return tuple(grade(position, at) for position, at in enumerate(timestamps))
+
+    graded = play.ic_timeframe is not None
     return StrategyDefinition(
         name=name, definition_digest=scripted_digest(play.play_id),
-        dependencies=dependencies, factory=factory, ic_factor=None,
+        dependencies=dependencies, factory=factory,
+        ic_factor=ic_factor if graded else None,
+        ic_timeframe=ic_timeframe if graded else None,
+    )
+
+
+def _factor_call(play: ScriptedPlay, symbol: str, bars,
+                 timestamps: tuple) -> FactorCall:
+    frame = bars.frame(bars.timeframe)
+    return FactorCall(
+        play_id=play.play_id,
+        symbol=symbol,
+        timeframe=bars.timeframe,
+        timestamps=tuple(timestamps),
+        labels=tuple(bars.labels),
+        rows=tuple((tf, len(bars.frame(tf))) for tf in sorted(bars.frames)),
+        last_label=frame.index[-1] if len(frame.index) else None,
+        highest_close=float(frame["close"].max()) if len(frame.index) else None,
     )
 
 
@@ -1401,6 +1514,7 @@ class ReplayParts:
     schedule: ValidatedSchedule
     prepared: _ValidatedPortfolioBars
     events: ReplayEvents
+    registry: FrozenStrategyRegistry
 
 
 def replay_parts(
@@ -1421,8 +1535,10 @@ def replay_parts(
     dependencies: ReplayDependencies | None = None,
     drive_dependencies: ReplayDependencies | None = None,
     window: ReplayWindow | None = None,
+    build: Callable[[tuple], pd.DataFrame] | None = None,
     wrap: Callable[[StrategyDefinition], StrategyDefinition] | None = None,
     calls: list | None = None,
+    factor_calls: list | None = None,
 ) -> ReplayParts:
     """One complete replay over the real internal components.
 
@@ -1441,6 +1557,11 @@ def replay_parts(
     `wrap` decorates every definition on its way into the registry, the way
     `base_definitions` does, so a caller that wants each construction counted
     or each runtime collected gets it without a second assembler here.
+
+    `build` supplies the bar geometry. The default is one flat print at
+    `price`, which is what makes every cash figure an exact literal; a caller
+    measuring a correlation asks for a frame whose closes move, because a flat
+    series has one distinct forward return and no rank to correlate.
     """
     hook = (lambda definition: definition) if wrap is None else wrap
     scripted = (default_plays(at=signal_at, stop=signal_stop, target=signal_target)
@@ -1458,9 +1579,9 @@ def replay_parts(
     )
     schedule = base_schedule()
     validated = validate_schedule(request, schedule)
+    geometry = (lambda labels: flat_frame(labels, price)) if build is None else build
     frames = with_base_bars(
-        frames_for(request, schedule, declared,
-                   build=lambda labels: flat_frame(labels, price)),
+        frames_for(request, schedule, declared, build=geometry),
         bars,
     )
     for symbol, timeframe in drop_pairs:
@@ -1470,7 +1591,8 @@ def replay_parts(
     registry = FrozenStrategyRegistry.from_definitions(tuple(
         hook(scripted_definition(
             play, timeframes=declared.timeframes,
-            external_symbols=declared.external_symbols, calls=calls))
+            external_symbols=declared.external_symbols, calls=calls,
+            factor_calls=factor_calls))
         for play in supplied
     ))
     prepared = prepare_portfolio_bars(
@@ -1480,7 +1602,7 @@ def replay_parts(
         declared if drive_dependencies is None else drive_dependencies,
     ).run()
     return ReplayParts(request=request, schedule=validated, prepared=prepared,
-                       events=events)
+                       events=events, registry=registry)
 
 
 def replay_fixture(**overrides) -> ReplayEvents:
@@ -1533,6 +1655,85 @@ def replay_metrics(**overrides) -> ReplayLenses:
         metrics=_portfolio_metrics(
             curve, parts.events.trades, parts.events.rejections, parts.schedule),
         slices=_slice_accumulators(parts.events, parts.schedule),
+    )
+
+
+# ------------------------------------------------------- the IC lens fixtures
+
+# The IC window trades one session and leaves the rest of the schedule as
+# tail, which the default window cannot do: it ends at `ic_tail_end`, so no
+# forward return there can read past the last close it tested.
+#
+# Every number below is a literal read off `base_schedule`. That schedule
+# carries forty base intervals, twenty-six on 2026-11-25 and fourteen on the
+# 2026-11-27 half day, with the holiday between them absent. Warming up on the
+# first interval and testing through the full session's last close selects
+# ordinals 1 through 25, and leaves ordinals 26 through 39 as outcome-only
+# bars. So a one-bar and a five-bar horizon reach a close for all twenty-five
+# observations, while a twenty-bar horizon reaches one for the first nineteen.
+IC_TRAIN_START = ts("2026-11-25T14:30:00Z")
+IC_TEST_START = ts("2026-11-25T14:45:00Z")
+IC_TEST_END = ts("2026-11-25T21:00:00Z")
+IC_OBSERVATIONS = 25
+IC_TAIL_LIMITED_OBSERVATIONS = 19
+
+
+def ic_window(test_end: pd.Timestamp = IC_TEST_END,
+              test_start: pd.Timestamp = IC_TEST_START) -> ReplayWindow:
+    """Warm up on one base interval and test through `test_end`."""
+    return ReplayWindow(
+        train_start=IC_TRAIN_START, train_end=test_start,
+        test_start=test_start, test_end=test_end,
+    )
+
+
+def ic_plays(*, timeframe: str = "15m",
+             margin: Callable[[int, pd.Timestamp], float | None] | None = None,
+             play_ids: tuple[str, ...] = DEFAULT_PLAY_IDS,
+             **fields) -> tuple[ScriptedPlay, ...]:
+    """Plays that trade nothing and grade every observation they are given.
+
+    Nothing signals, so the ledger, the curve, and the trade cohorts stay
+    empty and an IC test measures the IC lens rather than the chronology.
+    """
+    return tuple(
+        ScriptedPlay(play_id=play_id, priority=100, signals=(),
+                     ic_timeframe=timeframe, ic_margin=margin, **fields)
+        for play_id in play_ids
+    )
+
+
+@dataclasses.dataclass(frozen=True)
+class ReplayIc:
+    """One replay, its accumulators, its IC map, and the frozen slices.
+
+    The same assembly as `replay_metrics` with the IC lens applied instead,
+    which is the composition the public entry point performs. Task C11
+    re-points it at `run_portfolio` and nothing it produces may move.
+    """
+
+    request: PortfolioReplayRequest
+    schedule: ValidatedSchedule
+    prepared: _ValidatedPortfolioBars
+    events: ReplayEvents
+    totals: Mapping[PositionKey, object]
+    ic: Mapping[PositionKey, tuple[IcEstimate, IcEstimate, IcEstimate]]
+    slices: tuple[PortfolioSlice, ...]
+
+
+def replay_ic(**overrides) -> ReplayIc:
+    """The IC map and the frozen slices over one replay."""
+    parts = replay_parts(**overrides)
+    totals = _slice_accumulators(parts.events, parts.schedule)
+    ic = _ic_map(parts.schedule, parts.prepared, parts.registry)
+    return ReplayIc(
+        request=parts.request,
+        schedule=parts.schedule,
+        prepared=parts.prepared,
+        events=parts.events,
+        totals=totals,
+        ic=ic,
+        slices=_portfolio_slices(parts.schedule, totals, ic),
     )
 
 
