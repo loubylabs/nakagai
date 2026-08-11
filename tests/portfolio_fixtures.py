@@ -6,20 +6,28 @@ test, so one failure names one cause. Parent identities are derived here the
 way platform derives them: build the draft, ask core for the candidate
 identity, then ask core for the replay identity.
 
-Later Phase 1 tasks extend this module with bars, registries, and a replay
-helper. It stays a thin assembler over the real core values and never grows a
-second replay implementation.
+`replay_fixture` at the foot of the module runs a real replay: it assembles the
+request, schedule, registry, and prepared bars and hands them to the one
+runtime. Later Phase 1 tasks extend it and the last re-points it at the public
+entry point. It stays a thin assembler over the real core values and never
+grows a second replay implementation.
 """
 
 import dataclasses
+import hashlib
 from collections.abc import Callable, Mapping
 from dataclasses import field
 from datetime import date
 
 import pandas as pd
 
-from nakagai.engine.bars import PortfolioBars, ReplayDependencies
+from nakagai.engine.bars import (
+    PortfolioBars,
+    ReplayDependencies,
+    prepare_portfolio_bars,
+)
 from nakagai.engine.canonical import (
+    canonical_replay_bytes,
     definition_digest,
     expected_candidate_id,
     expected_replay_id,
@@ -27,7 +35,9 @@ from nakagai.engine.canonical import (
     result_digest,
     schedule_digest,
     trade_id,
+    _projection,
 )
+from nakagai.engine.execution import ReplayEvents, _PortfolioRuntime
 from nakagai.engine.portfolio import EntryProposal, _Ledger
 from nakagai.engine.portfolio_types import (
     AccountPolicy,
@@ -40,6 +50,7 @@ from nakagai.engine.portfolio_types import (
     ExitReason,
     FeeSpec,
     IcEstimate,
+    ManagementDecision,
     PlayRequest,
     PortfolioMetrics,
     PortfolioReplayRequest,
@@ -59,10 +70,14 @@ from nakagai.engine.portfolio_types import (
 from nakagai.engine.registry import (
     FrozenStrategyRegistry,
     StrategyDefinition,
+    StrategyDependencies,
     composite_definition,
     rules_definition,
+    vocabulary_digest,
 )
 from nakagai.engine.schedule import ValidatedSchedule, validate_schedule
+from nakagai.strategies.base import HOLD, MarketContext, Strategy
+from nakagai.strategies.rules.vocabulary import core_vocabulary
 
 BATCH_ID = "0198b1c2-3d4e-7f80-8123-456789abcdef"
 REGISTRY_DIGEST = "1f" * 32
@@ -634,23 +649,43 @@ def scheduled_labels(schedule: ReplaySchedule, timeframe: str,
                  if row.timeframe == timeframe and row.label_ts < boundary)
 
 
+def flat_frame(labels, price: float = 100.0) -> pd.DataFrame:
+    """A frame whose every bar is one flat print at `price`.
+
+    Nothing moves, so a protective level is reached only where a test puts a bar
+    that reaches it, and every quantity, cash figure, and PnL in a replay test
+    is an exact literal a reader can check by hand.
+    """
+    index = pd.DatetimeIndex(list(labels), tz="UTC", name="ts")
+    prices = [price] * len(index)
+    return pd.DataFrame(
+        {
+            "open": prices, "high": prices, "low": prices, "close": prices,
+            "volume": [1_000.0] * len(index),
+        },
+        index=index,
+        dtype="float64",
+    )
+
+
 def frames_for(request: PortfolioReplayRequest, schedule: ReplaySchedule,
-               dependencies: ReplayDependencies) -> dict:
+               dependencies: ReplayDependencies, *,
+               build: Callable[[tuple], pd.DataFrame] = bar_frame) -> dict:
     """One valid frame for every pair the request and dependencies declare."""
     built = {}
     for symbol in request.symbols:
         for timeframe in dependencies.timeframes:
-            built[(symbol, timeframe)] = bar_frame(
+            built[(symbol, timeframe)] = build(
                 scheduled_labels(schedule, timeframe, request.ic_tail_end),
             )
     for symbol in dependencies.external_symbols:
         for timeframe in dependencies.timeframes:
-            built.setdefault((symbol, timeframe), bar_frame(
+            built.setdefault((symbol, timeframe), build(
                 scheduled_labels(schedule, timeframe, request.window.test_end),
             ))
     benchmark = request.benchmark.symbol
     if benchmark is not None:
-        built.setdefault((benchmark, "15m"), bar_frame(
+        built.setdefault((benchmark, "15m"), build(
             scheduled_labels(schedule, "15m", request.window.test_end),
         ))
     return built
@@ -934,3 +969,325 @@ def _fold_exit_excursion(
     elif reason is ExitReason.TARGET:
         ledger.observe(key, target, target)
         ledger.observe(key, low, low)
+
+
+# ---------------------------------------------------------- replay fixtures
+
+# `replay_fixture` runs a REAL replay. It assembles the same request, schedule,
+# registry, and prepared bars the public entry point will and hands them to the
+# one runtime, so it is a thin assembler rather than a second engine. Task C11
+# re-points it at `run_portfolio` and nothing it produces may move.
+
+# The default window trades the 2026-11-27 half day, whose first interval opens
+# at 14:30Z and whose last closes at 18:00Z.
+FIRST_CLOSE = ts("2026-11-27T14:45:00Z")
+
+# Only the base timeframe, which is what a replay reads to fill, mark, and
+# settle. A test that needs a context timeframe asks for one.
+BASE_ONLY = ReplayDependencies(timeframes=("15m",), external_symbols=())
+
+# Two plays under ONE priority, so the two canonical orders are genuinely
+# different: signal ordinals run play-major and funding runs symbol-major.
+DEFAULT_PLAY_IDS = ("play-a", "play-b")
+
+_UNSET = object()
+
+
+@dataclasses.dataclass(frozen=True)
+class SignalPlan:
+    """One scripted signal: which symbol, which deciding close, what geometry.
+
+    The entry reference is not named here. It is the deciding raw close the
+    context carries, which is what the strategy boundary demands of a real
+    signal, so a scripted play cannot claim a price it was not looking at.
+    """
+
+    symbol: str
+    at: pd.Timestamp
+    stop: float
+    target: float
+    direction: str = "long"
+
+
+@dataclasses.dataclass(frozen=True)
+class ManagePlan:
+    """One scripted management decision at one close."""
+
+    symbol: str
+    at: pd.Timestamp
+    action: str = "hold"
+    stop: float | None = None
+    target: float | None = None
+
+
+@dataclasses.dataclass(frozen=True)
+class BarPlan:
+    """One base bar replaced, so a test can put a level where it wants it."""
+
+    symbol: str
+    at: pd.Timestamp
+    open: float
+    high: float
+    low: float
+    close: float
+
+
+@dataclasses.dataclass(frozen=True)
+class StrategyCall:
+    """One call the replay made into one runtime, and what it could see.
+
+    The call log is the chronology as the strategies experienced it, which is
+    the only place an ordering between two different operations at one instant
+    is observable at all.
+    """
+
+    operation: str
+    play_id: str
+    symbol: str
+    now: pd.Timestamp
+    visible: tuple[tuple[str, int], ...]
+    last_base_label: pd.Timestamp | None
+
+
+@dataclasses.dataclass(frozen=True)
+class ScriptedPlay:
+    """One play's whole behavior, as data.
+
+    The failure knobs raise ordinary exceptions from ordinary strategy code, so
+    the replay's error boundary is exercised the way a real defect would.
+    """
+
+    play_id: str
+    priority: int = 100
+    signals: tuple[SignalPlan, ...] = ()
+    manages: tuple[ManagePlan, ...] = ()
+    on_bar_returns: object = _UNSET
+    on_bar_raises: str | None = None
+    manage_raises: str | None = None
+    factory_raises: str | None = None
+    raises_at: pd.Timestamp | None = None
+
+
+class ScriptedStrategy(Strategy):
+    """A strategy that emits exactly what its script names, and nothing else.
+
+    A test double for the strategy CONTRACT and never for the replay: every
+    value it returns still crosses `validate_signal_sequence` or
+    `validate_management_decision` on the way back in, so a scripted play cannot
+    smuggle a signal past a gate a real play has to pass.
+    """
+
+    name = "scripted"
+
+    def __init__(self, params: dict | None = None, *, play: ScriptedPlay,
+                 name: str, calls: list | None = None):
+        super().__init__(params)
+        self.name = name
+        self._play = play
+        self._calls = calls
+
+    def on_bar(self, ctx: MarketContext):
+        self._record("on_bar", ctx)
+        self._raise_if_due(self._play.on_bar_raises, ctx.now)
+        if self._play.on_bar_returns is not _UNSET:
+            return self._play.on_bar_returns
+        close = float(ctx.driving_bars["close"].iloc[-1])
+        return tuple(
+            Signal(symbol=ctx.symbol, direction=plan.direction, entry_ref=close,
+                   stop=plan.stop, target=plan.target, confidence=0.5,
+                   setup_tags=("scripted",), rationale=f"{self.name} plan")
+            for plan in self._play.signals
+            if plan.symbol == ctx.symbol and plan.at == ctx.now
+        )
+
+    def manage(self, position, ctx: MarketContext) -> ManagementDecision:
+        self._record("manage", ctx)
+        self._raise_if_due(self._play.manage_raises, ctx.now)
+        for plan in self._play.manages:
+            if plan.symbol == ctx.symbol and plan.at == ctx.now:
+                return ManagementDecision(action=plan.action, stop=plan.stop,
+                                          target=plan.target)
+        return HOLD
+
+    def _raise_if_due(self, message: str | None, now: pd.Timestamp) -> None:
+        if message is None:
+            return
+        if self._play.raises_at is None or self._play.raises_at == now:
+            raise RuntimeError(message)
+
+    def _record(self, operation: str, ctx: MarketContext) -> None:
+        if self._calls is None:
+            return
+        base = ctx.bars[ctx.tfs.driving]
+        self._calls.append(StrategyCall(
+            operation=operation, play_id=self._play.play_id, symbol=ctx.symbol,
+            now=ctx.now,
+            visible=tuple((tf, len(ctx.bars[tf])) for tf in ctx.tfs.all),
+            last_base_label=base.index[-1] if len(base.index) else None,
+        ))
+
+
+def scripted_name(play_id: str) -> str:
+    return f"scripted-{play_id}"
+
+
+def scripted_digest(play_id: str) -> str:
+    """One stable base digest per play, derived from its name.
+
+    Derived rather than positional, so reversing the order the plays are
+    supplied in cannot quietly hand one play another's definition.
+    """
+    return hashlib.sha256(scripted_name(play_id).encode("utf-8")).hexdigest()
+
+
+def scripted_definition(play: ScriptedPlay, *, timeframes: tuple[str, ...] = ("15m",),
+                        calls: list | None = None) -> StrategyDefinition:
+    """One definition per scripted play, built the way a real one is."""
+    name = scripted_name(play.play_id)
+    digest = vocabulary_digest(core_vocabulary)
+
+    def dependencies(params: Mapping) -> StrategyDependencies:
+        return StrategyDependencies(timeframes=tuple(timeframes),
+                                    external_symbols=(), vocabulary_digest=digest)
+
+    def factory(params: Mapping) -> Strategy:
+        if play.factory_raises is not None:
+            raise RuntimeError(play.factory_raises)
+        return ScriptedStrategy(params, play=play, name=name, calls=calls)
+
+    return StrategyDefinition(
+        name=name, definition_digest=scripted_digest(play.play_id),
+        dependencies=dependencies, factory=factory, ic_factor=None,
+    )
+
+
+def replay_account(equity: float = 100_000.0, *, risk_pct: float = 0.001,
+                   max_open_positions: int = 5) -> AccountPolicy:
+    """An account that funds four flat-price fills at once.
+
+    One tenth of a percent of a hundred thousand is a hundred dollars of risk,
+    which over a one dollar stop is a hundred shares at a hundred dollars: ten
+    thousand per fill, forty thousand for the default four.
+    """
+    return AccountPolicy(
+        starting_equity=equity, risk_pct=risk_pct,
+        max_open_positions=max_open_positions,
+        max_positions_per_play_symbol=1, settlement_model="cash_t1",
+    )
+
+
+def default_plays(*, at: pd.Timestamp = FIRST_CLOSE, stop: float = 99.0,
+                  target: float = 103.0) -> tuple[ScriptedPlay, ...]:
+    """Two plays that both signal on both symbols at one close."""
+    signals = tuple(SignalPlan(symbol=symbol, at=at, stop=stop, target=target)
+                    for symbol in ("QQQ", "SPY"))
+    return tuple(ScriptedPlay(play_id=play_id, priority=100, signals=signals)
+                 for play_id in DEFAULT_PLAY_IDS)
+
+
+def with_base_bars(frames: dict, plans) -> dict:
+    """The same frames with named base bars replaced, one plan per bar.
+
+    A plan naming a label the schedule never carries is a mistake in the test
+    rather than a new bar, so it raises here instead of silently extending an
+    index the bar preflight would then refuse for a different reason.
+    """
+    edited = dict(frames)
+    for plan in plans:
+        key = (plan.symbol.upper(), "15m")
+        frame = edited[key].copy(deep=True)
+        if plan.at not in frame.index:
+            raise AssertionError(f"the schedule carries no base bar at {plan.at}")
+        frame.loc[plan.at, ["open", "high", "low", "close"]] = [
+            plan.open, plan.high, plan.low, plan.close,
+        ]
+        edited[key] = frame
+    return edited
+
+
+def replay_fixture(
+    *,
+    plays: tuple[ScriptedPlay, ...] | None = None,
+    symbol_order: tuple[str, ...] = ("SPY", "QQQ"),
+    reverse_param_keys: bool = False,
+    reverse_plays: bool = False,
+    signal_at: pd.Timestamp = FIRST_CLOSE,
+    signal_stop: float = 99.0,
+    signal_target: float = 103.0,
+    bars: tuple[BarPlan, ...] = (),
+    price: float = 100.0,
+    account: AccountPolicy | None = None,
+    execution: ExecutionPolicy | None = None,
+    dependencies: ReplayDependencies | None = None,
+    window: ReplayWindow | None = None,
+    calls: list | None = None,
+) -> ReplayEvents:
+    """One complete replay over the real internal components.
+
+    Three knobs vary orderings the canonical contract is supposed to ignore, and
+    they exist for the determinism tests: `symbol_order` supplies the request's
+    symbols and its bar mapping in either order, `reverse_plays` supplies the
+    plays and the registry's definitions in either order, and
+    `reverse_param_keys` supplies each play's parameter object in either order.
+    """
+    scripted = (default_plays(at=signal_at, stop=signal_stop, target=signal_target)
+                if plays is None else tuple(plays))
+    declared = BASE_ONLY if dependencies is None else dependencies
+    params = _scripted_params(reverse_param_keys)
+    supplied = tuple(reversed(scripted)) if reverse_plays else scripted
+    request = base_request(
+        plays=tuple(_scripted_play_request(play, params) for play in supplied),
+        symbols=tuple(symbol_order),
+        account=replay_account() if account is None else account,
+        execution=frictionless_execution() if execution is None else execution,
+        **({} if window is None else {"window": window}),
+    )
+    schedule = base_schedule()
+    validated = validate_schedule(request, schedule)
+    frames = with_base_bars(
+        frames_for(request, schedule, declared,
+                   build=lambda labels: flat_frame(labels, price)),
+        bars,
+    )
+    if reverse_param_keys:
+        frames = dict(reversed(list(frames.items())))
+    registry = FrozenStrategyRegistry.from_definitions(tuple(
+        scripted_definition(play, timeframes=declared.timeframes, calls=calls)
+        for play in supplied
+    ))
+    prepared = prepare_portfolio_bars(
+        request, PortfolioBars(frames), validated, declared)
+    return _PortfolioRuntime(request, validated, registry, prepared, declared).run()
+
+
+def canonical_event_bytes(events: ReplayEvents) -> bytes:
+    """The canonical bytes of one replay's events.
+
+    The C6-level answer to "are these two replays the same replay?", built from
+    the same codec and the same contract projection the result digest uses, so
+    two replays agree here exactly when they will agree there.
+    """
+    return canonical_replay_bytes({
+        "trades": [_projection(row) for row in events.trades],
+        "rejections": [_projection(row) for row in events.rejections],
+        "marks": [{"ts": mark.ts, "snapshot": _projection(mark.snapshot)}
+                  for mark in events.marks],
+        "signals": [{"play_id": play_id, "symbol": symbol, "count": count}
+                    for (play_id, symbol), count in events.signal_counts.items()],
+    })
+
+
+def _scripted_params(reverse: bool) -> dict:
+    """One play's parameters, supplied in canonical order or against it."""
+    params = {"alpha": 1, "beta": 2.5}
+    return dict(reversed(list(params.items()))) if reverse else params
+
+
+def _scripted_play_request(play: ScriptedPlay, params: Mapping) -> PlayRequest:
+    return PlayRequest(
+        play_id=play.play_id,
+        strategy=scripted_name(play.play_id),
+        definition_digest=definition_digest(scripted_digest(play.play_id), params),
+        params=params,
+        priority=play.priority,
+    )

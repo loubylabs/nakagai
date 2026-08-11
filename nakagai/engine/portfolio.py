@@ -448,7 +448,23 @@ class _Ledger:
         for index, proposal in enumerate(proposals):
             _require_instance(proposal, f"proposals[{index}]", EntryProposal)
             self._require_own(proposal.intent)
-        return tuple(sorted(proposals, key=self._proposal_order))
+        return tuple(sorted(proposals,
+                            key=lambda item: self._intent_order(item.intent)))
+
+    def pending_order(
+        self, intents: Sequence[EntryIntent],
+    ) -> tuple[EntryIntent, ...]:
+        """Intents in that same funding order, priced or not.
+
+        The window-end sweep holds intents whose eligibility open never arrived,
+        so they never became proposals. They still expire in funding order, and
+        it is the one this ledger orders everything by rather than a second
+        spelling of it.
+        """
+        for index, intent in enumerate(intents):
+            _require_instance(intent, f"intents[{index}]", EntryIntent)
+            self._require_own(intent)
+        return tuple(sorted(intents, key=self._intent_order))
 
     def exit_fill(self, direction: str, reference: float) -> float:
         """What closing `direction` at `reference` actually prints."""
@@ -883,14 +899,19 @@ class _Ledger:
             raise _fail("unknown_symbol", "the request does not trade this symbol",
                         field="symbol", symbol=intent.symbol)
 
-    def _position_order(self, key: PositionKey) -> tuple[int, str, int]:
-        position = self._positions[key]
-        return (self._plays[key[0]].priority, key[1], position.intent.signal_ordinal)
+    def _intent_order(self, intent: EntryIntent) -> tuple[int, str, int]:
+        """Play priority, uppercase symbol, signal ordinal: the ONE order.
 
-    def _proposal_order(self, proposal: EntryProposal) -> tuple[int, str, int]:
-        intent = proposal.intent
+        Funding an eligible proposal, expiring a pending intent, and visiting an
+        open position are three views of the same question, so they read one
+        key. Two spellings of it could disagree at a same-timestamp contention,
+        which is exactly where the ordering is load bearing.
+        """
         return (self._plays[intent.play_id].priority, intent.symbol,
                 intent.signal_ordinal)
+
+    def _position_order(self, key: PositionKey) -> tuple[int, str, int]:
+        return self._intent_order(self._positions[key].intent)
 
 
 def _refused(reason: RejectionReason) -> Reservation:
