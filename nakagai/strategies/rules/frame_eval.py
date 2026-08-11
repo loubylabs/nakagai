@@ -16,7 +16,9 @@ Two node kinds need care and both are handled here rather than by the caller:
   row by row over the replay's span instead of broadcast.
 """
 
+import functools
 import json
+import operator
 
 import numpy as np
 import pandas as pd
@@ -24,6 +26,7 @@ import pandas as pd
 from nakagai.data.schema import DEFAULT_TIMEFRAMES, TimeframeSet
 from nakagai.engine.context import visible_counts
 from nakagai.strategies.rules.primitives import end_anchored_series
+from nakagai.strategies.rules.spec import GROUP_KEYS
 from nakagai.strategies.rules.vocabulary import (
     Vocabulary, is_condition_rule, resolve_vocabulary,
 )
@@ -286,7 +289,22 @@ class FrameEval:
         return self._align(term.fn(None, frame, **a), src_tf, tf)
 
     def condition_series(self, cond: dict, tf: str) -> pd.Series:
-        """Elementwise boolean series for a comparison condition."""
+        """Elementwise boolean series for a comparison condition. dtype ==
+        bool: an unknown operand resolves to not-fired HERE, at the public
+        boundary, per N3-D4. See _condition_series_na for the private
+        Kleene-preserving leaf this is built from.
+        """
+        return self._condition_series_na(cond, tf).fillna(False).astype(bool)
+
+    def _condition_series_na(self, cond: dict, tf: str) -> pd.Series:
+        """Elementwise NULLABLE boolean series: dtype "boolean", pd.NA where
+        an operand is unknown. Private per N3-D4: pd.NA lives only beneath
+        group_series's and driving_group's public boundary, and the one other
+        reader of an unknown condition, a condition-typed arg's injected
+        eval_fn, reads condition_series (the bool-resolving public method)
+        rather than this one, so an unknown condition still does not count as
+        an occurrence there, which is today's behavior preserved deliberately.
+        """
         index = self._frames[tf].index
         lhs, rhs = self.series(cond["lhs"], tf), self.series(cond["rhs"], tf)
         if not isinstance(lhs, pd.Series):
@@ -304,15 +322,42 @@ class FrameEval:
             out = {">": lhs > rhs, "<": lhs < rhs,
                    ">=": lhs >= rhs, "<=": lhs <= rhs}[op]
             na = lhs.isna() | rhs.isna()
-        return out.where(~na, False).astype(bool)
+        # out is plain-bool: a float comparison against NaN reads False, never
+        # NaN, so the cast to nullable "boolean" is exact and `na` is what
+        # turns the right positions into pd.NA rather than a lossy False.
+        return out.astype("boolean").mask(na, pd.NA)
+
+    @staticmethod
+    def _is_group_node(node) -> bool:
+        return isinstance(node, dict) and any(k in node for k in GROUP_KEYS)
+
+    def _group_reduce_na(self, group: dict, tf: str) -> pd.Series:
+        """The private Kleene-preserving reducer: nullable boolean throughout.
+
+        N3-D2: all/any reduce element-wise with & / |, via functools.reduce,
+        NEVER DataFrame.all/any(axis=1). Measured wrong for `all` in the
+        dangerous direction: DataFrame.all(axis=1, skipna=False) over
+        [True, NA] and over [NA, NA] both read True, where D8 requires NA.
+        `any` happens to agree under both readings, which is why a test that
+        only exercises `any` would pass over this defect.
+
+        `not` is Kleene negation on the nullable dtype: ~NA is NA, never
+        True, which is what stops a warming indicator from firing through a
+        negation on its first bars.
+        """
+        key, val = next(iter(group.items()))
+        if key == "not":
+            return ~self._group_reduce_na(val, tf)
+        parts = [self._group_reduce_na(i, tf) if self._is_group_node(i)
+                 else self._condition_series_na(i, tf) for i in val]
+        op = operator.and_ if key == "all" else operator.or_
+        return functools.reduce(op, parts)
 
     def group_series(self, group: dict, tf: str) -> pd.Series:
-        """all/any tree as one boolean series on `tf`'s index."""
-        key, items = next(iter(group.items()))
-        parts = [self.group_series(i, tf) if ("all" in i or "any" in i)
-                 else self.condition_series(i, tf) for i in items]
-        both = pd.concat(parts, axis=1)
-        return both.all(axis=1) if key == "all" else both.any(axis=1)
+        """all/any/not tree as one boolean series on `tf`'s index. dtype ==
+        bool: an unknown group result resolves to not-fired HERE, at the
+        public boundary, per N3-D4."""
+        return self._group_reduce_na(group, tf).fillna(False).astype(bool)
 
     def driving_group(self, group: dict, tf: str) -> pd.Series:
         """`group` as a boolean series on the DRIVING index, computed once.
