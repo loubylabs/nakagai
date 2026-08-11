@@ -198,6 +198,20 @@ def _value_at(out, i: int) -> float:
 
 
 def _agrees(whole: float, prefix: float) -> bool:
+    """Exact equality, deliberately, with no tolerance.
+
+    The same arithmetic over a prefix of the same frame should produce the same
+    float, and core's terms are built on pandas rolling and ewm, which accumulate
+    sequentially rather than batching by array length. A term that broke that,
+    an FFT convolution or a numba-engine reduction, could differ in the last bit
+    and be reported FAILED for a reason that is not look-ahead.
+
+    A tolerance would trade that false failure for a false pass, and a false pass
+    is the one outcome this gate cannot afford: a term peeking by a small amount
+    is still peeking. The false failure is loud, names the row, and a human reads
+    it. So the tolerance stays out, and this docstring is the record of the
+    choice rather than an oversight for node 02 to rediscover.
+    """
     return (pd.isna(whole) and pd.isna(prefix)) or whole == prefix
 
 
@@ -222,8 +236,17 @@ def verify_term(term: Term, bars: pd.DataFrame) -> TermVerdict:
         return TermVerdict(term.name, VACUOUS,
                            f"frame of {len(bars)} rows is too short to probe")
 
+    # Enumeration is a rejection, not a crash. arg_sets raises over the cap, and
+    # letting that propagate would take down a whole node 02 batch of 100+ terms
+    # over one wide schema, instead of reporting one refused term among many.
+    try:
+        every_arg_set = arg_sets(term)
+    except Exception as exc:                           # noqa: BLE001
+        return TermVerdict(term.name, FAILED,
+                           f"cannot enumerate this term's arguments: {exc}")
+
     checked = 0
-    for args in arg_sets(term):
+    for args in every_arg_set:
         try:
             raw = (term.fn(None, bars, **args) if term.kind == "primitive"
                    else term.fn(bars, args) if term.kind == "bar"
@@ -235,15 +258,23 @@ def verify_term(term: Term, bars: pd.DataFrame) -> TermVerdict:
         if mismatch is not None:
             return TermVerdict(term.name, FAILED, f"schema: {mismatch}")
 
-        whole = evaluate_term(term, bars, args)
+        # Reuse the call already made rather than calling term.fn a second time
+        # on the whole frame. evaluate_term's only step beyond the raw dispatch
+        # is this same narrowing, and node 02 multiplies the saving by 100+.
+        whole = raw[args["field"]] if isinstance(raw, pd.DataFrame) else raw
         saw_a_number = False
         for i in rows:
             want = _value_at(whole, i)
             try:
                 prefix = _value_at(evaluate_term(term, bars.iloc[:i + 1], args), -1)
             except Exception as exc:                   # noqa: BLE001
-                return TermVerdict(term.name, FAILED,
-                                   f"args {args} row {i}: prefix call raised {exc}")
+                # "evaluating raised", not "the term raised": this call goes
+                # through evaluate_term, which is the gate's own code, so a bug
+                # in the gate must not read as the term's causality failure.
+                return TermVerdict(
+                    term.name, FAILED,
+                    f"args {args} row {i}: evaluating over the prefix raised "
+                    f"{type(exc).__name__}: {exc}")
             if not _agrees(want, prefix):
                 return TermVerdict(
                     term.name, FAILED,

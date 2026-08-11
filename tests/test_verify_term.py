@@ -366,6 +366,26 @@ def test_a_term_that_raises_is_failed_not_swallowed(bars):
     assert verdict.status == FAILED and "boom" in verdict.reason
 
 
+def test_a_term_the_gate_cannot_enumerate_is_a_verdict_not_a_crash(bars):
+    """Over the cap is a rejection, not an exception out of verify_term.
+
+    arg_sets raises past MAX_ARG_SETS on purpose. If that propagates, node 02's
+    batch of 100-plus terms dies on the first wide schema instead of reporting
+    one refused term and carrying on, and the gate stops being able to say
+    anything about the other 99. The spec is explicit: a term whose signature
+    the gate cannot enumerate is a rejection, not a pass, and a crash is
+    neither.
+    """
+    term = Term("too_wide_to_enumerate", "series",
+                {f"c{i}": ("x", "y", "z") for i in range(6)},
+                {f"c{i}": "x" for i in range(6)},
+                lambda s, a: s)
+    verdict = verify_term(term, bars)
+    assert verdict.status == FAILED
+    assert "enumerate" in verdict.reason
+    assert str(MAX_ARG_SETS) in verdict.reason, "the reason must name the cap"
+
+
 def test_a_term_whose_schema_disagrees_with_its_columns_is_failed(bars):
     term = Term("under_declared", "frame", {"field": ("a",)}, {"field": "a"},
                 lambda s, a: pd.DataFrame({"a": s, "b": s.shift(-1)}))
