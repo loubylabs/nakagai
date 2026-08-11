@@ -15,8 +15,7 @@ import pytest
 from nakagai.data.cache import MemoryBars
 from nakagai.data.schema import TimeframeSet
 from nakagai.engine.costs import FeeModel, SlippageModel
-from nakagai.engine.engine import Engine
-from nakagai.engine.portfolio import SettledLedger
+from nakagai.engine.engine import Engine, _SettledLedger
 from nakagai.engine.provenance import ARITHMETIC_VERSION, FILL_MODE
 from nakagai.engine.portfolio_types import Signal
 from nakagai.strategies.base import Direction, Strategy
@@ -174,10 +173,10 @@ def test_fees_are_zero_by_default_and_recorded_anyway():
 
 
 def test_fees_are_charged_round_trip_and_deducted_from_pnl():
-    """Entry and exit, hence 2x. A per-trade commission of $1 on a round trip
-    is $2, and it comes out of pnl rather than sitting beside it, because every
-    metric above this layer reads pnl."""
-    priced = _run(_bars(_TAIL), fees=FeeModel(per_trade=1.0))
+    """The model prices one fill, and a round trip is two of them. A $1 fee
+    per fill is $2 on the trade, and it comes out of pnl rather than sitting
+    beside it, because every metric above this layer reads pnl."""
+    priced = _run(_bars(_TAIL), fees=FeeModel(per_fill=1.0))
     free = _run(_bars(_TAIL))
 
     assert priced.trades[0].fees == pytest.approx(2.0)
@@ -196,7 +195,7 @@ def test_pending_total_reports_unsettled_cash():
     """The public accessor _mark now uses. Reaching into _pending meant a
     change to settlement bookkeeping broke equity marking from a distance."""
     now = pd.Timestamp("2025-03-03 20:00", tz="UTC")
-    ledger = SettledLedger(1_000.0)
+    ledger = _SettledLedger(1_000.0)
     ledger.credit(250.0, now)
 
     assert ledger.pending_total() == pytest.approx(250.0)
@@ -206,9 +205,41 @@ def test_pending_total_empties_as_cash_settles():
     """settled() sweeps matured entries out of _pending, so callers must ask in
     that order. This pins the interaction the engine depends on."""
     monday = pd.Timestamp("2025-03-03 20:00", tz="UTC")
-    ledger = SettledLedger(1_000.0)
+    ledger = _SettledLedger(1_000.0)
     ledger.credit(250.0, monday)
 
     ledger.settled(monday + pd.Timedelta(days=1))
 
     assert ledger.pending_total() == pytest.approx(0.0)
+
+
+MON = pd.Timestamp("2026-06-01 15:00", tz="UTC")
+TUE = pd.Timestamp("2026-06-02 15:00", tz="UTC")
+FRI = pd.Timestamp("2026-06-05 15:00", tz="UTC")
+NEXT_MON = pd.Timestamp("2026-06-08 15:00", tz="UTC")
+
+
+def test_reserve_within_settled_cash():
+    led = _SettledLedger(1000.0)
+    assert led.reserve(400.0, MON) is True
+    assert led.settled(MON) == 600.0
+
+
+def test_reserve_rejects_over_settled():
+    led = _SettledLedger(1000.0)
+    assert led.reserve(1500.0, MON) is False
+    assert led.settled(MON) == 1000.0  # untouched
+
+
+def test_sale_proceeds_settle_next_weekday():
+    led = _SettledLedger(0.0)
+    led.credit(500.0, MON)
+    assert led.settled(MON) == 0.0       # same day: unsettled
+    assert led.settled(TUE) == 500.0     # T+1
+
+
+def test_friday_sale_settles_monday():
+    led = _SettledLedger(0.0)
+    led.credit(500.0, FRI)
+    assert led.settled(FRI + pd.Timedelta(hours=1)) == 0.0
+    assert led.settled(NEXT_MON) == 500.0

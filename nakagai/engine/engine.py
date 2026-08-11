@@ -13,22 +13,72 @@ the end-to-end statement of this pillar's contract; tests/test_engine_fills.py
 is the unit-level one.
 """
 
+import datetime as dt
 import math
 from dataclasses import dataclass
 
 import pandas as pd
 
 from nakagai.data.cache import BarCache
-from nakagai.data.schema import DEFAULT_TIMEFRAMES, TimeframeSet
+from nakagai.data.schema import DEFAULT_TIMEFRAMES, EXCHANGE_TZ, TimeframeSet
 from nakagai.engine.context import PreloadedBars, build_context, visible_counts
 from nakagai.engine.costs import FeeModel, SlippageModel
-from nakagai.engine.portfolio import SettledLedger
 from nakagai.engine.portfolio_types import (
     PositionView, Signal, brackets_protectively,
 )
 from nakagai.engine.provenance import ARITHMETIC_VERSION, FILL_MODE
 from nakagai.strategies.base import Direction, Strategy, call_manage, call_on_bar
 from nakagai.strategies.rules.vocabulary import core_vocabulary
+
+
+def _next_weekday(d: dt.date) -> dt.date:
+    d += dt.timedelta(days=1)
+    while d.weekday() >= 5:
+        d += dt.timedelta(days=1)
+    return d
+
+
+class _SettledLedger:
+    """T+1 settled-funds ledger for cash-account realism, skipping holidays.
+
+    Private to this engine, and retired with it. The portfolio replay settles
+    through `nakagai.engine.portfolio`, whose ledger takes its settlement
+    calendar from the schedule instead of assuming every weekday is a session.
+    """
+
+    def __init__(self, cash: float):
+        self._settled = float(cash)
+        self._pending: list[tuple[dt.date, float]] = []  # (settle_date_NY, amount)
+
+    def settled(self, now: pd.Timestamp) -> float:
+        today = now.tz_convert(EXCHANGE_TZ).date()
+        still = []
+        for settle_date, amount in self._pending:
+            if settle_date <= today:
+                self._settled += amount
+            else:
+                still.append((settle_date, amount))
+        self._pending = still
+        return self._settled
+
+    def reserve(self, amount: float, now: pd.Timestamp) -> bool:
+        if self.settled(now) < amount:
+            return False
+        self._settled -= amount
+        return True
+
+    def pending_total(self) -> float:
+        """Cash credited but not yet settled.
+
+        Equity marking needs this, and reaching into _pending to get it meant a
+        change to settlement bookkeeping broke the engine from a distance. Call
+        settled() first: it sweeps matured entries out of _pending, so asking
+        in the other order double-counts anything that has just settled.
+        """
+        return sum(amount for _, amount in self._pending)
+
+    def credit(self, amount: float, now: pd.Timestamp):
+        self._pending.append((_next_weekday(now.tz_convert(EXCHANGE_TZ).date()), float(amount)))
 
 
 @dataclass
@@ -73,6 +123,10 @@ class _Position:
     entry_ts: pd.Timestamp
     entry: float
     reserved: float
+    # What the opening fill cost. The fee model prices one fill, so the entry
+    # charge is taken at the entry and carried here rather than reconstructed
+    # at the close from a doubled exit charge.
+    entry_fee: float
     stop: float = 0.0     # live levels; strategies may ratchet via manage()
     target: float = 0.0
     # Running excursion extremes, in price. Seeded to the entry in __post_init__
@@ -157,7 +211,7 @@ class Engine:
                 counts = visible_counts(view.load(self.symbol, tf).index,
                                         closes, tf, self.tfs)
                 view.fe.set_span(tf, int(counts.min()) - 1, int(counts.max()))
-        ledger = SettledLedger(self.equity0)
+        ledger = _SettledLedger(self.equity0)
         trades: list[Trade] = []
         rejected = 0
         position: _Position | None = None
@@ -235,7 +289,7 @@ class Engine:
 
         return BacktestResult(trades, pd.Series(curve, dtype="float64"), rejected, self.equity0)
 
-    def _try_fill(self, sig: Signal, ts, open_price: float, ledger: SettledLedger, now) -> tuple["_Position | None", bool]:
+    def _try_fill(self, sig: Signal, ts, open_price: float, ledger: _SettledLedger, now) -> tuple["_Position | None", bool]:
         fill = (self.slippage.buy(open_price) if sig.direction == Direction.LONG
                 else self.slippage.sell(open_price))
         if not brackets_protectively(sig.direction, fill, sig.stop, sig.target):
@@ -255,7 +309,8 @@ class Engine:
         cost = qty * fill
         if not ledger.reserve(cost, now):
             return None, False
-        return _Position(sig, qty, ts, fill, cost, stop=sig.stop, target=sig.target), True
+        return _Position(sig, qty, ts, fill, cost, self.fees.charge(qty),
+                         stop=sig.stop, target=sig.target), True
 
     def _check_exit(self, pos: _Position, bar) -> tuple[float | None, str]:
         """Exit price for this bar, or (None, "") if neither level was reached.
@@ -299,9 +354,11 @@ class Engine:
                 return self.slippage.buy(pos.target), "target"
         return None, ""
 
-    def _close(self, pos: _Position, now, exit_price: float, reason: str, ledger: SettledLedger) -> Trade:
+    def _close(self, pos: _Position, now, exit_price: float, reason: str, ledger: _SettledLedger) -> Trade:
         s = pos.signal
-        fees = self.fees.charge(pos.qty)
+        # One charge per fill. The entry paid its own at the fill; this is the
+        # exit's, and the trade carries the pair.
+        fees = pos.entry_fee + self.fees.charge(pos.qty)
         if s.direction == Direction.LONG:
             pnl = (exit_price - pos.entry) * pos.qty - fees
             ledger.credit(pos.qty * exit_price - fees, now)
@@ -324,7 +381,7 @@ class Engine:
                      mae=adverse / risk_ps if risk_ps else 0.0,
                      mfe=favorable / risk_ps if risk_ps else 0.0)
 
-    def _mark(self, ledger: SettledLedger, pos: "_Position | None", price: float, now) -> float:
+    def _mark(self, ledger: _SettledLedger, pos: "_Position | None", price: float, now) -> float:
         # settled() first: it sweeps anything that has matured out of pending,
         # so the two calls must stay in this order or matured cash is counted twice.
         equity = ledger.settled(now) + ledger.pending_total()

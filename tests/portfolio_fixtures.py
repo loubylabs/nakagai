@@ -28,10 +28,12 @@ from nakagai.engine.canonical import (
     schedule_digest,
     trade_id,
 )
+from nakagai.engine.portfolio import EntryProposal, _Ledger
 from nakagai.engine.portfolio_types import (
     AccountPolicy,
     BenchmarkResult,
     BenchmarkSpec,
+    EntryIntent,
     EquityPoint,
     ExchangeScheduleIdentity,
     ExecutionPolicy,
@@ -50,6 +52,7 @@ from nakagai.engine.portfolio_types import (
     ReplayWindow,
     ScheduledBaseInterval,
     ScheduledContextBar,
+    Signal,
     SlippageSpec,
     TradeStats,
 )
@@ -773,3 +776,133 @@ def _counted(definition: StrategyDefinition,
 
     return dataclasses.replace(
         definition, factory=factory, dependencies=dependencies)
+
+
+# ---------------------------------------------------------- ledger fixtures
+
+# The ledger tests drive one account directly, so their timestamps come from
+# the schedule above rather than from a replay loop. Interval 0 of the full
+# session closes at the same instant interval 1 opens, which is exactly the
+# chronology the architecture freezes: decide at a close, fill at the next
+# scheduled open.
+SIGNAL_TS = ts("2026-11-25T14:45:00Z")
+ENTRY_TS = ts("2026-11-25T14:45:00Z")
+CLOSE_TS = ts("2026-11-25T15:00:00Z")
+# The half day that follows the Thanksgiving holiday. A credit raised on
+# SESSION_ONE settles here, two calendar days later, because 2026-11-26 is not
+# an exchange session.
+NEXT_OPEN_TS = ts("2026-11-27T14:30:00Z")
+LAST_CLOSE_TS = ts("2026-11-27T18:00:00Z")
+
+
+def frictionless_execution() -> ExecutionPolicy:
+    """Zero slippage and zero fees, so a ledger test can state one price.
+
+    Cost behavior gets its own fixtures and its own tests. Mixing the two
+    would mean every cash assertion carried a slippage term nobody was
+    testing, and a broken fee model could hide inside a rounded expectation.
+    """
+    return dataclasses.replace(
+        base_execution(),
+        slippage=SlippageSpec(bps=0.0, min_per_share=0.0),
+        fees=FeeSpec(per_fill=0.0, per_share=0.0),
+    )
+
+
+def ledger_request(
+    cash: float = 100_000.0, *, risk_pct: float = 0.01,
+    max_open_positions: int = 5, execution: ExecutionPolicy | None = None,
+) -> PortfolioReplayRequest:
+    """The base request with the account and cost policy a ledger test wants."""
+    return base_request(
+        account=AccountPolicy(
+            starting_equity=cash,
+            risk_pct=risk_pct,
+            max_open_positions=max_open_positions,
+            max_positions_per_play_symbol=1,
+            settlement_model="cash_t1",
+        ),
+        execution=frictionless_execution() if execution is None else execution,
+    )
+
+
+def funded_ledger(cash: float = 100_000.0, **overrides) -> _Ledger:
+    """One ledger holding `cash`, on the base schedule."""
+    request = ledger_request(cash, **overrides)
+    return _Ledger(request, validate_schedule(request, base_schedule()))
+
+
+def entry_intent(
+    ledger: _Ledger, symbol: str = "SPY", *, play_id: str = "play-a",
+    strategy: str = "sma_cross", direction: str = "long",
+    entry_ref: float = 100.0, stop: float = 98.6, target: float = 104.0,
+    signal_ordinal: int = 0, signal_ts: pd.Timestamp = SIGNAL_TS,
+    eligible_after: pd.Timestamp = ENTRY_TS,
+) -> EntryIntent:
+    """One intent belonging to `ledger`, long from 100.0 by default.
+
+    The default geometry is not arbitrary. A 1.4 stop distance sizes to seven
+    shares against a 1,000 account at one percent risk, which is the smallest
+    contention the ledger tests need: two of them cannot both fit.
+    """
+    return EntryIntent(
+        replay_id=ledger.replay_id,
+        play_id=play_id,
+        strategy=strategy,
+        symbol=symbol,
+        signal=Signal(
+            symbol=symbol.upper(), direction=direction, entry_ref=entry_ref,
+            stop=stop, target=target, confidence=0.7,
+            setup_tags=("trend",), rationale="fixture",
+        ),
+        signal_ordinal=signal_ordinal,
+        signal_ts=signal_ts,
+        order_type="market_next_open",
+        eligible_after=eligible_after,
+        expires_after_intervals=1,
+    )
+
+
+def opened_position(
+    ledger: _Ledger, symbol: str = "SPY", *, raw_open: float = 100.0,
+    frozen_equity: float | None = None, entry_ts: pd.Timestamp = ENTRY_TS,
+    **intent_fields,
+) -> tuple[tuple[str, str], EntryProposal]:
+    """Propose, reserve, and fill one position, asserting the reservation held.
+
+    Returns the position key and the proposal it was filled from, so a caller
+    can assert against the exact quantity and cash the ledger committed.
+    """
+    intent = entry_intent(ledger, symbol, **intent_fields)
+    equity = ledger.settled_cash if frozen_equity is None else frozen_equity
+    proposal = ledger.propose(intent, raw_open, equity)
+    reservation = ledger.reserve(proposal, equity)
+    assert reservation.accepted is True, reservation.reason
+    ledger.open(proposal, entry_ts)
+    return (proposal.key, proposal)
+
+
+def replay_ambiguous_long(
+    *, stop: float, target: float, low: float, high: float,
+    raw_open: float = 100.0, gap_open: float | None = None,
+) -> PortfolioTrade:
+    """One long, opened at `raw_open`, exited by one bar's own geometry.
+
+    The bar is the whole point: `low` and `high` are chosen by the caller to
+    reach one level, both, or neither, and the trade that comes back reports
+    which one the ledger settled at. `gap_open` gives the exit bar an opening
+    print away from the entry, which is how a gap case differs from an
+    intrabar one.
+    """
+    ledger = funded_ledger(100_000.0)
+    key, _ = opened_position(
+        ledger, raw_open=raw_open, entry_ref=raw_open, stop=stop, target=target,
+    )
+    bar_open = raw_open if gap_open is None else gap_open
+    ledger.observe(key, high, low)
+    hit = ledger.protective_exit(key, bar_open, high, low)
+    assert hit is not None, "the fixture bar reaches no protective level"
+    fill, reason = hit
+    return ledger.close(
+        key, fill, CLOSE_TS, reason, ledger.exit_fee(ledger.view(key).qty),
+    )

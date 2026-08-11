@@ -50,17 +50,22 @@ class SlippageModel:
 
 @dataclass(frozen=True)
 class FeeModel:
-    """Commissions and per-share fees, charged once on entry and once on exit.
+    """Commissions and per-share fees, priced one fill at a time.
 
     Zero by default, which is correct for the broker this platform trades
     through today. The seam still has to exist: without it the first broker
     that does charge silently invalidates every number in the evidence store,
     instead of changing one constant and re-proving.
+
+    One fill, never a round trip. A model that priced both ends from a single
+    call could only be charged at one of them, so an entry that reserves cash
+    and an exit that credits it had no way to each pay their own fee, and a
+    caller that did charge it twice paid four fills without anything raising.
     """
 
-    per_trade: float = 0.0
+    per_fill: float = 0.0
     per_share: float = 0.0
 
     def charge(self, qty: int) -> float:
-        """Round-trip cost for a position of `qty` shares."""
-        return 2 * (self.per_trade + self.per_share * abs(qty))
+        """What ONE fill of `qty` shares costs. Entry and exit each pay it."""
+        return self.per_fill + self.per_share * abs(qty)
