@@ -501,6 +501,58 @@ def test_not_over_a_warming_indicator_does_not_fire_on_the_first_bars():
     assert out.iloc[19:].any(), "fixture must fire once the indicator is warm"
 
 
+def test_a_not_nested_as_an_item_of_a_list_is_recognized_as_a_group():
+    """"X and not Y", the ordinary spelling, evaluated rather than described.
+
+    Every other `not` in this module sits at the TOP of its tree, where
+    `_group_reduce_na` reaches it through the `key == "not"` branch. That
+    branch is not the one that makes `not` composable. The recognizer inside
+    the list comprehension is, and until this test nothing in the suite
+    evaluated a `not` that was an ITEM of an all/any list: the nested cases
+    elsewhere go to margins, to describe, to canon and to the Pine refusal,
+    none of which is the evaluator.
+
+    So the one line making `not` usable in a real spec was guarded by nothing.
+    Narrowing `is_group_node(i)` back to the pre-node `("all" in i or "any" in
+    i)` left all 1976 tests passing while `group_series` raised
+    `KeyError: 'lhs'` on this spec, the item having fallen through to the
+    condition leaf. That exception is not loud where it lands: the platform
+    scanner catches Exception around `detect_events` and publishes zero market
+    events with a log warning.
+
+    Asserted against the hand-computed complement rather than against a
+    constant, so the test says what "and not" means rather than that it
+    returned something.
+
+    Compared on the WARM rows only, and that restriction is the point rather
+    than a convenience. `group_series` resolves unknown to False at its public
+    boundary, so composing two of its results negates a False and reads True,
+    while the evaluator composes underneath that boundary where ~NA is NA. The
+    two disagree on exactly the warm-up rows, the evaluator is the one that is
+    right, and which of them is right is N3-D4's question rather than this
+    test's; `test_not_over_a_warming_operand_does_not_fire` owns it. Comparing
+    everywhere would make this test fail for that reason instead of for its
+    own.
+    """
+    fe = FrameEval(_frames(), TFS)
+    x = {"lhs": {"src": "close"}, "op": ">", "rhs": {"ind": "sma", "n": 5}}
+    y = {"lhs": {"src": "close"}, "op": ">", "rhs": {"ind": "sma", "n": 20}}
+    nested = {"all": [x, {"not": {"all": [y]}}]}
+
+    warm = (fe.series({"ind": "sma", "n": 20}, "15m").notna()
+            & fe.series({"ind": "sma", "n": 5}, "15m").notna())
+    assert warm.any() and not warm.all(), "fixture must carry both phases"
+
+    out = fe.group_series(nested, "15m")
+    want = (fe.group_series({"all": [x]}, "15m")
+            & ~fe.group_series({"all": [y]}, "15m"))
+    # Both sides of the conjunction have to do work, or the equality holds
+    # vacuously over a series that is False everywhere.
+    assert out[warm].any() and not out[warm].all(), \
+        out[warm].value_counts().to_dict()
+    pd.testing.assert_series_equal(out[warm], want[warm], check_names=False)
+
+
 def test_not_over_a_not_yet_closed_higher_timeframe_operand_does_not_fire():
     """Acceptance item 7, through N3-D3's OPERAND path.
 
