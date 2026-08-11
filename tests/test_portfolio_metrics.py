@@ -18,9 +18,13 @@ Three habits carry the file:
   Sortino are the same statistic reached another way, so a test cannot pass by
   restating the code.
 - ULP RECONCILIATION. Parent and slice totals are compared through
-  `_within_one_ulp` rather than a decimal approximation, because the identity
-  the architecture states is a bitwise one under a fixed operation order and a
-  loose comparison would let a real disagreement through.
+  `_within_one_ulp` and `_within_ulps` rather than a decimal approximation,
+  because the identities the architecture states are bitwise ones and a loose
+  comparison would let a real disagreement through. The columns that add the
+  same terms at both levels are held to one ULP; the cross-level `net_pnl` sum
+  is held to the slice count, because the two levels evaluate different
+  expressions of it. The reconciliation test runs under the real cost model,
+  since a frictionless replay makes fees zero and cannot fail it.
 """
 
 import dataclasses
@@ -35,6 +39,7 @@ from nakagai.engine.metrics import (
     _portfolio_metrics,
     _slice_accumulators,
     _within_one_ulp,
+    _within_ulps,
 )
 from nakagai.engine.portfolio_types import (
     PortfolioMetrics,
@@ -194,21 +199,32 @@ def test_undefined_ratios_are_null():
 def test_every_play_symbol_slice_reconciles_to_portfolio_totals():
     """The additive identity, on counts and on every money column.
 
-    Slices are the attribution of the parent's own trades and refused signals,
-    so a total that did not reconcile would mean one of the two was reading
-    something the other could not see.
+    Run through the REAL slippage and fee models, because a frictionless replay
+    cannot fail this: with no fees a slice's `net_pnl` is its `pre_cost_pnl` to
+    the bit, so the one column whose two levels are computed by different
+    expressions never differs. Under costs it does, which is the whole reason
+    this test exists.
+
+    The bounds differ by column and the difference is not arbitrary. Counts,
+    fees, pre-cost PnL, and the two gross sums add the same values in the same
+    order at both levels and reconcile exactly. Summing the slices' `net_pnl`
+    evaluates `sum(p_k - f_k)` against the parent's `(sum p) - (sum f)`, so
+    each slice can contribute a rounding of its own and the bound is the slice
+    count. Measured here: two ULPs across four slices.
     """
-    lenses = mixed_lenses()
+    lenses = replay_metrics(plays=mixed_plays(), bars=MIXED_BARS,
+                            execution=base_execution())
     rows = tuple(lenses.slices.values())
     metrics = lenses.metrics
 
+    assert metrics.fees > 0.0
     assert len(rows) == len({(row.play_id, row.symbol) for row in rows})
     assert sum(row.trades for row in rows) == metrics.all_trades.n_trades
     assert sum(sum(row.rejection_counts.values()) for row in rows) == (
         metrics.n_rejections)
     assert sum(row.signals for row in rows) == 7
-    assert _within_one_ulp(
-        sum(row.net_pnl for row in rows), metrics.net_pnl)
+    assert _within_ulps(
+        sum(row.net_pnl for row in rows), metrics.net_pnl, len(rows))
     assert _within_one_ulp(
         sum(row.pre_cost_pnl for row in rows), metrics.pre_cost_pnl)
     assert _within_one_ulp(sum(row.fees for row in rows), metrics.fees)
@@ -216,6 +232,23 @@ def test_every_play_symbol_slice_reconciles_to_portfolio_totals():
         sum(row.gross_profit for row in rows), metrics.all_trades.gross_profit)
     assert _within_one_ulp(
         sum(row.gross_loss for row in rows), metrics.all_trades.gross_loss)
+
+
+def test_a_slice_net_pnl_is_its_own_two_columns_exactly():
+    """The identity a user checks by hand stays exact, per row.
+
+    This is the trade the cross-level bound above pays for. Every slice's
+    `net_pnl` is exactly its `pre_cost_pnl` minus its `fees`, so a reader can
+    verify one row against the two numbers printed beside it, and the same
+    holds for the parent against its own two columns.
+    """
+    lenses = replay_metrics(plays=mixed_plays(), bars=MIXED_BARS,
+                            execution=base_execution())
+
+    for row in lenses.slices.values():
+        assert row.net_pnl == row.pre_cost_pnl - row.fees
+    assert lenses.metrics.net_pnl == (
+        lenses.metrics.pre_cost_pnl - lenses.metrics.fees)
 
 
 def test_the_parent_pnl_identity_ties_the_trades_to_the_curve():
@@ -341,8 +374,14 @@ def test_the_curve_metrics_are_hand_calculable():
 
     The six points are 100,000, then 200,000 twice, then 100,000 three times.
     The peak is 200,000 from the second point on, so three points sit at a
-    drawdown of exactly one half and three at zero. Max drawdown is 0.5 and the
-    ulcer index is the root mean square of all six, `sqrt(3 * 0.25 / 6)`.
+    drawdown of exactly one half and three at zero.
+
+    The two statistics read different samples, which is what makes this fixture
+    worth stating twice. Max drawdown is the deepest point of the whole series,
+    0.5. The ulcer index averages the anchor and the four close points alone,
+    two of which are underwater, so it is `sqrt(2 * 0.25 / 5)`. Averaging the
+    post-close point in as well would give `sqrt(3 * 0.25 / 6)`, a different
+    number from the same curve.
     """
     metrics = daily_metrics((1.0, -0.5))
 
@@ -350,9 +389,26 @@ def test_the_curve_metrics_are_hand_calculable():
     assert metrics.ending_equity == STARTING_EQUITY
     assert metrics.total_return == 0.0
     assert metrics.max_drawdown == 0.5
-    assert metrics.ulcer_index == math.sqrt(0.125)
+    assert metrics.ulcer_index == math.sqrt(0.1)
+    assert metrics.ulcer_index != math.sqrt(0.125)
     assert metrics.cagr == 0.0
     assert metrics.calmar == 0.0
+
+
+def test_a_final_liquidation_deepens_the_drawdown_but_not_the_ulcer_index():
+    """The two samples pulled apart, on one curve.
+
+    Nothing moves until the window's forced exit, which leaves the post-close
+    point at half the starting equity. That point is the deepest the account
+    ever was, so it is the maximum drawdown, which reads the whole series. It
+    is not one of the points the ulcer index averages, which is why the same
+    curve reports no time underwater at all.
+    """
+    metrics = daily_metrics((0.0, 0.0), final=50_000.0)
+
+    assert metrics.ending_equity == 50_000.0
+    assert metrics.max_drawdown == 0.5
+    assert metrics.ulcer_index == 0.0
 
 
 def test_a_curve_that_never_drew_down_has_no_calmar():
@@ -463,10 +519,18 @@ def test_a_session_the_curve_never_marked_refuses():
     assert raised.value.code == "misaligned_marks"
 
 
-def test_a_daily_return_with_no_denominator_refuses():
-    """A session that ended at zero cannot divide the next one."""
+@pytest.mark.parametrize(
+    "returns", [(-1.0, 0.0), (-1.5, 0.0)], ids=["at_zero", "below_zero"],
+)
+def test_a_daily_return_with_no_usable_denominator_refuses(returns):
+    """A session that ended at or below zero cannot divide the next one.
+
+    Zero has no quotient. A negative one has a quotient that lies: an account
+    climbing from -50,000 to -25,000 would report a 50 percent LOSS, and a
+    short losing more than its collateral is how equity gets there.
+    """
     with pytest.raises(ReplayInputError) as raised:
-        daily_metrics((-1.0, 0.0))
+        daily_metrics(returns)
 
     assert raised.value.code == "nonfinite_binary64"
     assert raised.value.details["field"] == "daily_return"
@@ -687,13 +751,19 @@ def test_metrics_computed_under_another_arithmetic_version_refuse():
     assert raised.value.details["expected"] == ARITHMETIC_VERSION
 
 
-def test_a_curve_carrying_no_point_refuses():
-    """The opening anchor is the denominator of nearly everything here."""
+@pytest.mark.parametrize("kept", [0, 1], ids=["no_point", "anchor_only"])
+def test_a_curve_too_short_to_measure_refuses(kept):
+    """The anchor is the denominator of nearly everything here.
+
+    A series of one point has no close to average either, which is what would
+    leave the ulcer index dividing by zero.
+    """
     validated = daily_validated(2)
-    curve = dataclasses.replace(daily_curve(validated, (0.0,)), equity=())
+    curve = daily_curve(validated, (0.0,))
+    short = dataclasses.replace(curve, equity=curve.equity[:kept])
 
     with pytest.raises(ReplayInputError) as raised:
-        _portfolio_metrics(curve, (), (), validated)
+        _portfolio_metrics(short, (), (), validated)
 
     assert raised.value.details["field"] == "equity"
 
@@ -788,6 +858,12 @@ def test_no_metric_or_slice_value_is_a_negative_zero():
     `float.hex()` spells it `-0x0.0p+0`, so a result carrying one hashes
     differently from the identical result that carried a positive zero. The
     break-even trade in this fixture is where one would appear.
+
+    The pooled statistics need the second fixture to be covered at all. They
+    are null on a one-session replay, so the filter below would skip all five
+    of them; the alternating series reports every one of them, and its skew is
+    exactly zero, which is the only zero among them and therefore the only one
+    whose sign can be wrong.
     """
     lenses = mixed_lenses()
     values = [getattr(lenses.metrics, field.name)
@@ -795,10 +871,14 @@ def test_no_metric_or_slice_value_is_a_negative_zero():
     for row in lenses.slices.values():
         values.extend((row.gross_profit, row.gross_loss, row.pre_cost_pnl,
                        row.net_pnl, row.fees, row.win_rate, row.expectancy_r))
+    pooled = daily_metrics(ALTERNATING)
+    values.extend((pooled.sharpe, pooled.sortino, pooled.psr, pooled.skew,
+                   pooled.kurtosis))
 
     zeros = [value for value in values
              if isinstance(value, float) and value == 0.0]
-    assert zeros
+    assert pooled.skew == 0.0
+    assert len(zeros) > 1
     assert all(math.copysign(1.0, value) > 0.0 for value in zeros)
 
 

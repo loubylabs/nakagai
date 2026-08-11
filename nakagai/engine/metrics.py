@@ -10,10 +10,18 @@ arithmetic alone would need.
   that can disagree with the first, and the disagreement would surface as a
   metric nobody can reconcile rather than as a refusal.
 - ONE FOLD, TWO READERS. The parent cohorts and the play-symbol accumulators
-  fold the same trades through the same `_Cohort`, in trade ordinal order. The
-  additive identity between them is therefore a property of the code rather
-  than an assertion about it: both sides add the same terms the same way, so
-  they reconcile inside one binary64 ULP.
+  fold the same trades through the same `_Cohort`, in trade ordinal order, so
+  neither can come to hold a term the other does not. What that buys is exact
+  reconciliation on every SUM: pre-cost PnL, fees, the two gross sums, and the
+  counts add the same values in the same order at both levels.
+  `net_pnl` is the one column where it does not, and the reason is structural
+  rather than associative. A slice reports `p_k - f_k` and the parent reports
+  `(sum p) - (sum f)`, which are different expressions of the same quantity, so
+  a reader summing the slices can land a few ULPs from the parent and the gap
+  grows with the number of slices. The alternative would be to define a slice's
+  net PnL as something a user cannot check against that slice's own two
+  columns, which is a worse trade: the per-row identity is the one a person
+  actually verifies by hand.
 - NULL, NEVER A NONFINITE. An undefined ratio is `None`. Strict JSON and
   Postgres carry no infinity and no NaN, so a profit factor with nothing lost
   reports its STATE instead of a value, and a statistic whose denominator
@@ -77,18 +85,38 @@ _SECONDS_PER_YEAR = 365.25 * 86_400.0
 _SECONDS_PER_HOUR = 3_600.0
 
 
+def _within_ulps(actual: float, expected: float, ulps: int) -> bool:
+    """Whether `actual` is `expected` or within `ulps` representable steps.
+
+    Built from `math.nextafter` rather than a chosen epsilon, so the bound is
+    the arithmetic's own granularity at that magnitude instead of a decimal
+    tolerance that means something different at 0.001 and at 100,000. A NaN
+    compares false against both bounds, which is the right answer here.
+
+    A cross-level total needs a bound that scales, and the reason is the one in
+    the module docstring: summing the slices' `net_pnl` evaluates
+    `sum(p_k - f_k)` while the parent evaluates `(sum p) - (sum f)`. Each slice
+    can contribute its own rounding, so the honest bound is the slice count,
+    not one. Every identity that is a plain sum at both levels stays at one.
+    """
+    if ulps < 1:
+        raise _fail("invalid_value", "an ULP bound is at least one step",
+                    field="ulps")
+    lower = expected
+    upper = expected
+    for _ in range(ulps):
+        lower = math.nextafter(lower, -math.inf)
+        upper = math.nextafter(upper, math.inf)
+    return lower <= actual <= upper
+
+
 def _within_one_ulp(actual: float, expected: float) -> bool:
     """Whether `actual` is `expected` or one of its two neighbours.
 
-    The architecture states the parent and slice identities as bitwise ones
-    under a fixed operation order, allowing exactly the one ULP that a
-    different association of the same terms can cost. A decimal tolerance would
-    admit far more than that, so the bound is built from the adjacent
-    representable values rather than from a chosen epsilon. A NaN compares
-    false against both bounds, which is the right answer here.
+    The tightest bound, for the identities that reconcile term for term: the
+    counts, the fees, the pre-cost PnL, and the two gross sums.
     """
-    return (math.nextafter(expected, -math.inf) <= actual
-            <= math.nextafter(expected, math.inf))
+    return _within_ulps(actual, expected, 1)
 
 
 # ------------------------------------------------------------- trade cohorts
@@ -313,9 +341,14 @@ def _portfolio_metrics(curve: ReplayCurve, trades: tuple[PortfolioTrade, ...],
     request = schedule.request
     _require_arithmetic_version(request)
     points = curve.equity
-    if not points:
-        raise _fail("invalid_value", "a replay marks at least its opening anchor",
-                    field="equity")
+    if len(points) < 2:
+        # The series is the opening anchor, one point per test close, and the
+        # post-close mark, so two is the floor a real replay cannot go under.
+        # Requiring it here is what gives the ulcer index a nonzero sample.
+        raise _fail(
+            "invalid_value", "a replay marks its opening anchor and its close",
+            field="equity", points=len(points),
+        )
     starting = _require_positive(points[0].portfolio_equity, "starting_equity")
     ending = points[-1].portfolio_equity
     cohorts = {"all": _Cohort(), "long": _Cohort(), "short": _Cohort()}
@@ -384,22 +417,37 @@ def _require_arithmetic_version(request: PortfolioReplayRequest) -> None:
 
 
 def _drawdowns(points: Sequence[EquityPoint]) -> tuple[float, float]:
-    """Maximum drawdown and the ulcer index, over the whole series.
+    """Maximum drawdown over the whole series, ulcer index over its own sample.
 
-    Both read the same running peak in one pass across the opening anchor and
-    every close point. The peak includes the point being measured, so a new
-    high draws down by exactly zero and no drawdown is ever negative. It also
-    starts at the anchor, which is positive, so the denominator cannot vanish.
+    One pass and one running peak, and two different samples on purpose. The
+    architecture defines maximum drawdown as the maximum of the drawdown at
+    each point, and the ulcer index as the root mean square drawdown "across
+    the starting point and every close point", which is the anchor and one
+    point per test interval. The final post-close mark is a third kind of
+    point, taken after the window's forced liquidation, and it is outside that
+    enumeration.
+
+    The contrast is deliberate rather than shorthand: the daily sampling rule
+    is written as "the last post-event equity point", which is what makes the
+    same post-close mark the sample there and not here. Averaging it into the
+    ulcer index would let the cost of liquidating at the window's end deepen a
+    statistic that is meant to describe how long the account spent underwater.
+
+    The peak includes the point being measured, so a new high draws down by
+    exactly zero and no drawdown is ever negative. It starts at the anchor,
+    which is positive, so the denominator cannot vanish.
     """
     peak = points[0].portfolio_equity
     deepest = 0.0
     squares = 0.0
-    for point in points:
+    underwater = len(points) - 1
+    for index, point in enumerate(points):
         peak = max(peak, point.portfolio_equity)
         drawdown = (peak - point.portfolio_equity) / peak
         deepest = max(deepest, drawdown)
-        squares += drawdown ** 2
-    return (deepest, math.sqrt(squares / len(points)))
+        if index < underwater:
+            squares += drawdown ** 2
+    return (deepest, math.sqrt(squares / underwater))
 
 
 def _cagr(starting: float, ending: float, elapsed: float) -> float:
@@ -461,7 +509,12 @@ def _daily_returns(points: Sequence[EquityPoint], schedule: ValidatedSchedule,
                 field="equity", session_date=session.isoformat(),
             )
         value = marked[session]
-        if previous == 0.0:
+        if previous <= 0.0:
+            # Zero has no quotient at all, and a negative denominator has a
+            # quotient that lies: an account climbing from -1,000 to -500 would
+            # report a 50 percent LOSS. Equity below zero is reachable, since a
+            # short can lose more than its collateral, so this is refused
+            # rather than reported backwards.
             raise _fail(
                 "nonfinite_binary64", "value must be finite",
                 field="daily_return", session_date=session.isoformat(),
@@ -539,13 +592,20 @@ def _pooled_statistics(
     that lost the same amount every day has no variance and a perfectly good
     downside deviation.
 
-    One note on the shared derivation, because it is a bit rather than a
-    formula. The architecture writes biased skew as `m3 / m2**1.5` and
-    `pooled_moments` evaluates the same quantity as `m3 / sqrt(m2)**3`. The two
-    round differently in the last place for some inputs, and the shared
-    function is still the right one to call: the platform pools windows through
-    it, so a per-window skew reported here and a pooled skew reported there
-    agree exactly, which a private copy of the algebra could not promise.
+    Two notes on the shared derivations, because they are bits rather than
+    formulas. The architecture writes biased skew as `m3 / m2**1.5` and
+    `pooled_moments` evaluates the same quantity as `m3 / sqrt(m2)**3`; it
+    writes the PSR denominator's third term as `(kurtosis - 1) * sr**2 / 4` and
+    `probabilistic_sharpe_ratio` evaluates `(kurtosis - 1) / 4 * sharpe**2`.
+    Both pairs are the same expression associated differently, and both can
+    round differently in the last place.
+
+    The shared functions are still the right ones to call. The platform pools
+    windows through exactly these, so a per-window statistic reported here and
+    a pooled one reported there agree bit for bit, which a private copy of the
+    algebra could not promise. Reassociating them to the spec's parenthesization
+    is one owner decision made once for both repositories, in `nakagai/stats.py`,
+    rather than a divergence introduced here.
     """
     if pool.n < POOLED_MIN_DAILY:
         return (None, None, None, None, None)
