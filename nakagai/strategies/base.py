@@ -325,14 +325,17 @@ def validate_management_decision(value: object, *, position: PositionView,
                                  deciding_close: float) -> ManagementDecision:
     """The decision `manage` returned, checked against the live position.
 
-    Only what the decision REPLACES is judged. A null stop or target keeps the
-    live level, and a live level is the engine's own state: where the close
-    sits relative to it is a fact about the market and the engine's exit
-    ordering, never a claim the strategy made. Re-checking it here would abort
-    the replay over an ordinary losing trade whose bar closed beyond its stop,
-    and would blame the strategy for it. Each replacement is checked against
-    the deciding close on its own protective side, which is exactly what a
-    replacement can get wrong.
+    Only what the decision REPLACES is judged, under two separate rules:
+
+    - each replacement sits on its own protective side of the deciding close;
+    - the pair the decision lands in still opens outward, replacement or live.
+
+    A null stop or target keeps the live level, and a live level is the
+    engine's own state: where the close sits relative to it is a fact about
+    the market and the engine's exit ordering, never a claim the strategy
+    made. Re-checking that would abort the replay over an ordinary losing
+    trade whose bar closed beyond its stop, and would blame the strategy for
+    it. A decision that replaces nothing is therefore checked for nothing.
     """
     # Engine-supplied, so its own failure is a replay input error.
     _require_instance(position, "position", PositionView)
@@ -354,14 +357,36 @@ def validate_management_decision(value: object, *, position: PositionView,
         # A stop protects from below on a long and from above on a short.
         if not (value.stop < close if long else value.stop > close):
             raise _output_error(
-                "invalid_value", "a replacement stop does not protect the deciding close",
+                "unprotective_replacement",
+                "a replacement stop does not protect the deciding close",
                 field="stop", direction=position.direction,
             )
     if value.target is not None:
         if not (value.target > close if long else value.target < close):
             raise _output_error(
-                "invalid_value", "a replacement target is already behind the deciding close",
+                "unprotective_replacement",
+                "a replacement target is already behind the deciding close",
                 field="target", direction=position.direction,
+            )
+    if value.stop is not None or value.target is not None:
+        # A SECOND invariant, and not a restatement of the one above. That one
+        # asks where a replacement sits against the close; this one asks
+        # whether the pair it lands in still opens outward. A replacement is
+        # checked against the close alone, so it can pass that and still cross
+        # an untouched counterpart level, which leaves a position whose stop
+        # and target cover the whole real line and which the engine then exits
+        # at the next open whatever the price does. Do NOT collapse this back
+        # into a `stop < close < target` pivot: demanding that the close sit
+        # between them judges engine-owned state and refuses an ordinary
+        # losing trade.
+        stop = position.live_stop if value.stop is None else value.stop
+        target = position.live_target if value.target is None else value.target
+        if not (stop < target if long else target < stop):
+            raise _output_error(
+                "crossed_protective_levels",
+                "the decided stop and target cross each other",
+                field="stop" if value.stop is not None else "target",
+                direction=position.direction,
             )
     return value
 

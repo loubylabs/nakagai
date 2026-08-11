@@ -304,6 +304,61 @@ def test_holding_a_position_whose_close_left_its_levels_is_not_the_strategys_fau
                                         deciding_close=close) is HOLD
 
 
+@pytest.mark.parametrize("position,decision,close,crossed", [
+    pytest.param(long_position_view(live_stop=99.0, live_target=104.0),
+                 ManagementDecision(action="hold", stop=104.4, target=None),
+                 105.0, "stop", id="long_stop_pushed_past_a_stale_target"),
+    pytest.param(long_position_view(live_stop=99.0, live_target=104.0),
+                 ManagementDecision(action="hold", stop=None, target=98.5),
+                 98.0, "target", id="long_target_pulled_through_a_stale_stop"),
+    pytest.param(short_position_view(live_stop=101.0, live_target=97.0),
+                 ManagementDecision(action="hold", stop=96.5, target=None),
+                 96.0, "stop", id="short_stop_pulled_past_a_stale_target"),
+    pytest.param(short_position_view(live_stop=101.0, live_target=97.0),
+                 ManagementDecision(action="hold", stop=None, target=101.5),
+                 102.0, "target", id="short_target_pushed_through_a_stale_stop"),
+])
+def test_a_replacement_cannot_cross_an_untouched_counterpart_level(
+        position, decision, close, crossed):
+    """Each of these passes the close check on its own and still inverts the
+    bracket. An inverted bracket is not a tighter stop: `_check_exit` tests
+    `open <= stop` then `open >= target`, so once they cross, those two
+    branches cover the whole real line and the position exits at the next
+    open whatever the price does."""
+    with pytest.raises(StrategyOutputError) as caught:
+        validate_management_decision(decision, position=position,
+                                     deciding_close=close)
+    assert caught.value.code == "crossed_protective_levels"
+    assert caught.value.details["field"] == crossed
+
+
+def test_a_replacement_that_stops_short_of_its_counterpart_is_accepted():
+    """The guard rail is crossing, not proximity: a stop may ratchet right up
+    under an untouched target."""
+    decision = validate_management_decision(
+        ManagementDecision(action="hold", stop=103.9, target=None),
+        position=long_position_view(live_stop=99.0, live_target=104.0),
+        deciding_close=105.0,
+    )
+    assert decision.stop == 103.9
+
+
+def test_the_two_geometry_rules_refuse_under_different_codes():
+    """They answer different questions, so a caller can tell them apart and a
+    reader cannot collapse them back into one pivot check."""
+    position = long_position_view(live_stop=99.0, live_target=104.0)
+    with pytest.raises(StrategyOutputError) as unprotective:
+        validate_management_decision(
+            ManagementDecision(action="hold", stop=102.0, target=None),
+            position=position, deciding_close=101.0)
+    with pytest.raises(StrategyOutputError) as crossed:
+        validate_management_decision(
+            ManagementDecision(action="hold", stop=104.4, target=None),
+            position=position, deciding_close=105.0)
+    assert unprotective.value.code == "unprotective_replacement"
+    assert crossed.value.code == "crossed_protective_levels"
+
+
 def test_a_replacement_is_judged_against_the_close_not_an_untouched_level():
     """A long whose bar rallied through its target and closed above it can
     still ratchet its stop: the stop is a real protective level at that
