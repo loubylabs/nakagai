@@ -267,6 +267,21 @@ class FrameEval:
         term = self.vocabulary.primitives[name]
         a = {**term.defaults,
              **{k: v for k, v in node.items() if k not in ("prim", "tf")}}
+        if any(is_condition_rule(rule) for rule in term.args.values()):
+            # Generic per N3-D9, keyed on the arg TYPE rather than the name
+            # "bars_since": a term registered outside core (a platform
+            # vocabulary entry, added with no core PR) reaches this the same
+            # way. The callback itself is unchanged; it stays injected rather
+            # than imported to avoid a circular import (primitives.py
+            # documents this), which typing the arg does not change.
+            #
+            # ABOVE the end_anchored branch, because that branch returns and a
+            # term needs its evaluator whichever dispatch it takes. N3-D13
+            # refuses a condition-typed arg outside kind 'primitive' and
+            # nowhere else, so an end-anchored primitive declaring one is
+            # constructible and validates; injecting only below here left it
+            # raising at evaluation time instead.
+            a["eval_fn"] = lambda cond, b: self.condition_series(cond, src_tf)
         if term.end_anchored:
             # Exactly the span, with no warm-up margin in front of it. Row i is
             # the scalar function called on bars[:i+1], which does its own
@@ -278,14 +293,6 @@ class FrameEval:
             out = pd.Series(np.nan, index=frame.index)
             out.iloc[lo:hi] = part.to_numpy()
             return self._align(out, src_tf, tf)
-        if any(is_condition_rule(rule) for rule in term.args.values()):
-            # Generic per N3-D9, keyed on the arg TYPE rather than the name
-            # "bars_since": a term registered outside core (a platform
-            # vocabulary entry, added with no core PR) reaches this the same
-            # way. The callback itself is unchanged; it stays injected rather
-            # than imported to avoid a circular import (primitives.py
-            # documents this), which typing the arg does not change.
-            a["eval_fn"] = lambda cond, b: self.condition_series(cond, src_tf)
         return self._align(term.fn(None, frame, **a), src_tf, tf)
 
     def condition_series(self, cond: dict, tf: str) -> pd.Series:

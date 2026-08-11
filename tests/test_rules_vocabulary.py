@@ -185,6 +185,37 @@ def test_a_condition_typed_arg_gets_the_evaluator_injected_by_type(
     assert out.iloc[-1] == 5.0
 
 
+def test_an_end_anchored_primitive_gets_the_evaluator_injected_too(make_bars):
+    """The injection has to sit ABOVE frame_eval's end_anchored branch.
+
+    N3-D13 refuses a condition-typed arg outside kind 'primitive' and nowhere
+    else, so an end-anchored primitive that declares one is constructible and
+    validates clean. It then dispatches through end_anchored_series, which
+    returns before the injection block, so the term is called without the
+    evaluator it declared it needs and raises at evaluation. The term needs
+    the callback regardless of which dispatch it takes.
+    """
+
+    def count_end(ctx, bars, when, eval_fn=None):
+        # One float off the tail of the frame handed in, which is what
+        # end_anchored means: the count of qualifying bars in the prefix.
+        if eval_fn is None:
+            raise RuntimeError("missing eval_fn")
+        return float(eval_fn(when, bars).loc[bars.index].sum())
+
+    vocab = core_vocabulary().with_terms(
+        Term("count_end", "primitive", {"when": CONDITION_ARG}, {}, count_end,
+             end_anchored=True))
+    bars = make_bars(n=30)  # close is above open on every bar
+    node = {"prim": "count_end",
+            "when": {"lhs": {"src": "close"}, "op": ">", "rhs": {"src": "open"}}}
+    assert validate_spec(_spec(node), vocab) == []
+    out = FrameEval({"15m": bars}, vocabulary=vocab).series(node, "15m")
+    # row i is the count over bars[:i+1], so the last row counts every bar and
+    # the first counts one: a broadcast tail value would read 30.0 on both.
+    assert out.iloc[-1] == 30.0 and out.iloc[0] == 1.0
+
+
 def test_canon_rekeys_a_second_condition_taking_terms_condition_arg(
         count_where_vocab):
     """Case 4, the subtle one. Keyed on the literal key "cond", a condition
