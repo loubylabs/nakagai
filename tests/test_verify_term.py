@@ -7,9 +7,9 @@ import pytest
 import nakagai.strategies.rules.verify as verify_module
 from nakagai.strategies.rules.vocabulary import Term, core_vocabulary
 from nakagai.strategies.rules.verify import (
-    CHECKED, CONDITION_ARG, EXEMPT, FAILED, MAX_ARG_SETS, PROBE_COUNT,
-    TermVerdict, VACUOUS, arg_sets, evaluate_term, exemption_reason,
-    field_mismatch, probe_rows, reference_bars, verify_term, verify_vocabulary,
+    CHECKED, EXEMPT, FAILED, MAX_ARG_SETS, PROBE_COUNT, VACUOUS,
+    _raw_call, arg_sets, evaluate_term, exemption_reason, field_mismatch,
+    probe_rows, reference_bars, verify_term, verify_vocabulary,
 )
 
 
@@ -186,16 +186,11 @@ def test_every_core_multi_output_term_declares_the_columns_it_produces(bars):
     for term in core_vocabulary().all_terms():
         if not term.args.get("field"):
             continue
-        # The raw callable, without evaluate_term's field narrowing, because the
-        # question is which columns exist before one of them is selected. The
-        # three-way split is evaluate_term's: a primitive called down the series
-        # branch binds the defaults dict to `bars` and crashes inside find_fvgs.
-        if term.kind == "primitive":
-            raw = term.fn(None, bars, **dict(term.defaults))
-        elif term.kind == "bar":
-            raw = term.fn(bars, dict(term.defaults))
-        else:
-            raw = term.fn(bars["close"], dict(term.defaults))
+        # The gate's own dispatch, without evaluate_term's field narrowing,
+        # because the question is which columns exist before one is selected.
+        # Calling by kind matters: a primitive called down the series branch
+        # binds the defaults dict to `bars` and crashes inside find_fvgs.
+        raw = _raw_call(term, bars, dict(term.defaults))
         assert field_mismatch(term, raw) is None, term.name
 
 

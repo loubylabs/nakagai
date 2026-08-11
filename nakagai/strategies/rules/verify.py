@@ -129,21 +129,34 @@ def field_mismatch(term: Term, out) -> str | None:
     return "; ".join(parts)
 
 
-def evaluate_term(term: Term, bars: pd.DataFrame, args: dict):
-    """One term's output over `bars`, by its kind's calling convention.
+def _raw_call(term: Term, bars: pd.DataFrame, args: dict):
+    """One term's output over `bars`, before any narrowing.
 
-    The four conventions are frame_eval.py:238-278's, mirrored rather than
-    imported, because FrameEval takes a whole grammar node and this takes one
-    term. A DataFrame return is narrowed by `field` for BOTH frame-kind and
-    bar-kind terms: donchian, ichimoku, keltner, stoch and supertrend are bar-kind
-    and multi-output, so narrowing only frame-kind would raise on five terms.
+    Four kinds, three calling conventions: series and frame terms take the close
+    Series, bar terms take the whole frame, and a primitive takes the evaluator
+    slot and the frame with its args spread. They are frame_eval.py:238-278's
+    conventions, mirrored rather than imported, because FrameEval takes a whole
+    grammar node and this takes one term.
+
+    One function rather than a copy at each of the three call sites. A gate that
+    reached a term by a different convention than the evaluator does would be
+    verifying something the DSL never runs.
     """
     if term.kind == "primitive":
-        out = term.fn(None, bars, **args)
-    elif term.kind == "bar":
-        out = term.fn(bars, args)
-    else:                                   # series, frame
-        out = term.fn(bars["close"], args)
+        return term.fn(None, bars, **args)
+    if term.kind == "bar":
+        return term.fn(bars, args)
+    return term.fn(bars["close"], args)     # series, frame
+
+
+def evaluate_term(term: Term, bars: pd.DataFrame, args: dict):
+    """One term's output over `bars`, narrowed to one column if it returns a frame.
+
+    A DataFrame return is narrowed by `field` for BOTH frame-kind and bar-kind
+    terms: donchian, ichimoku, keltner, stoch and supertrend are bar-kind and
+    multi-output, so narrowing only frame-kind would raise on five terms.
+    """
+    out = _raw_call(term, bars, args)
     if isinstance(out, pd.DataFrame):
         out = out[args["field"]]
     return out
@@ -322,9 +335,7 @@ def verify_term(term: Term, bars: pd.DataFrame) -> TermVerdict:
     checked = 0
     for args in every_arg_set:
         try:
-            raw = (term.fn(None, bars, **args) if term.kind == "primitive"
-                   else term.fn(bars, args) if term.kind == "bar"
-                   else term.fn(bars["close"], args))
+            raw = _raw_call(term, bars, args)
         except Exception as exc:                       # noqa: BLE001
             return TermVerdict(term.name, FAILED,
                                f"args {args}: whole-frame call raised {exc}",
