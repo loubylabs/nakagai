@@ -23,8 +23,11 @@ from nakagai.data.schema import DEFAULT_TIMEFRAMES, TimeframeSet
 from nakagai.engine.context import PreloadedBars, build_context, visible_counts
 from nakagai.engine.costs import FeeModel, SlippageModel
 from nakagai.engine.portfolio import SettledLedger
+from nakagai.engine.portfolio_types import (
+    PositionView, Signal, brackets_protectively,
+)
 from nakagai.engine.provenance import ARITHMETIC_VERSION, FILL_MODE
-from nakagai.strategies.base import Direction, PositionAction, Signal, Strategy
+from nakagai.strategies.base import Direction, Strategy, call_manage, call_on_bar
 from nakagai.strategies.rules.vocabulary import core_vocabulary
 
 
@@ -96,6 +99,20 @@ class _Position:
             self.best = min(self.best, low)
 
 
+def _view_of(pos: _Position) -> PositionView:
+    """The immutable position a strategy is allowed to see.
+
+    Initial levels come from the signal and never move; live levels are the
+    engine's, ratcheted only by a decision it applied itself.
+    """
+    return PositionView(
+        direction=pos.signal.direction, qty=pos.qty, entry_ts=pos.entry_ts,
+        entry=pos.entry, initial_stop=pos.signal.stop,
+        initial_target=pos.signal.target, live_stop=pos.stop,
+        live_target=pos.target,
+    )
+
+
 @dataclass
 class BacktestResult:
     trades: list[Trade]
@@ -144,7 +161,10 @@ class Engine:
         trades: list[Trade] = []
         rejected = 0
         position: _Position | None = None
-        pending: Signal | None = None
+        # Every signal the last close produced, in the order it produced them.
+        # This engine holds one position, so the ones it cannot take expire
+        # unfilled at the next open rather than being dropped at the close.
+        pending: tuple[Signal, ...] = ()
         curve: dict[pd.Timestamp, float] = {}
 
         for bar in bars.itertuples():   # itertuples: iterrows builds a Series per bar
@@ -167,33 +187,44 @@ class Engine:
                 else:
                     position.observe(float(bar.high), float(bar.low))
 
-            # 2) pending entry fills at this bar's open
-            if pending is not None:
-                if position is None:
-                    position, ok = self._try_fill(pending, ts, float(bar.open), ledger, now)
-                    if not ok:
-                        rejected += 1
-                    elif position is not None:
-                        # The entry bar counts. The fill is at this bar's open
-                        # and step 1 already ran, so the position is live for
-                        # the whole of this bar by the engine's own model.
-                        position.observe(float(bar.high), float(bar.low))
-                pending = None
+            # 2) pending entries fill at this bar's open, in signal order
+            for sig in pending:
+                if position is not None:
+                    break
+                position, ok = self._try_fill(sig, ts, float(bar.open), ledger, now)
+                if not ok:
+                    rejected += 1
+                elif position is not None:
+                    # The entry bar counts. The fill is at this bar's open
+                    # and step 1 already ran, so the position is live for
+                    # the whole of this bar by the engine's own model.
+                    position.observe(float(bar.high), float(bar.low))
+            pending = ()
 
             # 3) manage + 4) new signals (point-in-time context as of bar close)
             ctx = build_context(view, self.symbol, now, tfs=self.tfs,
                                 vocabulary=vocabulary)
+            close = float(bar.close)
             if position is not None:
-                if self.strategy.manage(position, ctx) == PositionAction.EXIT:
-                    position.observe(float(bar.close), float(bar.close))
-                    trades.append(self._close(position, now, float(bar.close), "manage", ledger))
+                decision = call_manage(self.strategy, _view_of(position), ctx,
+                                       deciding_close=close)
+                # Replacements land before the exit, so a decision that
+                # ratchets and closes on the same bar records the tighter
+                # level it actually exited under.
+                if decision.stop is not None:
+                    position.stop = decision.stop
+                if decision.target is not None:
+                    position.target = decision.target
+                if decision.action == "exit":
+                    position.observe(close, close)
+                    trades.append(self._close(position, now, close, "manage", ledger))
                     position = None
-            if position is None and pending is None:
-                signals = self.strategy.on_bar(ctx)
-                if signals:
-                    pending = signals[0]
+            # Nothing is pending here: step 2 either filled the intent or let
+            # it expire, so being flat is the whole condition.
+            if position is None:
+                pending = call_on_bar(self.strategy, ctx, deciding_close=close)
 
-            curve[now] = self._mark(ledger, position, float(bar.close), now)
+            curve[now] = self._mark(ledger, position, close, now)
 
         if position is not None and len(bars):
             last = bars.iloc[-1]
@@ -207,6 +238,13 @@ class Engine:
     def _try_fill(self, sig: Signal, ts, open_price: float, ledger: SettledLedger, now) -> tuple["_Position | None", bool]:
         fill = (self.slippage.buy(open_price) if sig.direction == Direction.LONG
                 else self.slippage.sell(open_price))
+        if not brackets_protectively(sig.direction, fill, sig.stop, sig.target):
+            # The market gapped past a protective level between the deciding
+            # close and this open. Entering here would open a position that
+            # its own stop or target already sits inside, which is not a
+            # position: the print that broke the level happened before the
+            # entry existed, so it could not have triggered anything.
+            return None, True
         risk_per_share = abs(fill - sig.stop)
         if risk_per_share <= 0:
             return None, True  # degenerate signal: skip silently, not a settlement rejection

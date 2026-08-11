@@ -6,10 +6,13 @@ Templates gate on these freshness checks to fire exactly once per
 driving-timeframe bar.
 """
 
+import math
+
 import pandas as pd
 
 from nakagai.data.schema import session_open
-from nakagai.strategies.base import Direction, MarketContext, Signal
+from nakagai.engine.portfolio_types import Signal
+from nakagai.strategies.base import Direction, MarketContext
 
 
 def fresh_bar(ctx: MarketContext, timeframe: str) -> bool:
@@ -57,7 +60,11 @@ def rr_signal(ctx: MarketContext, direction: Direction, stop: float, rr: float,
               target: float | None = None) -> Signal | None:
     """Build a market-entry signal with an explicit stop and either a fixed
     reward:risk target (default) or a structural target price. Returns None
-    when the geometry is degenerate (stop on the wrong side, NaNs)."""
+    when the geometry is degenerate (stop on the wrong side, NaNs).
+
+    The deciding raw close is the signal's `entry_ref`, and it is the same
+    reference the geometry below is checked against. Phase 1 fills market at
+    the next scheduled open, so this is a reference, never a limit price."""
     if ctx.driving_bars.empty:
         return None
     ref = float(ctx.driving_bars["close"].iloc[-1])
@@ -75,6 +82,13 @@ def rr_signal(ctx: MarketContext, direction: Direction, stop: float, rr: float,
         tgt = target if target is not None else ref - rr * (stop - ref)
         if tgt >= ref:
             return None
-    return Signal(symbol=ctx.symbol, direction=direction, entry=None,
+    # Every level has to be a price. A wide reward:risk on a percent stop
+    # walks a SHORT target down through zero (rr 20 on a 5% stop lands on it
+    # exactly), and zero is not a level the market can reach. Degenerate, so
+    # it returns None here rather than reaching the boundary as a signal the
+    # replay would have to abort on.
+    if not all(math.isfinite(float(v)) and float(v) > 0.0 for v in (ref, stop, tgt)):
+        return None
+    return Signal(symbol=ctx.symbol, direction=direction, entry_ref=ref,
                   stop=float(stop), target=float(tgt), confidence=confidence,
                   setup_tags=tags, rationale=rationale)

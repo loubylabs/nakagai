@@ -10,7 +10,8 @@ from typing import ClassVar
 
 import pandas as pd
 
-from nakagai.strategies.base import Direction, MarketContext, Signal, Strategy
+from nakagai.engine.portfolio_types import Signal
+from nakagai.strategies.base import Direction, MarketContext, Strategy, call_on_bar
 from nakagai.strategies.composite import spec as cspec
 from nakagai.strategies.risk import stop_target
 from nakagai.strategies.rules.spec import DEFAULT_RISK
@@ -74,17 +75,16 @@ class CompositeStrategy(Strategy):
             Direction.LONG: {}, Direction.SHORT: {}}
         self._passing = {"long": False, "short": False}
 
-    def on_bar(self, ctx: MarketContext) -> list[Signal]:
+    def on_bar(self, ctx: MarketContext) -> tuple[Signal, ...]:
         if not self.spec or ctx.driving_bars.empty:
-            return []
+            return ()
+        ref = float(ctx.driving_bars["close"].iloc[-1])
         for bid, member in self._members.items():
-            try:
-                signals = member.on_bar(ctx)
-            except Exception as e:
-                # A silently dropped vote would corrupt results, so fail the run.
-                raise RuntimeError(f"composite block {bid!r} ({member.name}) "
-                                   f"failed on {ctx.symbol} @ {ctx.now}: {e}") from e
-            for sig in signals:
+            # Members go through the same boundary as any other strategy, in
+            # declared block order: a member that raises fails the run rather
+            # than dropping a vote, and every signal it returned is counted,
+            # rather than only the first.
+            for sig in call_on_bar(member, ctx, deciding_close=ref, block=bid):
                 self._votes[sig.direction][bid] = (ctx.now, sig)
         # A vote cast on bar i stays live through bar i + window_bars - 1;
         # window_bars=1 is strict same-bar agreement.
@@ -113,4 +113,4 @@ class CompositeStrategy(Strategy):
                             target=target)
             if sig:
                 out.append(sig)
-        return out
+        return tuple(out)

@@ -6,6 +6,10 @@ import pytest
 
 import pandas as pd
 
+from nakagai.engine.portfolio_types import (
+    Signal, StrategyOutputError, StrategyRuntimeError,
+)
+from nakagai.strategies.base import MarketContext, Strategy
 from nakagai.strategies.catalog import load_catalog
 from nakagai.strategies.composite import CompositeStrategy, validate_composite_spec
 from nakagai.strategies.rules import RuleStrategy, core_vocabulary
@@ -137,3 +141,95 @@ def test_a_composite_carries_the_vocabulary_its_members_were_bound_to():
     strategy = bound({"spec": spec})
 
     assert strategy.vocabulary is house
+
+
+# ------------------------------------------------- members vote, one by one
+
+def _ctx(close: float = 100.0) -> MarketContext:
+    idx = pd.date_range("2026-01-05 14:30", periods=4, freq="15min", tz="UTC")
+    bars = pd.DataFrame({"open": close, "high": close + 0.5, "low": close - 0.5,
+                         "close": close, "volume": 1_000.0}, index=idx)
+    return MarketContext(symbol="SPY", now=idx[-1] + pd.Timedelta(minutes=15),
+                         bars={"15m": bars, "1h": bars, "1d": bars})
+
+
+def _member_signal(ctx, direction, tag):
+    ref = float(ctx.driving_bars["close"].iloc[-1])
+    stop, target = ((ref - 1.0, ref + 2.0) if direction == "long"
+                    else (ref + 1.0, ref - 2.0))
+    return Signal(ctx.symbol, direction, ref, stop, target, 0.5, (tag,),
+                  f"member {direction}")
+
+
+class _BothWays(Strategy):
+    """One member, two signals in one call: a long AND a short."""
+
+    name = "both_ways"
+    DEFAULT_PARAMS = {}
+
+    def on_bar(self, ctx):
+        return (_member_signal(ctx, "long", "up"),
+                _member_signal(ctx, "short", "down"))
+
+
+class _Boom(Strategy):
+    name = "boom"
+    DEFAULT_PARAMS = {}
+
+    def on_bar(self, ctx):
+        raise ValueError("member is broken")
+
+
+class _Bad(Strategy):
+    name = "bad"
+    DEFAULT_PARAMS = {}
+
+    def on_bar(self, ctx):
+        ref = float(ctx.driving_bars["close"].iloc[-1])
+        # Stop on the wrong side of the reference for a long.
+        return (Signal(ctx.symbol, "long", ref, ref + 1.0, ref + 2.0, 0.5,
+                       ("bad",), "wrong side"),)
+
+
+def _both_sides_spec(member: str):
+    return {"version": 1, "name": "c", "window_bars": 1,
+            "blocks": {"a": {"strategy": member, "params": {}}},
+            "long": {"all": ["a"]}, "short": {"all": ["a"]},
+            "risk": {"stop": {"kind": "percent", "pct": 2.0},
+                     "target": {"kind": "rr", "rr": 2.0}}}
+
+
+def _composite(member_cls):
+    bound = CompositeStrategy.bound({member_cls.name: member_cls})
+    return bound({"spec": _both_sides_spec(member_cls.name)})
+
+
+def test_a_member_returning_two_signals_casts_both_votes():
+    """Reading only the member's first signal loses the short vote outright,
+    so the composite would fire one side where its own logic says two."""
+    signals = _composite(_BothWays).on_bar(_ctx())
+    assert [signal.direction for signal in signals] == ["long", "short"]
+
+
+def test_composite_output_is_an_ordered_tuple():
+    signals = _composite(_BothWays).on_bar(_ctx())
+    assert isinstance(signals, tuple)
+    assert [tags[0] for tags in (s.setup_tags for s in signals)] == ["composite",
+                                                                    "composite"]
+
+
+def test_a_raising_member_aborts_the_run_and_names_its_block():
+    with pytest.raises(StrategyRuntimeError) as caught:
+        _composite(_Boom).on_bar(_ctx())
+    assert caught.value.details["block"] == "a"
+    assert caught.value.details["strategy"] == "boom"
+    assert caught.value.details["error"] == "ValueError"
+
+
+def test_a_member_signal_outside_the_contract_aborts_the_run():
+    with pytest.raises(StrategyOutputError):
+        _composite(_Bad).on_bar(_ctx())
+
+
+def test_an_inert_composite_returns_an_empty_tuple():
+    assert CompositeStrategy({}).on_bar(_ctx()) == ()

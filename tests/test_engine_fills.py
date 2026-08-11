@@ -18,7 +18,8 @@ from nakagai.engine.costs import FeeModel, SlippageModel
 from nakagai.engine.engine import Engine
 from nakagai.engine.portfolio import SettledLedger
 from nakagai.engine.provenance import ARITHMETIC_VERSION, FILL_MODE
-from nakagai.strategies.base import Direction, Signal, Strategy
+from nakagai.engine.portfolio_types import Signal
+from nakagai.strategies.base import Direction, Strategy
 
 SYMBOL = "GAPX"
 STOP, TARGET = 99.0, 104.0
@@ -48,7 +49,8 @@ class OneShotLong(Strategy):
     def on_bar(self, ctx):
         if len(ctx.driving_bars) != 1:
             return []
-        return [Signal(symbol=ctx.symbol, direction=Direction.LONG, entry=None,
+        return [Signal(symbol=ctx.symbol, direction=Direction.LONG,
+                       entry_ref=float(ctx.driving_bars["close"].iloc[-1]),
                        stop=STOP, target=TARGET, confidence=1.0,
                        setup_tags=("golden",), rationale="fill fixture")]
 
@@ -60,7 +62,8 @@ class OneShotShort(Strategy):
         if len(ctx.driving_bars) != 1:
             return []
         # Mirror image: stop above, target below.
-        return [Signal(symbol=ctx.symbol, direction=Direction.SHORT, entry=None,
+        return [Signal(symbol=ctx.symbol, direction=Direction.SHORT,
+                       entry_ref=float(ctx.driving_bars["close"].iloc[-1]),
                        stop=TARGET, target=STOP, confidence=1.0,
                        setup_tags=("golden",), rationale="fill fixture")]
 

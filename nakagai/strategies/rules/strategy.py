@@ -8,8 +8,9 @@ With no spec it is inert; the scanner can instantiate it harmlessly.
 import pandas as pd
 from typing import ClassVar
 
+from nakagai.engine.portfolio_types import ManagementDecision, PositionView, Signal
 from nakagai.strategies import indicators as ind
-from nakagai.strategies.base import Direction, MarketContext, PositionAction, Signal, Strategy
+from nakagai.strategies.base import HOLD, Direction, MarketContext, Strategy
 from nakagai.strategies.risk import stop_target
 from nakagai.strategies.rules.spec import (
     TRAILING_ATR_MULT_DEFAULT, TRAILING_ATR_N_DEFAULT, TRAILING_PCT_DEFAULT,
@@ -80,12 +81,12 @@ class RuleStrategy(Strategy):
             return False
         return bool(ctx.fe.driving_group(group, tf).iloc[i])
 
-    def on_bar(self, ctx: MarketContext) -> list[Signal]:
+    def on_bar(self, ctx: MarketContext) -> tuple[Signal, ...]:
         if not self.spec or ctx.driving_bars.empty or not self._fresh(ctx):
-            return []
+            return ()
         bars = self._bars_for(ctx)
         if len(bars) < 2:
-            return []
+            return ()
         name = str(self.spec.get("name", "rules"))
         for side, direction in (("long", Direction.LONG), ("short", Direction.SHORT)):
             if side in self.spec and self._group_at(ctx, self.spec[side]):
@@ -95,41 +96,49 @@ class RuleStrategy(Strategy):
                                 f"{self.spec.get('timeframe', '1h')}",
                                 confidence=0.5, target=target)
                 if sig:
-                    return [sig]
-        return []
+                    return (sig,)
+        return ()
 
-    def manage(self, position, ctx: MarketContext) -> PositionAction:
+    def manage(self, position: PositionView,
+               ctx: MarketContext) -> ManagementDecision:
+        """Exits and ratchets, as one returned decision.
+
+        The ratchets compute a local stop and hand it back. They never assign
+        into `position`: the view is immutable, and the engine owns the live
+        levels. `max`/`min` against the live stop is what makes a ratchet a
+        ratchet, so the returned stop can only ever tighten.
+        """
         exits = self.spec.get("exits") if self.spec else None
         if not exits:
-            return PositionAction.HOLD
+            return HOLD
         bars = self._bars_for(ctx)
         if bars.empty or ctx.driving_bars.empty:
-            return PositionAction.HOLD
-        direction = position.signal.direction
-        long = direction == Direction.LONG
+            return HOLD
+        long = position.direction == Direction.LONG
         ref = float(ctx.driving_bars["close"].iloc[-1])
 
         if "exit" in exits and self._group_at(ctx, exits["exit"]):
-            return PositionAction.EXIT
+            return ManagementDecision(action="exit", stop=None, target=None)
         if "time_stop" in exits:
             # held starts at 1 (not 0) on the fill bar: manage() runs in the
             # same loop pass as the fill, one driving bar after entry_ts.
             held = (ctx.now - position.entry_ts) / ctx.tfs.step
             if held >= exits["time_stop"]["bars"]:
-                return PositionAction.EXIT
+                return ManagementDecision(action="exit", stop=None, target=None)
 
-        def ratchet(candidate: float) -> None:
+        stop = position.live_stop
+
+        def ratchet(candidate: float) -> float:
             if pd.isna(candidate):
-                return
-            position.stop = max(position.stop, candidate) if long \
-                else min(position.stop, candidate)
+                return stop
+            return max(stop, candidate) if long else min(stop, candidate)
 
         if "breakeven_at" in exits:
-            risk = abs(position.entry - position.signal.stop)
+            risk = abs(position.entry - position.initial_stop)
             if risk > 0:
                 r_now = (ref - position.entry) / risk if long else (position.entry - ref) / risk
                 if r_now >= float(exits["breakeven_at"]["rr"]):
-                    ratchet(position.entry)
+                    stop = ratchet(position.entry)
         if "trailing" in exits:
             t = exits["trailing"]
             if t["kind"] == "atr":
@@ -138,5 +147,7 @@ class RuleStrategy(Strategy):
                         if not pd.isna(a) else float("nan"))
             else:
                 dist = ref * float(t.get("pct", TRAILING_PCT_DEFAULT)) / 100
-            ratchet(ref - dist if long else ref + dist)
-        return PositionAction.HOLD
+            stop = ratchet(ref - dist if long else ref + dist)
+        if stop == position.live_stop:
+            return HOLD
+        return ManagementDecision(action="hold", stop=stop, target=None)

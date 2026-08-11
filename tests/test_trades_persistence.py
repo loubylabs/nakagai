@@ -3,7 +3,8 @@ import pandas as pd
 from nakagai.data.cache import BarCache
 from nakagai.engine.runner import run_grid
 from nakagai.engine.windows import Window
-from nakagai.strategies.base import Direction, Signal, Strategy
+from nakagai.engine.portfolio_types import Signal
+from nakagai.strategies.base import Direction, Strategy
 
 
 class AlwaysLong(Strategy):
@@ -16,7 +17,7 @@ class AlwaysLong(Strategy):
         if len(ctx.bars["15m"]) != 1:
             return []
         c = float(ctx.bars["15m"]["close"].iloc[-1])
-        return [Signal(ctx.symbol, Direction.LONG, None, stop=c - 1.0, target=c + 100.0,
+        return [Signal(ctx.symbol, Direction.LONG, c, stop=c - 1.0, target=c + 100.0,
                        confidence=1.0, setup_tags=("test",), rationale="fixture")]
 
 

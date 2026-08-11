@@ -5,7 +5,8 @@ import pandas as pd
 from nakagai.data.cache import BarCache
 from nakagai.data.schema import TimeframeSet
 from nakagai.engine.engine import Engine
-from nakagai.strategies.base import Direction, MarketContext, Signal, Strategy
+from nakagai.engine.portfolio_types import Signal
+from nakagai.strategies.base import Direction, MarketContext, Strategy
 
 H1 = TimeframeSet(driving="1h", higher=(),
                   deltas={"1h": pd.Timedelta(hours=1)})
@@ -14,13 +15,14 @@ H1 = TimeframeSet(driving="1h", higher=(),
 class FirstBarLong(Strategy):
     name = "firstbarlong"
 
-    def on_bar(self, ctx: MarketContext) -> list[Signal]:
+    def on_bar(self, ctx: MarketContext) -> tuple[Signal, ...]:
         if len(ctx.driving_bars) == 1:
             close = float(ctx.driving_bars["close"].iloc[-1])
             return [Signal(symbol=ctx.symbol, direction=Direction.LONG,
-                           entry=None, stop=close - 5.0, target=close + 100.0,
-                           confidence=0.5, setup_tags=("t",), rationale="t")]
-        return []
+                           entry_ref=close, stop=close - 5.0,
+                           target=close + 100.0, confidence=0.5,
+                           setup_tags=("t",), rationale="first bar long")]
+        return ()
 
 
 def _hourly_bars(n: int = 8) -> pd.DataFrame:

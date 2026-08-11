@@ -1,35 +1,62 @@
-"""Axis 1 contract: strategies are pure functions MarketContext -> [Signal]."""
+"""Axis 1 contract: strategies are pure functions MarketContext -> (Signal, ...).
+
+A strategy proposes and the engine decides. Everything a strategy hands back
+is an immutable value, checked at the return, and a strategy can no longer
+reach into engine-owned state to ratchet a stop or close a position.
+
+The types themselves live in `nakagai.engine.portfolio_types`, which owns the
+whole canonical contract and imports nothing from this package. This module
+adds the boundary: the three functions the replay calls instead of calling a
+strategy directly, and the closed error taxonomy they raise.
+
+- `validate_signal_sequence` and `validate_management_decision` check a
+  returned value against the contract and raise `StrategyOutputError`.
+- `strategy_operation` wraps a call INTO strategy code: an arbitrary exception
+  becomes `StrategyRuntimeError`, a mutation attempt becomes
+  `StrategyOutputError`.
+
+Neither error is ever converted into an empty signal list. A strategy that
+refused and a strategy that saw nothing are different observations, and a
+portfolio replay that cannot tell them apart reports contention it never had.
+"""
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
+from dataclasses import FrozenInstanceError, dataclass, field
 from enum import StrEnum
 from typing import ClassVar
 
 import pandas as pd
 
 from nakagai.data.schema import DEFAULT_TIMEFRAMES, TimeframeSet
+from nakagai.engine.portfolio_types import (
+    DIRECTIONS,
+    JSONValue,
+    ManagementDecision,
+    PositionView,
+    ReplayInputError,
+    Signal,
+    StrategyOutputError,
+    StrategyRuntimeError,
+    brackets_protectively,
+    _require_binary64,
+    _require_choice,
+    _require_instance,
+    _require_name,
+    _require_positive,
+    _require_symbol,
+    _require_tags,
+)
+
+# One shared answer for "nothing to do with this position". Frozen, so a
+# single instance is safe to hand back from every quiet management call.
+HOLD = ManagementDecision(action="hold", stop=None, target=None)
 
 
 class Direction(StrEnum):
     LONG = "long"
     SHORT = "short"
-
-
-class PositionAction(StrEnum):
-    HOLD = "hold"
-    EXIT = "exit"
-
-
-@dataclass(frozen=True)
-class Signal:
-    symbol: str
-    direction: Direction
-    entry: float | None  # None = market at the next driving-bar open
-    stop: float
-    target: float
-    confidence: float
-    setup_tags: tuple[str, ...]
-    rationale: str
 
 
 @dataclass
@@ -131,7 +158,204 @@ class Strategy(ABC):
         self.params = {**self.DEFAULT_PARAMS, **(params or {})}
 
     @abstractmethod
-    def on_bar(self, ctx: MarketContext) -> list[Signal]: ...
+    def on_bar(self, ctx: MarketContext) -> Sequence[Signal]:
+        """Every signal this strategy proposes at this close, in order.
 
-    def manage(self, position, ctx: MarketContext) -> PositionAction:
-        return PositionAction.HOLD
+        The order is semantic: it carries into replay-wide signal ordinals,
+        so returning two signals means two proposals, not a preference list.
+        """
+        raise NotImplementedError
+
+    def manage(self, position: PositionView, ctx: MarketContext) -> ManagementDecision:
+        """What to do with one open position, as a value.
+
+        `position` is an immutable view. Replacement stops and targets travel
+        back in the decision; assigning to the view raises.
+        """
+        return HOLD
+
+
+# ------------------------------------------------------------- the boundary
+
+
+def _output_error(code: str, message: str, **details: JSONValue) -> StrategyOutputError:
+    return StrategyOutputError(code, message, details)
+
+
+@contextmanager
+def _as_output_error() -> Iterator[None]:
+    """Field checks are shared with the request contract, where the same shape
+    violation is a caller error. Coming out of a strategy return it is a
+    strategy output error, so translate the class and keep the code."""
+    try:
+        yield
+    except ReplayInputError as exc:
+        raise StrategyOutputError(exc.code, exc.message, exc.details) from exc
+
+
+@contextmanager
+def strategy_operation(operation: str, **details: JSONValue) -> Iterator[None]:
+    """The one door into strategy code: construction, `on_bar`, `manage`,
+    a composite member, a dependency function, or a helper they call.
+
+    Everything that escapes lands in the closed taxonomy, and nothing is
+    swallowed. `operation` and the identifying details are stable strings a
+    caller can branch on; the original exception stays attached as the cause
+    for a human, and its traceback text is never serialized into the details.
+    """
+    try:
+        yield
+    except (StrategyOutputError, StrategyRuntimeError):
+        raise
+    except FrozenInstanceError as exc:
+        raise StrategyOutputError(
+            "strategy_mutated_engine_state",
+            f"{operation} tried to assign to an engine-owned value",
+            {"operation": operation, **details},
+        ) from exc
+    except ReplayInputError as exc:
+        # The strategy built a value core refuses. That is an output error
+        # wherever it was caught, and it must not read as a runtime fault.
+        raise StrategyOutputError(
+            exc.code, exc.message,
+            {**exc.details, "operation": operation, **details},
+        ) from exc
+    except Exception as exc:
+        raise StrategyRuntimeError(
+            "strategy_raised", f"{operation} raised {type(exc).__name__}",
+            {"operation": operation, "error": type(exc).__name__, **details},
+        ) from exc
+
+
+def call_on_bar(strategy: Strategy, ctx: MarketContext, *, deciding_close: float,
+                **details: JSONValue) -> tuple[Signal, ...]:
+    """Evaluate one strategy at one close and return every valid signal.
+
+    `details` name this runtime for an operator: a composite passes its block
+    id, the replay passes its play. They travel into a runtime error and
+    identify which of several instances of one strategy class failed.
+    """
+    with strategy_operation("on_bar", strategy=_strategy_name(strategy),
+                            symbol=ctx.symbol, **details):
+        returned = strategy.on_bar(ctx)
+    return validate_signal_sequence(returned, symbol=ctx.symbol,
+                                    deciding_close=deciding_close)
+
+
+def call_manage(strategy: Strategy, position: PositionView, ctx: MarketContext,
+                *, deciding_close: float, **details: JSONValue) -> ManagementDecision:
+    """Manage one open position at one close and return its decision."""
+    with strategy_operation("manage", strategy=_strategy_name(strategy),
+                            symbol=ctx.symbol, **details):
+        returned = strategy.manage(position, ctx)
+    return validate_management_decision(returned, position=position,
+                                        deciding_close=deciding_close)
+
+
+def validate_signal_sequence(value: object, *, symbol: str,
+                             deciding_close: float) -> tuple[Signal, ...]:
+    """Every signal `on_bar` returned, in the order it returned them.
+
+    A string, mapping, generator, or any other non-sequence is refused rather
+    than iterated: a generator would be consumed once and a string would
+    decompose into characters, and both read downstream as a strategy that
+    signalled something it never meant.
+    """
+    # The symbol and the close are the ENGINE's, so a bad one is a replay
+    # input error. Only what the strategy handed back is its output.
+    expected = _require_symbol(symbol, "symbol")
+    close = _require_positive(deciding_close, "deciding_close")
+    if isinstance(value, (str, bytes, bytearray)) or not isinstance(value, Sequence):
+        raise _output_error(
+            "invalid_type", "on_bar must return an ordered sequence of signals",
+            field="on_bar", seen=type(value).__name__,
+        )
+    return tuple(
+        _validated_signal(item, index, expected, close)
+        for index, item in enumerate(value)
+    )
+
+
+def _validated_signal(item: object, index: int, symbol: str,
+                      deciding_close: float) -> Signal:
+    where = f"signals[{index}]"
+    if not isinstance(item, Signal):
+        raise _output_error(
+            "invalid_type", "on_bar returned a value that is not a signal",
+            field=where, seen=type(item).__name__,
+        )
+    with _as_output_error():
+        _require_symbol(item.symbol, f"{where}.symbol")
+        direction = _require_choice(item.direction, f"{where}.direction", DIRECTIONS)
+        entry_ref = _require_positive(item.entry_ref, f"{where}.entry_ref")
+        stop = _require_positive(item.stop, f"{where}.stop")
+        target = _require_positive(item.target, f"{where}.target")
+        confidence = _require_binary64(item.confidence, f"{where}.confidence")
+        tags = _require_tags(item.setup_tags, f"{where}.setup_tags")
+        _require_name(item.rationale, f"{where}.rationale")
+    if item.symbol != symbol:
+        raise _output_error(
+            "invalid_value", "the signal names another symbol",
+            field=f"{where}.symbol", symbol=symbol,
+        )
+    if not 0.0 < confidence <= 1.0:
+        raise _output_error(
+            "invalid_value", "confidence must fall in (0, 1]",
+            field=f"{where}.confidence",
+        )
+    if not tags:
+        raise _output_error(
+            "invalid_value", "a signal must carry at least one setup tag",
+            field=f"{where}.setup_tags",
+        )
+    if entry_ref != deciding_close:
+        raise _output_error(
+            "invalid_value", "the entry reference is not the deciding raw close",
+            field=f"{where}.entry_ref",
+        )
+    if not brackets_protectively(direction, entry_ref, stop, target):
+        raise _output_error(
+            "invalid_value", "protective levels do not bracket the entry reference",
+            field=f"{where}.stop", direction=direction,
+        )
+    return item
+
+
+def validate_management_decision(value: object, *, position: PositionView,
+                                 deciding_close: float) -> ManagementDecision:
+    """The decision `manage` returned, checked against the live position.
+
+    A null stop or target keeps the live level, so the geometry check runs on
+    the levels that would actually be in force after this decision.
+    """
+    # Engine-supplied, so its own failure is a replay input error.
+    _require_instance(position, "position", PositionView)
+    close = _require_positive(deciding_close, "deciding_close")
+    if not isinstance(value, ManagementDecision):
+        raise _output_error(
+            "invalid_type", "manage must return a management decision",
+            field="manage", seen=type(value).__name__,
+        )
+    long = position.direction == Direction.LONG
+    if value.stop is not None:
+        loosened = (value.stop < position.live_stop if long
+                    else value.stop > position.live_stop)
+        if loosened:
+            raise _output_error(
+                "invalid_value", "a replacement stop cannot loosen the live stop",
+                field="stop", direction=position.direction,
+            )
+    stop = position.live_stop if value.stop is None else value.stop
+    target = position.live_target if value.target is None else value.target
+    if not brackets_protectively(position.direction, close, stop, target):
+        raise _output_error(
+            "invalid_value", "the decided levels do not bracket the deciding close",
+            field="stop", direction=position.direction,
+        )
+    return value
+
+
+def _strategy_name(strategy: Strategy) -> str:
+    """A name for the error details even when the object has none to give."""
+    name = getattr(strategy, "name", None)
+    return name if isinstance(name, str) else type(strategy).__name__

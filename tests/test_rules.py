@@ -118,7 +118,7 @@ def test_rule_strategy_emits_signal_and_validates():
     assert len(sigs) == 1 and sigs[0].direction == Direction.LONG
     with pytest.raises(ValueError):
         RuleStrategy({"spec": {"version": 1, "name": "old"}})
-    assert RuleStrategy({}).on_bar(_ctx(b)) == []      # inert without a spec
+    assert RuleStrategy({}).on_bar(_ctx(b)) == ()      # inert without a spec
 
 
 def test_primitive_in_condition_end_to_end():

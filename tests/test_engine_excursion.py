@@ -14,7 +14,8 @@ import pytest
 
 from nakagai.data.cache import BarCache
 from nakagai.engine.engine import Engine
-from nakagai.strategies.base import Direction, Signal, Strategy
+from nakagai.engine.portfolio_types import Signal
+from nakagai.strategies.base import Direction, Strategy
 
 
 class Repeater(Strategy):
@@ -35,8 +36,8 @@ class Repeater(Strategy):
             stop, target = price * (1 - self.stop_pct), price * (1 + self.target_pct)
         else:
             stop, target = price * (1 + self.stop_pct), price * (1 - self.target_pct)
-        return [Signal(ctx.symbol, self.direction, None, stop=stop, target=target,
-                       confidence=1.0, setup_tags=("rep",), rationale="")]
+        return [Signal(ctx.symbol, self.direction, price, stop=stop, target=target,
+                       confidence=1.0, setup_tags=("rep",), rationale="repeater")]
 
 
 def _walk(n=900, seed=7, base=100.0):

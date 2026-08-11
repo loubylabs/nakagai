@@ -35,8 +35,6 @@ from typing import Literal
 
 from pandas import NaT, Timestamp
 
-from nakagai.strategies.base import Signal
-
 type JSONScalar = bool | int | float | str | None
 type JSONValue = JSONScalar | tuple[JSONValue, ...] | Mapping[str, JSONValue]
 
@@ -664,6 +662,34 @@ def _canonical_symbols(value: object) -> tuple[str, ...]:
 
 
 @dataclass(frozen=True)
+class Signal:
+    """What a strategy proposes at a deciding close.
+
+    The one value on this page that does NOT validate itself, and the reason
+    is the error taxonomy rather than convenience. A strategy builds its own
+    signals, so validating here would raise `ReplayInputError` from inside
+    `on_bar`, where the boundary can only read it as the strategy having
+    raised. `validate_signal_sequence` in `nakagai.strategies.base` checks
+    every field at the return instead, so an out-of-contract signal is a
+    `StrategyOutputError` naming the field, which is what the contract says it
+    is. Nothing else in core constructs a `Signal`.
+
+    `entry_ref` is the deciding raw close, never a limit price: Phase 1 fills
+    market at the next scheduled open. It exists so the boundary can prove the
+    geometry a strategy claimed was the geometry it was looking at.
+    """
+
+    symbol: str
+    direction: Literal["long", "short"]
+    entry_ref: float
+    stop: float
+    target: float
+    confidence: float
+    setup_tags: tuple[str, ...]
+    rationale: str
+
+
+@dataclass(frozen=True)
 class EntryIntent:
     replay_id: str
     play_id: str
@@ -734,10 +760,23 @@ class ManagementDecision:
             _set(self, field, None if value is None else _require_positive(value, field))
 
 
+def brackets_protectively(direction: str, price: float, stop: float,
+                          target: float) -> bool:
+    """One protective-geometry rule for the whole engine.
+
+    A long is stopped below its price and targeted above it; a short is the
+    mirror. Every gate that asks the question, the entry fill, the strategy
+    boundary, and the returned management decision, asks it here, so no two
+    of them can drift apart.
+    """
+    if direction == "long":
+        return stop < price < target
+    return target < price < stop
+
+
 def _require_entry_geometry(direction: str, entry: float, stop: float, target: float) -> None:
     """The protective geometry every accepted entry passed at its fill."""
-    ordered = stop < entry < target if direction == "long" else target < entry < stop
-    if not ordered:
+    if not brackets_protectively(direction, entry, stop, target):
         raise _fail(
             "invalid_value", "protective levels do not bracket the entry fill",
             field="initial_stop", direction=direction,

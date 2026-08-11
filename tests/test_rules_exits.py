@@ -1,12 +1,23 @@
 import numpy as np
 import pandas as pd
 
+import pytest
+
 from nakagai.data.cache import BarCache
 from nakagai.engine.engine import Engine
-from nakagai.strategies.base import Direction
+from nakagai.engine.portfolio_types import ManagementDecision, PositionView
+from nakagai.strategies.base import Direction, MarketContext
 from nakagai.strategies.rules import RuleStrategy
+from nakagai.strategies.rules.frame_eval import FrameEval
+from nakagai.strategies.rules.vocabulary import core_vocabulary
 
 RISK = {"stop": {"kind": "percent", "pct": 5.0}, "target": {"kind": "rr", "rr": 20.0}}
+# A short's rr target walks DOWN from the reference, so rr 20 against a 5%
+# stop lands it on zero, which is not a price any tape reaches. rr 15 keeps
+# the target far enough below the fall (~25 against a low of 40) that these
+# exits still fire on the stop, and keeps it a real level.
+SHORT_RISK = {"stop": {"kind": "percent", "pct": 5.0},
+              "target": {"kind": "rr", "rr": 15.0}}
 
 
 def _cache(root, closes):
@@ -84,7 +95,7 @@ def test_no_exits_block_behaves_like_before(tmp_path):
 def _short_spec(exits):
     return {"version": 2, "name": "ts", "timeframe": "15m",
             "short": {"all": [{"lhs": {"src": "close"}, "op": "crosses_below", "rhs": 100.0}]},
-            "exits": exits, "risk": RISK}
+            "exits": exits, "risk": SHORT_RISK}
 
 
 def _run_short(tmp_path, closes, exits):
@@ -113,3 +124,69 @@ def test_short_atr_trailing_stop_ratchets_down_and_stops_out(tmp_path):
     assert t.exit_reason == "stop"
     assert t.stop < t.entry            # ratcheted below entry, never above
     assert t.pnl > 0
+
+
+# ------------------------------- management is a value, not a mutation
+
+def _view(**overrides):
+    fields = {"direction": "long", "qty": 10,
+              "entry_ts": pd.Timestamp("2026-01-05 14:30", tz="UTC"),
+              "entry": 100.0, "initial_stop": 95.0, "initial_target": 200.0,
+              "live_stop": 95.0, "live_target": 200.0}
+    return PositionView(**{**fields, **overrides})
+
+
+def _manage_ctx(closes, now_offset=1):
+    idx = pd.date_range("2026-01-05 14:30", periods=len(closes), freq="15min",
+                        tz="UTC")
+    c = pd.Series(closes, index=idx, dtype=float)
+    bars = pd.DataFrame({"open": c, "high": c + 0.2, "low": c - 0.2,
+                         "close": c, "volume": 1000.0}, index=idx)
+    return MarketContext(symbol="SPY", now=idx[-1] + pd.Timedelta(minutes=15),
+                         bars={"15m": bars, "1h": bars, "1d": bars})
+
+
+def test_a_ratchet_comes_back_as_a_decision_and_leaves_the_view_alone():
+    strategy = RuleStrategy({"spec": _spec({"trailing": {"kind": "percent",
+                                                         "pct": 3.0}})})
+    position = _view()
+    ctx = _manage_ctx([110.0] * 20)
+    decision = strategy.manage(position, ctx)
+    assert decision.action == "hold"
+    assert decision.stop == pytest.approx(110.0 * 0.97)
+    assert position.live_stop == 95.0     # the view never moved
+
+
+def test_a_ratchet_that_would_loosen_the_live_stop_is_not_returned():
+    """3% below 110 is 106.7, which is BELOW a live stop already at 108. A
+    trailing stop that gave that back would widen the risk it exists to cut."""
+    strategy = RuleStrategy({"spec": _spec({"trailing": {"kind": "percent",
+                                                         "pct": 3.0}})})
+    decision = strategy.manage(_view(live_stop=108.0), _manage_ctx([110.0] * 20))
+    assert decision.stop is None
+
+
+def test_a_spec_with_no_exits_block_holds():
+    strategy = RuleStrategy({"spec": _spec({})})
+    assert strategy.manage(_view(), _manage_ctx([110.0] * 20)) == ManagementDecision(
+        action="hold", stop=None, target=None)
+
+
+def test_a_rule_exit_comes_back_as_an_exit_decision():
+    exits = {"exit": {"any": [{"lhs": {"src": "close"}, "op": ">", "rhs": 105.0}]}}
+    strategy = RuleStrategy({"spec": _spec(exits)})
+    ctx = _manage_ctx([110.0] * 20)
+    ctx.fe = FrameEval(ctx.bars, vocabulary=core_vocabulary())
+    ctx.cursor = {"15m": len(ctx.bars["15m"]) - 1}
+    assert strategy.manage(_view(), ctx).action == "exit"
+
+
+def test_the_engine_applies_a_returned_stop_to_the_live_position(tmp_path):
+    """End to end: the ratchet only reaches the recorded trade because the
+    engine applied the returned decision, since nothing else can move it."""
+    up = list(np.linspace(99, 115, 20))
+    down = list(np.linspace(115, 104, 12))
+    res = _run(tmp_path, up + down, {"trailing": {"kind": "percent", "pct": 3.0}})
+    t = res.trades[0]
+    assert t.stop > t.entry * 1.0        # the live stop moved above the entry
+    assert t.stop != t.entry * 0.95      # and is no longer the initial 5% stop
