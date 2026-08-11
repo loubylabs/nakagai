@@ -133,6 +133,27 @@ class Term:
                              f"arg(s) {condition_args} on kind {self.kind!r}; "
                              "a condition-typed arg is only allowed on kind "
                              "'primitive'")
+        # At most one, and the constraint belongs to Pine rather than to the
+        # grammar. `TermCall.source` is a single slot: the walk lowers one
+        # condition into it and hands it to an emit function that takes one
+        # operand. With two, pine/lower.py selected one out of a set and
+        # dropped the other from `args` as well, so the chart computed
+        # different logic from the engine and said nothing. Measured: a term
+        # declaring `up` and `down` validated clean and lowered to
+        # `nk_bars_since(close > open)` with `down` absent entirely.
+        #
+        # The other five walkers are already plural-safe (canon re-keys every
+        # condition arg; the evaluator injects one callback they all share), so
+        # lifting this means giving TermCall a source per condition and
+        # teaching every emit which one it wants. Refused here rather than in
+        # the Pine walk because a vocabulary that cannot be charted is wrong
+        # when it is built, not when someone asks for a chart.
+        if len(condition_args) > 1:
+            raise ValueError(f"term {self.name!r} declares condition-typed "
+                             f"args {condition_args}; a term may declare at "
+                             "most one, because Pine lowers a condition into a "
+                             "single call.source slot and would silently drop "
+                             "the rest")
         object.__setattr__(self, "args", args)
         object.__setattr__(self, "defaults", defaults)
 

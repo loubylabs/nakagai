@@ -1098,10 +1098,16 @@ class SpecLowerer:
             # bars_since measures a condition rather than a series, and a
             # condition is the walk's to lower: an emit function is handed
             # operands, never spec shapes. Same slot, because it is the same
-            # concept, the operand the term is applied to. A condition-typed
-            # arg may not declare a default (N3-D13), so the spec always
-            # supplies it and there is exactly one to find here.
-            arg = next(iter(condition_args & set(node)))
+            # concept, the operand the term is applied to.
+            #
+            # Exactly one to find, and that is a fact about Term rather than an
+            # assumption here: N3-D13 refuses a default on a condition-typed
+            # arg, so the spec supplies every one a term declares, and Term
+            # refuses a term declaring more than one, because this slot holds
+            # one. Reading it off the set used to rest on the first half alone,
+            # which does not imply the second: two declared args both arrived
+            # and one was dropped without a word.
+            (arg,) = condition_args & set(node)
             source = self._condition(node[arg], path.child(arg), frame, frame)
         call = TermCall(term=term, args=args, path=path,
                         slot=self.ctx.slot(f"nk_{term.name}", path),

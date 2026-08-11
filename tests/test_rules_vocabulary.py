@@ -171,6 +171,29 @@ def test_a_condition_typed_arg_is_refused_outside_primitive_kind():
     Term("ok_kind", "primitive", {"cond": CONDITION_ARG}, {}, lambda *a: None)
 
 
+def test_a_term_may_declare_at_most_one_condition_typed_arg():
+    """The third refusal in the constructor, and Pine's rather than N3-D13's.
+
+    `TermCall.source` is one slot, so the Pine walk lowers one condition and
+    hands it to an emit taking one operand. A term declaring two validated
+    clean and lowered to `nk_bars_since(close > open)` with the second
+    condition absent from the chart entirely, so the engine computed
+    `up AND down` and the chart computed `up`.
+
+    Refused where the term is built rather than where it is charted: a
+    vocabulary that cannot be charted is wrong when it is constructed, not
+    when someone asks for a chart. The message names both args, because the
+    author of a two-condition term needs to know which one Pine could not
+    take, and lifting this is a real piece of work rather than an oversight.
+    """
+    with pytest.raises(ValueError, match="at most one"):
+        Term("two_conds", "primitive",
+             {"up": CONDITION_ARG, "down": CONDITION_ARG}, {},
+             lambda *a: None)
+    # one is fine under any name, and must stay fine
+    Term("one_cond", "primitive", {"when": CONDITION_ARG}, {}, lambda *a: None)
+
+
 def test_a_condition_typed_arg_gets_the_evaluator_injected_by_type(
         make_bars, count_where_vocab):
     """N3-D9. The injection is keyed on the arg's declared type, so a term
