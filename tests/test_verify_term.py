@@ -6,11 +6,12 @@ import pandas as pd
 import pytest
 
 import nakagai.strategies.rules.verify as verify_module
+from nakagai.strategies import indicators as ind
 from nakagai.strategies.rules.vocabulary import Term, core_vocabulary
 from nakagai.strategies.rules.verify import (
-    CHECKED, EXEMPT, FAILED, MAX_ARG_SETS, PROBE_COUNT, VACUOUS,
-    _raw_call, arg_sets, evaluate_term, exemption_reason, field_mismatch,
-    probe_rows, reference_bars, verify_term, verify_vocabulary,
+    CAUSES, CHECKED, EXEMPT, FAILED, MAX_ARG_SETS, PROBE_COUNT, VACUOUS,
+    WARMUP_PROBE_COUNT, _raw_call, arg_sets, evaluate_term, exemption_reason,
+    field_mismatch, probe_rows, reference_bars, verify_term, verify_vocabulary,
 )
 
 
@@ -399,11 +400,91 @@ def _peeking_series(s, a):
     return s.shift(-1)
 
 
-def test_probe_rows_sit_past_the_warmup_and_are_bounded_in_count(bars):
-    rows = probe_rows(len(bars))
-    assert len(rows) == PROBE_COUNT
-    assert min(rows) >= len(bars) // 2
-    assert max(rows) < len(bars)
+def test_probe_rows_cover_the_warmup_as_well_as_the_settled_frame(bars):
+    """Both regions, and never the last row.
+
+    The settled half is where terms are past their warm-up and the comparison is
+    against real numbers. The warm-up half is where a term that fills its leading
+    NaNs from future rows shows itself, and it was not probed at all: rows 0 to
+    2079 of a 4160-row frame, half the frame, never compared once.
+
+    The last row is excluded because `bars.iloc[:n]` IS `bars`, so that probe
+    compares a value with itself and cannot disagree for any term.
+    """
+    n = len(bars)
+    rows = probe_rows(n)
+    assert len(rows) == len(set(rows))
+    assert len([i for i in rows if i >= n // 2]) == PROBE_COUNT
+    assert len([i for i in rows if i < n // 2]) == WARMUP_PROBE_COUNT
+    assert min(rows) == 0, "row 0 is where a backfilled NaN shows itself"
+    assert max(rows) == n - 2
+    assert n - 1 not in rows, "that probe's prefix IS the frame it is compared to"
+
+
+def test_probe_rows_refuses_a_frame_with_no_strict_prefix_to_probe():
+    """Under two rows there is no row whose prefix is shorter than the frame."""
+    assert probe_rows(0) == []
+    assert probe_rows(1) == []
+    assert probe_rows(2) == [0]
+
+
+def _bfill_series(s, a):
+    return ind.sma(s, a["n"]).bfill()
+
+
+def _bfill_bar(frame, a):
+    return ind.sma(frame["close"], a["n"]).bfill()
+
+
+def _bfill_primitive(_eval_fn, frame, **args):
+    return ind.sma(frame["close"], args["n"]).bfill()
+
+
+@pytest.mark.parametrize("kind, fn", [("series", _bfill_series),
+                                      ("bar", _bfill_bar),
+                                      ("primitive", _bfill_primitive)])
+def test_a_term_that_fills_its_warmup_from_the_future_is_failed(kind, fn, bars):
+    """The hole the half-frame probe window left open, on all three kinds.
+
+    `.bfill()` on an indicator is the commonest convenience idiom in the library
+    node 02 generates its 100-plus terms from, and it is look-ahead: row 0 is
+    handed a number first computable at row n-1 of the warm-up.
+
+    Measured with probes starting at n // 2: CHECKED, on all three kinds, while
+    19 rows of the whole-frame output disagreed with their prefix. Every one of
+    those rows sat below the first probe. Core's widest warm-up is rvol at 60
+    sessions, 1560 rows, still under 2080, so no term's warm-up was ever reached.
+    """
+    term = Term(f"bfill_{kind}", kind, {"n": (2, 500)}, {"n": 20}, fn)
+
+    whole = ind.sma(bars["close"], 20).bfill()
+    assert not pd.isna(whole.iloc[0]), "the counterexample no longer backfills"
+    assert pd.isna(ind.sma(bars["close"].iloc[:1], 20).bfill().iloc[-1]), (
+        "the prefix must still be NaN there, or there is nothing to disagree with")
+
+    verdict = verify_term(term, bars)
+    assert verdict.status == FAILED, f"a warm-up peek is still a peek: {verdict}"
+    assert verdict.cause == "lookahead"
+
+
+def test_a_term_whose_only_evidence_is_the_frame_against_itself_is_vacuous(bars):
+    """A probe at row n-1 compares `bars.iloc[:n]` with `bars`, which is itself.
+
+    Measured: a window as wide as the frame is NaN at every probe but the last,
+    and that one comparison set `saw_a_number`, so the term came back CHECKED on
+    evidence that could not have come out any other way. That is the shape the
+    end_anchored exemption exists to refuse, reintroduced for one probe in twenty
+    on every term.
+    """
+    term = Term("whole_frame_window", "series", {}, {},
+                lambda s, a: s.rolling(len(bars)).mean())
+    out = term.fn(bars["close"], {})
+    assert out.notna().sum() == 1 and not pd.isna(out.iloc[-1]), (
+        "this term must be non-NaN at exactly the last row")
+
+    verdict = verify_term(term, bars)
+    assert verdict.status == VACUOUS, (
+        f"the last row's prefix IS the frame, so it is no evidence: {verdict}")
 
 
 def test_a_peeking_term_fails_the_gate(bars):

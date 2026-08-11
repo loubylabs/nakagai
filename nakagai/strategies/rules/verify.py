@@ -340,14 +340,49 @@ def arg_sets(term: Term) -> tuple[dict, ...]:
 # raising PROBE_COUNT is the lever if measured CI time allows it.
 PROBE_COUNT = 20
 
+# The same again, across the warm-up. IN ADDITION to the settled probes, never
+# instead of them: the floor exists so every term has real numbers to compare,
+# and trading that away to reach the warm-up would buy one hole with another.
+WARMUP_PROBE_COUNT = 20
+
+
+def _spread(lo: int, hi: int, count: int) -> set[int]:
+    """`count` rows evenly spaced from lo to hi inclusive, deduplicated."""
+    if hi < lo:
+        return set()
+    step = (hi - lo) / max(count - 1, 1)
+    return {int(lo + round(k * step)) for k in range(count)}
+
 
 def probe_rows(n: int) -> list[int]:
-    """PROBE_COUNT rows evenly spaced across the second half of the frame."""
-    lo, hi = n // 2, n - 1
-    if hi <= lo:
+    """Rows to compare, across the warm-up AND the settled part of the frame.
+
+    Probing only the settled half left the other half never compared once, and
+    look-ahead confined to a term's warm-up was therefore admitted as CHECKED.
+    Measured: `sma(n).bfill()` came back CHECKED on all three term kinds while 19
+    of its rows held a value first computable at a strictly later row, every one
+    of them below the first probe. `.bfill()` is the commonest convenience idiom
+    in the library node 02 generates its terms from, so this is not an exotic
+    shape. The warm-up rows cost nothing in false failures: an honest term is NaN
+    on both sides there and `_agrees` reads NaN against NaN as agreement.
+
+    THE LAST ROW IS NEVER PROBED. `bars.iloc[:n]` IS `bars`, so a probe at n-1
+    compares a value with itself, cannot disagree for any term, and yet counts as
+    evidence: measured, a window as wide as the frame was NaN at every other
+    probe and came back CHECKED on that one self-comparison. A probe that cannot
+    fail is not a probe, and excluding it also keeps it out of the vacuity guard.
+
+    A fixed COUNT in each region, not a fixed stride: widening the fixture must
+    not multiply the cost, because node 02 runs this over 100-plus terms in CI.
+    The residual risk is a term peeking only between probes; raising either count
+    is the lever if measured CI time allows it.
+    """
+    hi = n - 2
+    if hi < 0:
         return []
-    step = (hi - lo) / max(PROBE_COUNT - 1, 1)
-    return sorted({int(lo + round(k * step)) for k in range(PROBE_COUNT)})
+    settled = _spread(n // 2, hi, PROBE_COUNT)
+    warmup = _spread(0, min(n // 2 - 1, hi), WARMUP_PROBE_COUNT)
+    return sorted(settled | warmup)
 
 
 def _value_at(out, i: int) -> float:
