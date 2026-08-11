@@ -47,7 +47,7 @@ from nakagai.strategies.rules.vocabulary import Term, Vocabulary, is_choice_rule
 # module's public surface. Node 02 lives in another repository and reaches this
 # module through the rev-pinned git dependency; these are the names it may hold
 # on to. Everything else here is internal to the gate and free to change.
-__all__ = ["CHECKED", "EXEMPT", "FAILED", "VACUOUS",
+__all__ = ["CAUSES", "CHECKED", "EXEMPT", "FAILED", "VACUOUS",
            "TermVerdict", "reference_bars", "verify_vocabulary"]
 
 # The arg rule that marks a condition-taking term. A bare string rather than a
@@ -87,7 +87,9 @@ VACUOUS = "vacuous"
 # level down: if a bare boolean cannot tell proved-causal from could-not-test,
 # a bare FAILED cannot tell this-term-peeks from our-gate-broke. Node 02 lists
 # rejected terms in CI output and classifies them on this field, rather than
-# string-matching a reason written for a human to read.
+# string-matching a reason written for a human to read. Exported for the same
+# reason the four status literals are: a consumer that classifies on this field
+# and cannot read the vocabulary would hardcode the strings and drift silently.
 CAUSES = ("lookahead", "uncallable", "schema", "unenumerable", "mutation",
           "gate_error")
 
@@ -185,17 +187,26 @@ def _raw_call(term: Term, bars: pd.DataFrame, args: dict):
     return term.fn(bars["close"], args)     # series, frame
 
 
-def evaluate_term(term: Term, bars: pd.DataFrame, args: dict):
-    """One term's output over `bars`, narrowed to one column if it returns a frame.
+def _narrow(out, args: dict):
+    """One term's output, narrowed to one column if it returned a frame.
 
     A DataFrame return is narrowed by `field` for BOTH frame-kind and bar-kind
     terms: donchian, ichimoku, keltner, stoch and supertrend are bar-kind and
     multi-output, so narrowing only frame-kind would raise on five terms.
+
+    One function rather than a copy here and another inline in verify_term, for
+    the same reason _raw_call is one function: the whole-frame side reuses the
+    call it already made and narrows it itself, while the prefix side goes
+    through evaluate_term. Narrowing differently on the two sides would compare a
+    value from one column against a value from another and call the difference
+    look-ahead.
     """
-    out = _raw_call(term, bars, args)
-    if isinstance(out, pd.DataFrame):
-        out = out[args["field"]]
-    return out
+    return out[args["field"]] if isinstance(out, pd.DataFrame) else out
+
+
+def evaluate_term(term: Term, bars: pd.DataFrame, args: dict):
+    """One term's output over `bars`, narrowed to one column if it returns a frame."""
+    return _narrow(_raw_call(term, bars, args), args)
 
 
 def _frame_fingerprint(bars: pd.DataFrame) -> tuple:
@@ -518,7 +529,7 @@ def verify_term(term: Term, bars: pd.DataFrame) -> TermVerdict:
             # time on the whole frame. evaluate_term's only step beyond the raw
             # dispatch is this same narrowing, and node 02 multiplies the
             # saving by 100+.
-            whole = raw[args["field"]] if isinstance(raw, pd.DataFrame) else raw
+            whole = _narrow(raw, args)
 
             # A return that does not line up with the frame is a shape problem,
             # reported as one. Probing it by position either raises, which says

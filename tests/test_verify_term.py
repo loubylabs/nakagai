@@ -829,6 +829,50 @@ def test_a_failed_verdict_carries_a_machine_readable_cause(bars):
     assert verify_term(empty_choice, bars).cause == "unenumerable"
 
 
+def test_every_failure_mode_names_a_declared_cause_and_every_cause_has_one(bars):
+    """CAUSES is the vocabulary node 02 classifies rejects on, and nothing read it.
+
+    This branch's discipline elsewhere is that the exempt set is asserted against
+    a declared constant rather than counted, because a set the code merely
+    happens to produce is not a contract. CAUSES had the comment and not the
+    assertion, so a typo'd or drifted cause string could not be caught.
+
+    Both halves matter. Keying the table on the expected cause stops a verdict
+    carrying a cause outside the vocabulary, or a failure mode quietly changing
+    which one it reports. Comparing the keys against CAUSES stops CAUSES growing
+    a literal that nothing emits, which is the other way a declared constant
+    stops describing the code.
+
+    Each term gets its own frame because one of them writes into the frame it is
+    given, which is the whole point of that one.
+    """
+    broken = {
+        "lookahead": Term("peeker", "series", {}, {}, _peeking_series),
+        "uncallable": Term("explodes", "series", {}, {},
+                           lambda s, a: (_ for _ in ()).throw(ValueError("boom"))),
+        "schema": Term("under_declared", "frame", {"field": ("a",)},
+                       {"field": "a"},
+                       lambda s, a: pd.DataFrame({"a": s, "b": s.shift(-1)})),
+        "unenumerable": Term("too_wide", "series",
+                             {f"c{i}": ("x", "y", "z") for i in range(6)},
+                             {f"c{i}": "x" for i in range(6)}, lambda s, a: s),
+        "mutation": Term("mutating_bar_peeker", "bar", {}, {},
+                         _mutating_bar_peeker),
+        "gate_error": Term("empty_frame", "series", {}, {},
+                           lambda s, a: pd.DataFrame()),
+    }
+
+    assert set(broken) == set(CAUSES), (
+        f"declared but never produced here: {sorted(set(CAUSES) - set(broken))}; "
+        f"produced here but not declared: {sorted(set(broken) - set(CAUSES))}")
+
+    for want, term in broken.items():
+        verdict = verify_term(term, bars.copy())
+        assert verdict.status == FAILED, f"{term.name}: {verdict}"
+        assert verdict.cause in CAUSES, f"{verdict.cause!r} is not a declared cause"
+        assert verdict.cause == want, f"{term.name}: {verdict.reason}"
+
+
 def test_a_verdict_that_is_not_a_failure_carries_no_cause(bars):
     """An empty cause is what "this is not a rejection" reads as downstream."""
     checked = verify_term(core_vocabulary().indicators["sma"], bars)
