@@ -8,7 +8,9 @@ import hashlib
 import json
 
 from nakagai.strategies.rules.spec import DEFAULT_RISK, VERSION
-from nakagai.strategies.rules.vocabulary import Vocabulary, resolve_vocabulary
+from nakagai.strategies.rules.vocabulary import (
+    Vocabulary, is_condition_rule, resolve_vocabulary,
+)
 
 _TRAILING_DEFAULTS = {"atr": {"n": 14, "mult": 2.0}, "percent": {"pct": 2.0}}
 
@@ -43,11 +45,23 @@ def canonical_expr(node, vocabulary: Vocabulary):
             out["tf"] = node["tf"]
         return out
     name = node["prim"]
-    args = {**vocabulary.primitives[name].defaults,
-            **{k: v for k, v in node.items() if k not in ("prim", "cond")}}
+    term = vocabulary.primitives[name]
+    # Re-keyed onto the term's condition-typed arg NAMES, generic over which
+    # primitive and which key it happens to declare, rather than the literal
+    # key "cond". Keying on the literal key already worked for a second
+    # primitive that also happened to call its arg "cond" and silently did the
+    # wrong thing for one that called it something else: the condition fell
+    # into the generic args merge, where _num passes a dict straight through,
+    # so nothing inside it was canonicalized and two specs whose conditions
+    # differ only in a materialized default or an int-versus-float literal
+    # hashed apart.
+    condition_args = {a for a, rule in term.args.items() if is_condition_rule(rule)}
+    args = {**term.defaults,
+            **{k: v for k, v in node.items() if k not in ("prim", *condition_args)}}
     out = {"prim": name, **{k: _num(v) for k, v in args.items()}}
-    if "cond" in node:
-        out["cond"] = _canon_cond(node["cond"], vocabulary)
+    for a in sorted(condition_args):
+        if a in node:
+            out[a] = _canon_cond(node[a], vocabulary)
     return out
 
 

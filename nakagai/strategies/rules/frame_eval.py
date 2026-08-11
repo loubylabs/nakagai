@@ -24,7 +24,9 @@ import pandas as pd
 from nakagai.data.schema import DEFAULT_TIMEFRAMES, TimeframeSet
 from nakagai.engine.context import visible_counts
 from nakagai.strategies.rules.primitives import end_anchored_series
-from nakagai.strategies.rules.vocabulary import Vocabulary, resolve_vocabulary
+from nakagai.strategies.rules.vocabulary import (
+    Vocabulary, is_condition_rule, resolve_vocabulary,
+)
 
 
 def _as_series(v, like):
@@ -273,7 +275,13 @@ class FrameEval:
             out = pd.Series(np.nan, index=frame.index)
             out.iloc[lo:hi] = part.to_numpy()
             return self._align(out, src_tf, tf)
-        if name == "bars_since":
+        if any(is_condition_rule(rule) for rule in term.args.values()):
+            # Generic per N3-D9, keyed on the arg TYPE rather than the name
+            # "bars_since": a term registered outside core (a platform
+            # vocabulary entry, added with no core PR) reaches this the same
+            # way. The callback itself is unchanged; it stays injected rather
+            # than imported to avoid a circular import (primitives.py
+            # documents this), which typing the arg does not change.
             a["eval_fn"] = lambda cond, b: self.condition_series(cond, src_tf)
         return self._align(term.fn(None, frame, **a), src_tf, tf)
 
