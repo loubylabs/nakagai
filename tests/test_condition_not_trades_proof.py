@@ -392,44 +392,54 @@ def replay(name: str, market):
 # moves, or its qty, or it stops existing; none of that is a rounding question
 # and none of it is allowed a tolerance here.
 #
-# The floats are compared with a relative tolerance, and that is forced rather
-# than chosen. `lo + range * d` is one rounding where the compiler contracts it
-# into an FMA and two where it does not: 254 of 1893 draws from one seeded
-# `rng.uniform` differ by a single ulp between arm64 Darwin and x86_64 Linux,
-# and every price the engine computes is built from arithmetic of that shape.
-# So a digest over full-precision floats pins the machine that derived it and
-# not the engine, which is exactly how this proof passed locally and failed in
-# CI on all nine specs with every trade COUNT matching.
+# The floats are compared PER TRADE AND PER FIELD against a committed
+# reference, with a relative tolerance. Every part of that sentence was paid
+# for:
 #
-# Rounding the floats INTO the digest was tried and is not enough. Rounding
-# does not make near-equal values equal: two values a single ulp apart can
-# still straddle the boundary and print differently, so a digest of rounded
-# floats flaps at a lower rate instead of not flapping. Measured, twelve
-# significant digits took the x86_64 failures from nine specs to four. A
-# tolerance compares the numbers rather than their spelling, and cannot
-# straddle anything.
+# - A tolerance rather than a digest, because `lo + range * d` is one rounding
+#   where the compiler contracts it into an FMA and two where it does not.
+#   Measured over these nine replays, 753 of 5208 float values differ between
+#   arm64 Darwin and x86_64 Linux. A digest of full-precision floats therefore
+#   pins the machine that derived it, which is how this proof passed locally
+#   and failed in CI on all nine specs with every trade COUNT matching.
+# - Not a digest of ROUNDED floats either. Rounding does not make near-equal
+#   values equal: two values a single ulp apart can straddle the boundary and
+#   print differently. Measured, twelve significant digits took the x86_64
+#   failures from nine specs to four rather than to none.
+# - PER TRADE AND PER FIELD, never a total. Per-field totals were tried and are
+#   an aggregate floor: two trades whose entries move by +0.25 and -0.25 leave
+#   every total untouched, so the proof would accept trades it exists to
+#   refuse. A tolerance on a total is also not the tolerance it appears to be,
+#   because it scales with the total: 1e-9 relative on ORB's entry sum of
+#   ~12,795 is an absolute window of 1.3e-5, which one trade could absorb
+#   entirely.
 #
-# 1e-9 is many orders above the noise it absorbs (~1e-16, accumulating to
-# perhaps 1e-13) and many orders below anything a regression produces: a trade
+# 1e-11 is chosen against the measurement, not against taste. The worst
+# cross-architecture deviation over all 5208 values is 3.4e-13, in `mae`, and
+# prices themselves stay under 8e-16. That leaves about thirty times headroom
+# over the noise, and seven orders of margin below any real change: a trade
 # that moved moved to another bar, so its price differs in the second or third
-# digit. Verified by running this module on both architectures.
-_FLOAT_TOLERANCE = 1e-9
+# digit.
+_FLOAT_TOLERANCE = 1e-11
+
+FLOAT_REFERENCE = (Path(__file__).resolve().parent / "fixtures"
+                   / "node03-trade-floats.json")
 
 
 def _cell(v):
     """Exact and total over the field types the digest covers.
 
-    Floats never reach this. `_split` routes them to the tolerant comparison
-    before the digest is built, so a float arriving here is a partition bug
-    rather than a value to render, and it says so.
+    Floats never reach this. They are compared against FLOAT_REFERENCE with a
+    tolerance, so a float arriving here is a partition bug rather than a value
+    to render, and it says so.
     """
     if isinstance(v, bool):
         return v
     if isinstance(v, float):
         raise AssertionError(
             f"a float reached the exact digest: {v!r}. Floats are compared "
-            f"with a tolerance by _float_sums, because their last digits are "
-            f"not reproducible across architectures.")
+            f"with a tolerance by _float_mismatches, because their last digits "
+            f"are not reproducible across architectures.")
     if isinstance(v, Enum):
         return v.name
     if isinstance(v, (tuple, list)):
@@ -438,11 +448,11 @@ def _cell(v):
 
 
 def _float_fields():
-    """The fields carrying arithmetic, discovered from a real trade.
+    """The fields carrying arithmetic, discovered from the dataclass.
 
-    Read off the dataclass's own annotations rather than a hand-list, so a
-    field added to PortfolioTrade later joins the right side of the split with
-    nobody remembering to come back here.
+    Read off the annotations rather than a hand-list, so a field added to
+    PortfolioTrade later joins the right side of the split with nobody
+    remembering to come back here.
     """
     return tuple(f.name for f in dataclasses.fields(PortfolioTrade)
                  if f.type in ("float", float))
@@ -471,22 +481,31 @@ def _trade_digest(trades):
     return len(rows), hashlib.sha256(blob.encode()).hexdigest()
 
 
-def _float_sums(trades):
-    """One total per float field, in field order.
+def _trade_floats(trades):
+    """Every float field of every trade, in field order."""
+    names = _float_fields()
+    return [[getattr(t, name) for name in names] for t in trades]
 
-    A per-field total rather than one number over all of them: a sum over
-    everything could cancel a change in `entry` against a change in `exit`,
-    and per-field it cannot. Summing rather than committing every value keeps
-    the table readable at 434 trades while still pinning each field.
+
+def _float_mismatches(got, want):
+    """Every field of every trade that moved by more than the tolerance.
+
+    Returns them all rather than the first, so one run names the whole shape
+    of a regression instead of sending its reader round the loop once per
+    field.
     """
-    return tuple(sum(getattr(t, name) for t in trades)
-                 for name in _float_fields())
-
-
-def _sums_agree(got, want):
-    return len(got) == len(want) and all(
-        math.isclose(g, w, rel_tol=_FLOAT_TOLERANCE, abs_tol=_FLOAT_TOLERANCE)
-        for g, w in zip(got, want))
+    if len(got) != len(want):
+        return [f"trade count is {len(got)}, reference holds {len(want)}"]
+    names = _float_fields()
+    out = []
+    for i, (grow, wrow) in enumerate(zip(got, want)):
+        for name, g, w in zip(names, grow, wrow):
+            if math.isclose(g, w, rel_tol=_FLOAT_TOLERANCE,
+                            abs_tol=_FLOAT_TOLERANCE):
+                continue
+            rel = abs(g - w) / max(abs(g), abs(w), 1e-300)
+            out.append(f"trade {i} {name}: {g!r} vs {w!r} (rel {rel:.2e})")
+    return out
 
 
 def _perturb(v):
@@ -559,7 +578,7 @@ def test_every_field_reaches_one_side_of_the_comparison(market):
         f.name for f in dataclasses.fields(PortfolioTrade)}, \
         "the split does not cover every field"
 
-    d0, s0 = _trade_digest([base])[1], _float_sums([base])
+    d0, f0 = _trade_digest([base])[1], _trade_floats([base])
     missed_exact, missed_float = [], []
     for name in _exact_fields():
         bumped = _with_field(base, name, _perturb(getattr(base, name)))
@@ -567,14 +586,14 @@ def test_every_field_reaches_one_side_of_the_comparison(market):
             missed_exact.append(name)
     for name in _float_fields():
         bumped = _with_field(base, name, _perturb(getattr(base, name)))
-        if _sums_agree(_float_sums([bumped]), s0):
+        if not _float_mismatches(_trade_floats([bumped]), f0):
             missed_float.append(name)
     assert not missed_exact, (
         f"these fields do not reach the digest, so a change to them is "
         f"invisible: {missed_exact}")
     assert not missed_float, (
-        f"these fields do not reach the float sums, so a change to them is "
-        f"invisible: {missed_float}")
+        f"these fields are not compared against the reference, so a change "
+        f"to them is invisible: {missed_float}")
 
 
 def test_the_identities_are_derived_and_never_generated(market):
@@ -622,24 +641,15 @@ def test_the_identities_are_derived_and_never_generated(market):
 # numbers moved because the replay model moved, and the baseline run above is
 # what attributes that rather than assuming it.
 GOLDEN = {
-    "catalog:macd_trend": (65, "564180028e581a24a12df61791cd2ce3b82561b6983ecbb14ee569cef50d9114",
-        (6171.8840089525465, 6185.168950164696, 6174.012661691738, 6174.012661691738, 6167.626703474163, 6167.626703474163, 1592.8833005522579, 0.0, 1592.8833005522579, 16.0, 47.233034420845634, 69.3600873773223)),
-    "catalog:rsi_reversion": (7, "ba3898c5b1a92fe6f559354fdf0c6c8c0096e4dc10f37e73df043f3e63c87e06",
-        (675.5279023468136, 680.6707078623326, 677.1472244409094, 677.1472244409094, 673.0989192056697, 673.0989192056697, 48.169781952894766, 0.0, 48.169781952894766, 0.4999999999999898, 5.053372601258381, 5.745976708097299)),
-    "catalog:sma_cross": (40, "e40bab366bd80114bdd7d976335b295c67284d230d82c5a32150ab1ecf237103",
-        (3821.045669455685, 3802.536668441694, 3821.1125834290924, 3821.1125834290924, 3820.9118415088697, 3820.9118415088697, 1095.5020266094823, 0.0, 1095.5020266094823, 11.0, 29.475526067067673, 43.45406384131663)),
-    "fixture:bollinger_breakout": (4, "63366c3fe7501c81cd4195327311cc57697d78dfa939eedf48e11fbe62cd3e3b",
-        (370.8828146527885, 365.67071089886633, 362.0331129797233, 365.67071089886633, 423.98102469117987, 423.98102469117987, -234.96884892871373, 0.0, -234.96884892871373, -2.3620083482677843, 2.775659011273846, 3.234406066013204)),
-    "fixture:discount_pullback": (23, "3ad81b3a64f670795d2ff9a85fc8b8f4222b564dd192b8a8abd4e5e089d681ab",
-        (2202.741895936001, 2209.715152865689, 2206.370075493578, 2206.370075493578, 2195.4855368208478, 2195.4855368208478, 996.0740503636368, 0.0, 996.0740503636368, 10.0, 15.764502209221076, 26.055928612734697)),
-    "fixture:ifvg_reversal": (65, "3dec72caaa3ea53b64b6f9be202df20b2280f853786f23272145301aa294ac43",
-        (6239.133672315269, 6196.37522431335, 6301.739804935177, 6301.739804935177, 6145.224473385407, 6145.224473385407, 4311.387945590407, 0.0, 4311.387945590407, 42.50000000000001, 30.498025267502978, 82.839428520902)),
-    "fixture:ob_bounce": (55, "11ad81be9bfc3770ca11f516d3a81cfdf031376e840aa7e02c0c97f9b7404890",
-        (5281.291721923214, 5262.669803852251, 5293.706333970523, 5293.706333970523, 5262.669803852251, 5262.669803852251, 8553.427604279432, 0.0, 8553.427604279432, 82.49999999999997, 10.071183458007575, 82.49999999999997)),
-    "fixture:orb": (135, "71da11a9170c835f4b6fd0e29a22f0bef389f8e8356a196c3abe3ae6b6743e2f",
-        (12795.891556062777, 12812.313427700647, 12794.429495601024, 12794.429495601024, 12798.815676986285, 12798.815676986285, 8113.097776892854, 0.0, 8113.097776892854, 78.67574674053701, 64.11702402209167, 174.91601009688765)),
-    "fixture:sma_cross": (40, "e40bab366bd80114bdd7d976335b295c67284d230d82c5a32150ab1ecf237103",
-        (3821.045669455685, 3802.536668441694, 3821.1125834290924, 3821.1125834290924, 3820.9118415088697, 3820.9118415088697, 1095.5020266094823, 0.0, 1095.5020266094823, 11.0, 29.475526067067673, 43.45406384131663)),
+    "catalog:macd_trend": (65, "564180028e581a24a12df61791cd2ce3b82561b6983ecbb14ee569cef50d9114"),
+    "catalog:rsi_reversion": (7, "ba3898c5b1a92fe6f559354fdf0c6c8c0096e4dc10f37e73df043f3e63c87e06"),
+    "catalog:sma_cross": (40, "e40bab366bd80114bdd7d976335b295c67284d230d82c5a32150ab1ecf237103"),
+    "fixture:bollinger_breakout": (4, "63366c3fe7501c81cd4195327311cc57697d78dfa939eedf48e11fbe62cd3e3b"),
+    "fixture:discount_pullback": (23, "3ad81b3a64f670795d2ff9a85fc8b8f4222b564dd192b8a8abd4e5e089d681ab"),
+    "fixture:ifvg_reversal": (65, "3dec72caaa3ea53b64b6f9be202df20b2280f853786f23272145301aa294ac43"),
+    "fixture:ob_bounce": (55, "11ad81be9bfc3770ca11f516d3a81cfdf031376e840aa7e02c0c97f9b7404890"),
+    "fixture:orb": (135, "71da11a9170c835f4b6fd0e29a22f0bef389f8e8356a196c3abe3ae6b6743e2f"),
+    "fixture:sma_cross": (40, "e40bab366bd80114bdd7d976335b295c67284d230d82c5a32150ab1ecf237103"),
 }
 
 
@@ -675,7 +685,7 @@ def _diagnostic(name, market, result):
         f"numpy {np.__version__} pandas {pd.__version__}",
     ]
     for key, frame in sorted(frames.items()):
-        blob = json.dumps([[_cell(v) for v in row]
+        blob = json.dumps([[repr(v) for v in row]
                            for row in frame.to_numpy().tolist()])
         lines.append(f"  input {key[1]:>3}: {len(frame)} rows, sha256 "
                      f"{hashlib.sha256(blob.encode()).hexdigest()[:16]}")
@@ -692,13 +702,36 @@ def _diagnostic(name, market, result):
 def test_every_spec_produces_the_golden_trades(name, market):
     _, result = replay(name, market)
     n, digest = _trade_digest(result.trades)
-    want_n, want_digest, want_sums = GOLDEN[name]
+    want_n, want_digest = GOLDEN[name]
     assert n >= 1, f"{name}: zero trades proves nothing"
     assert n == want_n, f"{name}: trade count moved from {want_n} to {n}"
     assert digest == want_digest, _diagnostic(name, market, result)
-    sums = _float_sums(result.trades)
-    assert _sums_agree(sums, want_sums), (
-        f"{name}: a float field moved by more than {_FLOAT_TOLERANCE:g} "
-        f"relative, which is far above the ~1e-13 two architectures differ "
-        f"by.\n  field : {list(_float_fields())}\n  got   : {list(sums)}"
-        f"\n  want  : {list(want_sums)}\n{_diagnostic(name, market, result)}")
+
+    reference = json.loads(FLOAT_REFERENCE.read_text())
+    assert name in reference, (
+        f"{name} has no committed float reference; derive it before this "
+        f"test means anything")
+    moved = _float_mismatches(_trade_floats(result.trades), reference[name])
+    assert not moved, (
+        f"{name}: {len(moved)} float field(s) moved by more than "
+        f"{_FLOAT_TOLERANCE:g} relative, which is far above the 3.4e-13 two "
+        f"architectures differ by.\n  " + "\n  ".join(moved[:12])
+        + f"\n{_diagnostic(name, market, result)}")
+
+
+def test_the_float_reference_covers_the_same_specs_as_the_table():
+    """The fixture is half the comparison, so it gets the same floor.
+
+    An empty or partial reference file would make the tolerant half compare
+    nothing while the digest half stayed green, which is the same shape of
+    hole the unparametrized GOLDEN floor exists to close.
+    """
+    reference = json.loads(FLOAT_REFERENCE.read_text())
+    assert set(reference) == set(GOLDEN), (
+        f"reference covers {sorted(set(reference) ^ set(GOLDEN))} differently "
+        f"from the golden table")
+    for name, rows in reference.items():
+        assert len(rows) == GOLDEN[name][0], (
+            f"{name}: reference holds {len(rows)} trades, table says "
+            f"{GOLDEN[name][0]}")
+        assert all(len(r) == len(_float_fields()) for r in rows), name
