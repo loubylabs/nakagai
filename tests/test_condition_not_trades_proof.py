@@ -14,18 +14,22 @@ spec producing zero trades before and after passes an equality assertion while
 proving nothing. Every one of the nine specs below is asserted to produce at
 least one trade on this frame; none needed a named exemption.
 
-The digest is over every field, and the sha256 is not truncated. Floats go in
-at twelve significant digits rather than at full precision, which is the one
-concession here and `_cell` shows the measurement behind it: the last digits of
-a computed price are not reproducible across architectures, so a full-precision
-table pins the machine that derived it and not the engine. Everything that is
-not arithmetic goes in exactly.
+The comparison has two halves, because the fields answer to two authorities.
+The fourteen fields that are not arithmetic go into a sha256 and are compared
+EXACTLY: the timestamps, direction, quantity, ordinals, exit reason, tags and
+the four identity digests Phase 1 added. Those are what a grammar regression
+moves, since a spec that evaluates differently fires on a different BAR. The
+twelve float fields are compared per trade and per field against a committed
+reference with a relative tolerance, because the last digits of a computed
+price are not reproducible across architectures and a full-precision table
+would pin the machine that derived it. `_FLOAT_TOLERANCE` carries the
+measurement that forced this, including the experiment that ruled the fixture
+out as the cause.
 
-Nothing is excluded from the digest, including the four identity fields
-`PortfolioTrade` gained in Phase 1. That is a measured fact rather than a
-convenience, and `test_the_identities_are_derived_and_never_generated` is what
-holds it: every identity is a digest over the request and the signal, so a
-moved identity always means a moved input and never a flaky run.
+The identity fields are safe on the exact side, which is measured rather than
+assumed: `test_the_identities_are_derived_and_never_generated` shows each is a
+digest over the request and the signal, so a moved identity always means a
+moved input and never a flaky run.
 """
 
 import dataclasses
@@ -252,19 +256,27 @@ def _ohlcv(idx, seed, trend_amp=3.0, vol_spike_every=40, displacement_every=14,
     between two machines makes the table a fingerprint of the machine that
     derived it rather than of the engine's behaviour.
 
-    The trend was `np.sin` and is now a triangular wave, because `np.sin` is
-    the one operation in this function that is NOT bit-portable: it goes to the
-    platform's libm. Measured on numpy 2.5.1, the same call over 8840 points
-    hashes 6f814b7b on arm64 Darwin and 88014336 on x86_64 Linux, while
-    `linspace`, `cumsum` and every `default_rng` draw hash identically on both.
-    That one difference reached every price, and CI went red on all nine specs
-    with every trade COUNT matching, which is the signature of an input that
-    moved under the arithmetic rather than a spec that changed.
+Two operations here were not, and both are gone.
 
-    A triangle is +, -, * and floor on values a binary float represents
-    exactly, so it rounds the same way everywhere. It reverses as often as the
-    sine did and turns harder, which is if anything a better fixture for the
-    turnaround-style users this frame exists to fire."""
+    `np.sin` goes to the platform's libm: measured on numpy 2.5.1, the same
+    call over 8840 points hashes 6f814b7b on arm64 Darwin and 88014336 on
+    x86_64 Linux. The trend is a triangular wave instead, which is +, -, * and
+    floor on values a binary float represents exactly, so it rounds the same
+    way everywhere. It reverses as often as the sine did and turns harder,
+    which is if anything a better fixture for the turnaround-style users this
+    frame exists to fire.
+
+    `rng.uniform(lo, hi)` is `lo + range * d`, one rounding where the compiler
+    contracts it into an FMA and two where it does not: 254 of 1893 draws
+    differed by a single ulp. Scaling a raw `random()` through separate array
+    kernels cannot contract, because each kernel rounds before the next reads
+    it, and it hashes identically on both.
+
+    `linspace`, `cumsum`, `normal`, `integers` and `choice` were measured
+    portable and are used as they are. What remains after all of that is NOT in
+    this function: 45 of the 5208 float values these frames produce still
+    differ across the two architectures, by at most 2.9e-14, and that residue
+    is the engine's own arithmetic. `_FLOAT_TOLERANCE` records the experiment."""
     rng = np.random.default_rng(seed)
     n = len(idx)
     # Two reversals a cycle, matching what `cycles * pi` of sine gave.
@@ -272,17 +284,32 @@ def _ohlcv(idx, seed, trend_amp=3.0, vol_spike_every=40, displacement_every=14,
     trend = (4.0 * np.abs(phase - np.floor(phase) - 0.5) - 1.0) * trend_amp
     steps = rng.normal(0, 0.15, n)
     disp_rows = np.arange(displacement_every // 2, n, displacement_every)
-    for row in disp_rows:
-        direction = 1.0 if (row // displacement_every) % 2 == 0 else -1.0
-        for k in range(min(3, n - row)):
-            steps[row + k] += direction * rng.uniform(0.8, 1.4)
+    spans = [min(3, n - row) for row in disp_rows]
+    # `rng.uniform(lo, hi)` is `lo + range * d`, which is one rounding where
+    # the compiler contracts it into an FMA and two where it does not: 254 of
+    # these 1893 draws differed by a single ulp between arm64 and x86_64.
+    # Scaling a raw `random()` through separate array kernels cannot contract,
+    # because each kernel rounds before the next one reads it. Measured
+    # identical on both.
+    kicks = rng.random(int(sum(spans)))
+    kicks = kicks * 0.6
+    kicks = kicks + 0.8
+    rows = np.concatenate([row + np.arange(span)
+                           for row, span in zip(disp_rows, spans)])
+    signs = np.concatenate(
+        [np.full(span, 1.0 if (row // displacement_every) % 2 == 0 else -1.0)
+         for row, span in zip(disp_rows, spans)])
+    steps[rows] += signs * kicks
     close = 100 + trend + np.cumsum(steps)
     open_ = np.concatenate([[close[0] - 0.05], close[:-1]])
     high = np.maximum(open_, close) + np.abs(rng.normal(0, 0.2, n))
     low = np.minimum(open_, close) - np.abs(rng.normal(0, 0.2, n))
     base_vol = 800 + rng.integers(0, 400, n).astype(float)
     spike_rows = rng.choice(n, size=max(1, n // vol_spike_every), replace=False)
-    base_vol[spike_rows] *= rng.uniform(4, 8, size=len(spike_rows))
+    spikes = rng.random(len(spike_rows))
+    spikes = spikes * 4.0
+    spikes = spikes + 4.0
+    base_vol[spike_rows] *= spikes
     index = pd.DatetimeIndex(list(idx), tz="UTC", name="ts")
     return pd.DataFrame({"open": open_, "high": high, "low": low,
                          "close": close, "volume": base_vol}, index=index,
@@ -414,12 +441,19 @@ def replay(name: str, market):
 #   ~12,795 is an absolute window of 1.3e-5, which one trade could absorb
 #   entirely.
 #
-# 1e-11 is chosen against the measurement, not against taste. The worst
-# cross-architecture deviation over all 5208 values is 3.4e-13, in `mae`, and
-# prices themselves stay under 8e-16. That leaves about thirty times headroom
-# over the noise, and seven orders of margin below any real change: a trade
-# that moved moved to another bar, so its price differs in the second or third
-# digit.
+# The tolerance is forced rather than chosen, and that was established by
+# trying to remove the need for it. `_ohlcv` was made bit-portable in two
+# steps, and the residue was measured after each:
+#
+#   fixture as first written      753 of 5208 values differ, worst 3.4e-13
+#   after the np.sin fix          (still every spec, via rng.uniform)
+#   after the FMA-free draws       45 of 5208 values differ, worst 2.9e-14
+#
+# Forty-five differences survive a fixture with no non-portable operation left
+# in it, so the source is the engine's own arithmetic and no amount of fixture
+# care removes it. 1e-11 leaves about three hundred times headroom over that
+# residue and seven orders of margin below any real change: a trade that moved
+# moved to another bar, so its price differs in the second or third digit.
 _FLOAT_TOLERANCE = 1e-11
 
 FLOAT_REFERENCE = (Path(__file__).resolve().parent / "fixtures"
@@ -429,9 +463,9 @@ FLOAT_REFERENCE = (Path(__file__).resolve().parent / "fixtures"
 def _cell(v):
     """Exact and total over the field types the digest covers.
 
-    Floats never reach this. They are compared against FLOAT_REFERENCE with a
-    tolerance, so a float arriving here is a partition bug rather than a value
-    to render, and it says so.
+    Floats never reach this: `_float_fields()` routes them to the tolerant
+    comparison and `_exact_fields()` is what this renders. A float arriving
+    here is a partition bug rather than a value to render, and it says so.
     """
     if isinstance(v, bool):
         return v
@@ -574,9 +608,20 @@ def test_every_field_reaches_one_side_of_the_comparison(market):
     _, result = replay(PROBE, market)
     assert result.trades, "need at least one real trade to perturb"
     base = result.trades[0]
-    assert set(_exact_fields()) | set(_float_fields()) == {
-        f.name for f in dataclasses.fields(PortfolioTrade)}, \
-        "the split does not cover every field"
+    # Derived from the TRADE rather than from _float_fields(), which is the
+    # whole point: _exact_fields() is defined as _float_fields()'s complement,
+    # so asserting their union covers every field is true for any split at all,
+    # including an empty one and one that swallows every field. An earlier
+    # draft asserted exactly that and could not fail. This compares the
+    # declared split against the types a real trade actually carries.
+    observed = {name for name in (f.name for f in
+                                  dataclasses.fields(PortfolioTrade))
+                if isinstance(getattr(base, name), float)
+                and not isinstance(getattr(base, name), bool)}
+    assert set(_float_fields()) == observed, (
+        f"the declared float split disagrees with what a real trade carries: "
+        f"declared-not-float {sorted(set(_float_fields()) - observed)}, "
+        f"float-not-declared {sorted(observed - set(_float_fields()))}")
 
     d0, f0 = _trade_digest([base])[1], _trade_floats([base])
     missed_exact, missed_float = [], []
@@ -631,8 +676,10 @@ def test_the_identities_are_derived_and_never_generated(market):
 # than a stamp of "this node produced these numbers".
 #
 # It is also re-derived on a SECOND ARCHITECTURE. Every operation building the
-# frame is bit-identical everywhere, so these digests hold on x86_64 Linux and
-# on arm64 Darwin alike; `_ohlcv` says why that took work.
+# frame is bit-identical everywhere, which `_ohlcv` says took two fixes to get
+# to; the exact half of the comparison therefore holds identically on x86_64
+# Linux and arm64 Darwin, and the tolerant half absorbs what the ENGINE's
+# arithmetic still differs by.
 #
 # The counts are not carried over from the table this file held before engine
 # Phase 1. That engine replayed each spec on its own timeframe with no account
