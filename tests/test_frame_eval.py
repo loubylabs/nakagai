@@ -373,3 +373,263 @@ def test_session_aligned_destination_timeframe_is_refused():
     fe = FrameEval(_frames(), TFS)
     with pytest.raises(ValueError, match="session-aligned"):
         fe.series({"src": "close", "tf": "15m"}, "1d")
+
+
+KLEENE_ROWS = [
+    ("all", [True, pd.NA], pd.NA),
+    ("all", [False, pd.NA], False),
+    ("all", [True, False], False),
+    ("all", [pd.NA, pd.NA], pd.NA),
+    ("any", [False, pd.NA], pd.NA),
+    ("any", [True, pd.NA], True),
+    ("any", [True, False], True),
+    ("any", [pd.NA, pd.NA], pd.NA),
+]
+
+
+def _kleene_frames():
+    """15m with one row, plus an EMPTY 1h frame. A reference to 1h is then
+    unknown on every row, which is how pd.NA is manufactured for the table
+    without a second code path."""
+    return {**_closes([1.0]),
+            "1h": pd.DataFrame({"open": [], "high": [], "low": [], "close": [],
+                                "volume": []},
+                               index=pd.DatetimeIndex([], tz="UTC"))}
+
+
+def _kleene_group(key, operands):
+    leaf = {True: {"lhs": {"src": "close"}, "op": ">", "rhs": -1.0},
+            False: {"lhs": {"src": "close"}, "op": "<", "rhs": -1.0}}
+    unknown = {"lhs": {"src": "close"}, "op": ">",
+               "rhs": {"src": "close", "tf": "1h"}}
+    return {key: [leaf[v] if v is True or v is False else unknown
+                  for v in operands]}
+
+
+@pytest.mark.parametrize("key,operands,want", KLEENE_ROWS,
+                         ids=[f"{k}-{o}" for k, o, _ in KLEENE_ROWS])
+def test_the_private_reducer_matches_the_eight_row_kleene_table(key, operands, want):
+    """D8's table, asserted against the private reducer, which is where Kleene
+    lives (N3-D4). Asserting it against group_series would be a different and
+    wrong test: that method resolves unknown to False."""
+    fe = FrameEval(_kleene_frames(), TFS)
+    got = fe._group_reduce_na(_kleene_group(key, operands), "15m").iloc[0]
+    if want is pd.NA:
+        assert pd.isna(got), f"{key} {operands}: want NA, got {got!r}"
+    else:
+        assert not pd.isna(got) and bool(got) == want, \
+            f"{key} {operands}: want {want}, got {got!r}"
+
+
+def test_the_private_reducer_carries_the_nullable_dtype_not_plain_bool():
+    """The representation itself (N3-D1). A reducer that resolved unknown
+    early would still satisfy the two `all` rows above by accident on a
+    single-row frame; this pins the dtype the table is read from."""
+    fe = FrameEval(_kleene_frames(), TFS)
+    out = fe._group_reduce_na(_kleene_group("all", [True, pd.NA]), "15m")
+    assert out.dtype == pd.BooleanDtype()
+
+
+def test_group_series_resolves_an_unknown_reducer_result_to_false_and_bool():
+    """Acceptance item 4's public half, and item 8. The SAME group whose
+    reducer result is NA reads False, dtype bool, at the boundary."""
+    fe = FrameEval(_kleene_frames(), TFS)
+    group = _kleene_group("all", [True, pd.NA])
+    assert pd.isna(fe._group_reduce_na(group, "15m").iloc[0])
+    out = fe.group_series(group, "15m")
+    assert not bool(out.iloc[0])
+    assert out.dtype == bool
+
+
+def test_driving_group_stays_bool_over_an_unknown_group():
+    """Acceptance item 8 for the other public reader. pd.NA reaching this
+    return value raises TypeError in every one of its three call sites."""
+    frames = _frames()
+    frames["1h"] = frames["1h"].iloc[8:]
+    fe = FrameEval(frames, TFS)
+    group = {"all": [{"lhs": {"src": "close", "tf": "1h"}, "op": ">",
+                      "rhs": -1.0}]}
+    out = fe.driving_group(group, "15m")
+    assert all(isinstance(bool(v), bool) for v in out)
+    assert out.dtype == bool
+
+
+def test_condition_series_resolves_an_unknown_operand_to_false_and_stays_bool():
+    """The public leaf boundary (N3-D4): unchanged from before this node.
+
+    The unknown rows are the point, so the fixture builds them: a 1h operand
+    on a 15m condition is NaN until the first hourly bar has closed, which is
+    NA one level down and False here.
+    """
+    frames = _frames()
+    frames["1h"] = frames["1h"].iloc[8:]
+    fe = FrameEval(frames, TFS)
+    cond = {"lhs": {"src": "close", "tf": "1h"}, "op": ">", "rhs": -1.0}
+    blind = [i for i, v in enumerate(fe.series(cond["lhs"], "15m").isna()) if v]
+    assert len(blind) > 8, "fixture must open with a real blind window"
+
+    got = fe.condition_series(cond, "15m")
+    # bool() on the element is what strategy.py:81 and screen/runner.py:79 do,
+    # and it is what raises rather than lies if pd.NA ever reaches here.
+    assert bool(got.iloc[blind[0]]) is False, "an unknown operand must read not-fired"
+    assert not got.iloc[blind].any()
+    seeing = sorted(set(range(len(got))) - set(blind))
+    assert got.iloc[seeing].all(), "the visible rows must still read satisfied"
+    assert got.dtype == bool
+
+
+def test_not_over_a_warming_indicator_does_not_fire_on_the_first_bars():
+    """D8's headline case (acceptance item 6), with the bar index named."""
+    idx = pd.date_range("2026-01-05 09:30", periods=60, freq="15min", tz="UTC")
+    # Oscillating, so that once sma(20) is warm the condition is genuinely
+    # false on some rows and the negation genuinely fires there. A monotone
+    # ramp would leave the negation false everywhere after warmup too, and
+    # this test would then pass on a series that is False for the wrong
+    # reason from row 0 to the end.
+    close = pd.Series(100 + np.sin(np.linspace(0, 6 * np.pi, 60)) * 2,
+                      index=idx)
+    bars = pd.DataFrame({"open": close, "high": close + 0.2, "low": close - 0.2,
+                         "close": close, "volume": 1000.0}, index=idx)
+    fe = FrameEval({"15m": bars}, TFS)
+    sma = {"ind": "sma", "n": 20}
+    assert fe.series(sma, "15m").iloc[:19].isna().all(), \
+        "fixture must open with rows where the indicator is still warming"
+    group = {"not": {"all": [{"lhs": {"src": "close"}, "op": ">", "rhs": sma}]}}
+    out = fe.group_series(group, "15m")
+    assert not out.iloc[:19].any(), \
+        "not over unknown must not read as fired on bars 0..18"
+    assert out.iloc[19:].any(), "fixture must fire once the indicator is warm"
+
+
+def test_a_not_nested_as_an_item_of_a_list_is_recognized_as_a_group():
+    """"X and not Y", the ordinary spelling, evaluated rather than described.
+
+    Every other `not` in this module sits at the TOP of its tree, where
+    `_group_reduce_na` reaches it through the `key == "not"` branch. That
+    branch is not the one that makes `not` composable. The recognizer inside
+    the list comprehension is, and until this test nothing in the suite
+    evaluated a `not` that was an ITEM of an all/any list: the nested cases
+    elsewhere go to margins, to describe, to canon and to the Pine refusal,
+    none of which is the evaluator.
+
+    So the one line making `not` usable in a real spec was guarded by nothing.
+    Narrowing `is_group_node(i)` back to the pre-node `("all" in i or "any" in
+    i)` left all 1976 tests passing while `group_series` raised
+    `KeyError: 'lhs'` on this spec, the item having fallen through to the
+    condition leaf. That exception is not loud where it lands: the platform
+    scanner catches Exception around `detect_events` and publishes zero market
+    events with a log warning.
+
+    Asserted against the hand-computed complement rather than against a
+    constant, so the test says what "and not" means rather than that it
+    returned something.
+
+    Compared on the WARM rows only, and that restriction is the point rather
+    than a convenience. `group_series` resolves unknown to False at its public
+    boundary, so composing two of its results negates a False and reads True,
+    while the evaluator composes underneath that boundary where ~NA is NA. The
+    two disagree on exactly the warm-up rows, the evaluator is the one that is
+    right, and which of them is right is N3-D4's question rather than this
+    test's; `test_not_over_a_warming_operand_does_not_fire` owns it. Comparing
+    everywhere would make this test fail for that reason instead of for its
+    own.
+    """
+    fe = FrameEval(_frames(), TFS)
+    x = {"lhs": {"src": "close"}, "op": ">", "rhs": {"ind": "sma", "n": 5}}
+    y = {"lhs": {"src": "close"}, "op": ">", "rhs": {"ind": "sma", "n": 20}}
+    nested = {"all": [x, {"not": {"all": [y]}}]}
+
+    warm = (fe.series({"ind": "sma", "n": 20}, "15m").notna()
+            & fe.series({"ind": "sma", "n": 5}, "15m").notna())
+    assert warm.any() and not warm.all(), "fixture must carry both phases"
+
+    out = fe.group_series(nested, "15m")
+    want = (fe.group_series({"all": [x]}, "15m")
+            & ~fe.group_series({"all": [y]}, "15m"))
+    # Both sides of the conjunction have to do work, or the equality holds
+    # vacuously over a series that is False everywhere.
+    assert out[warm].any() and not out[warm].all(), \
+        out[warm].value_counts().to_dict()
+    pd.testing.assert_series_equal(out[warm], want[warm], check_names=False)
+
+
+def test_not_over_a_not_yet_closed_higher_timeframe_operand_does_not_fire():
+    """Acceptance item 7, through N3-D3's OPERAND path.
+
+    The group is evaluated on 15m and its operand carries tf="1h", so _align
+    leaves float NaN on every 15m row where no 1h bar has closed yet. That NaN
+    becomes pd.NA inside the group tree, BELOW the negation, which is the only
+    place cross-timeframe unknown can reach a `not`. Evaluating the group on
+    "1h" instead would short-circuit _align on src_tf == dst_tf, put no NaN in
+    the tree at all, and read False on the blind rows only because the
+    boolean lift zeroes invisible rows, which sits ABOVE the negation and is
+    explicitly not what this is aimed at.
+    """
+    frames = _frames()
+    frames["1h"] = frames["1h"].iloc[8:]
+    fe = FrameEval(frames, TFS)
+    operand = {"src": "close", "tf": "1h"}
+    blind = [i for i, v in enumerate(fe.series(operand, "15m").isna()) if v]
+    assert len(blind) > 8, "fixture must open with a real blind window"
+    group = {"not": {"any": [{"lhs": operand, "op": "<", "rhs": -1.0}]}}
+    out = fe.group_series(group, "15m")
+    assert not out.iloc[blind].any(), \
+        "a negation over an unknown higher-timeframe operand must not fire"
+    seeing = sorted(set(range(len(out))) - set(blind))
+    assert out.iloc[seeing].all(), "the visible rows must still read satisfied"
+    assert out.dtype == bool
+
+
+def test_not_evaluates_to_kleene_negation():
+    frames = _closes([1.0, 2.0, 4.0, 5.0, 2.0, 6.0])
+    fe = FrameEval(frames, TFS)
+    group = {"not": {"any": [
+        {"lhs": {"src": "close"}, "op": ">", "rhs": 1000.0},
+        {"lhs": {"src": "close"}, "op": "<", "rhs": -1000.0}]}}
+    out = fe.group_series(group, "15m")
+    assert out.dtype == bool
+    assert out.all()  # neither disjunct ever true, so not(false or false)
+
+
+# The leaf is a still-warming indicator so the unknown rows exist by
+# construction: sma over 20 bars is NA for the first 19. The arg is `n`; a
+# spelling _eval does not know (`len`) is merged into the arg dict without
+# refusal and the term then runs on its DEFAULT length, so the fixture would
+# have no NA rows at all and the assertion below would be the only thing
+# saying so.
+_WARMING = {"lhs": {"ind": "sma", "n": 20}, "op": ">", "rhs": {"src": "close"}}
+
+
+def test_double_negation_evaluates_to_the_original_group():
+    """N3-D7's middle verb. Validating and canonicalizing a double negation
+    were already covered; evaluating one was not, so a reducer that accepted
+    only all/any beneath a negation would pass both and raise the moment a
+    saved spec with {"not": {"not": G}} was actually run.
+
+    All three Kleene values, because the interesting one is NA: under D8 an
+    unknown must survive both negations as unknown. An implementation that
+    collapsed NA to False anywhere in the pair round-trips True and False
+    correctly and fails only here.
+    """
+    fe = FrameEval(_frames(), TFS)
+    inner = {"all": [_WARMING]}
+    base = fe._group_reduce_na(inner, "15m")
+    once = fe._group_reduce_na({"not": inner}, "15m")
+    twice = fe._group_reduce_na({"not": {"not": inner}}, "15m")
+
+    assert base.isna().any(), (
+        "no unknown rows in the fixture, so the NA leg below proves nothing")
+    known = base.dropna()
+    assert known.any() and not known.all(), \
+        "fixture must carry all three Kleene values, not only NA and one other"
+    assert twice.equals(base), "double negation did not round-trip"
+    assert not twice.equals(once), "double negation collapsed to a single one"
+    assert twice[base.isna()].isna().all(), "unknown did not survive both negations"
+
+
+def test_double_negation_is_bool_at_the_public_boundary():
+    """N3-D4 still holds through a nested negation: the private reducer is
+    nullable, group_series is not."""
+    fe = FrameEval(_frames(), TFS)
+    out = fe.group_series({"not": {"not": {"all": [_WARMING]}}}, "15m")
+    assert out.dtype == bool

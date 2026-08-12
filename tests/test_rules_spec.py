@@ -1,10 +1,15 @@
+import inspect
+from pathlib import Path
+
 import pytest
 
 from nakagai.data.schema import DEFAULT_TIMEFRAMES
 from nakagai.strategies.rules import (
     canonical_spec, describe_spec, spec_hash, validate_spec,
 )
-from nakagai.strategies.rules.spec import TIMEFRAMES, validate_condition_group
+from nakagai.strategies.rules import spec as rules_spec
+from nakagai.strategies.rules.spec import (
+    MAX_DEPTH, TIMEFRAMES, _expr_text, group_text, validate_condition_group)
 
 ORB = {
     "version": 2, "name": "orb-volume", "timeframe": "15m",
@@ -143,6 +148,37 @@ def test_validator_never_raises_on_malformed_shapes(mutate, needle):
     mutate(spec)
     errs = validate_spec(spec)
     assert errs and any(needle in e for e in errs)
+
+
+def _bars_since_spec(inner):
+    return {"version": 2, "name": "b", "timeframe": "1h",
+            "long": {"all": [{"lhs": {"prim": "bars_since", **inner},
+                              "op": "<", "rhs": 5}]},
+            "risk": ORB["risk"]}
+
+
+def test_bars_since_missing_cond_entirely_is_refused():
+    """The core term's ABSENT branch (`_check_args`), not guard 1."""
+    errs = validate_spec(_bars_since_spec({}))
+    assert any("bars_since needs cond" in e for e in errs), errs
+
+
+@pytest.mark.parametrize("cond,shown", [
+    (5, "5"),
+    ("close > open", "'close > open'"),
+    ([{"lhs": {"src": "close"}, "op": ">", "rhs": 1}], "[{'lhs'"),
+    ({"lhs": {"src": "close"}, "op": ">"}, "{'lhs': {'src': 'close'}, 'op': '>'}"),
+], ids=["int", "string", "list", "dict-missing-rhs"])
+def test_bars_since_with_a_present_but_malformed_cond_is_refused(cond, shown):
+    """Guard 1 on the SHIPPED term, reached through the real vocabulary rather
+    than the count_where fixture. Each of these supplies `cond`, so the absent
+    loop skips them and `_check_condition_arg` is the only thing that can
+    refuse them. The string case is the one a hand-written spec produces, and
+    the list case is what an NL compiler emits when it treats the arg as a
+    group."""
+    errs = validate_spec(_bars_since_spec({"cond": cond}))
+    assert any("bars_since.cond must be a condition {lhs, op, rhs}, got " in e
+               and shown in e for e in errs), errs
 
 
 def test_bars_since_condition_rejects_cross_ops():
@@ -412,3 +448,198 @@ def test_trailing_mult_changes_hash():
     b = copy.deepcopy(ORB)
     b["exits"]["trailing"]["mult"] = 3.0
     assert spec_hash(ORB) != spec_hash(b)
+
+
+def test_check_expr_has_no_bespoke_bars_since_branch():
+    """Acceptance item 1, half one."""
+    src = inspect.getsource(rules_spec._check_expr)
+    assert '"bars_since"' not in src
+
+
+def test_spec_module_has_zero_bars_since_special_cases():
+    """The literal acceptance-item-1 search: spec.py has no == "bars_since"
+    left anywhere, validator or describe."""
+    src = Path(rules_spec.__file__).read_text()
+    assert '== "bars_since"' not in src
+
+
+# A second condition-taking term, count_where, registered only by the
+# count_where_vocab fixture and named nowhere in nakagai/. Its condition arg is
+# called "when", so a validator keyed on the primitive's name or on the literal
+# arg key "cond" reaches none of it. Together these are the acceptance claim
+# N3-D5 makes: all four guards, and the readable rendering, come to a term the
+# validator has never heard of, with no new validator code. The evaluation half
+# lives in test_rules_vocabulary.py, beside the injection it proves.
+
+
+def _count_where_spec(node):
+    return {"version": 2, "name": "x", "timeframe": "15m",
+            "long": {"all": [{"lhs": node, "op": ">", "rhs": 3}]},
+            "risk": ORB["risk"]}
+
+
+def test_a_second_condition_taking_term_validates_with_no_new_validator_code(
+        count_where_vocab):
+    """The positive control the four refusals below need: a well-formed use of
+    this term is ACCEPTED, so each guard is refusing its own case rather than
+    the validator refusing count_where on sight."""
+    node = {"prim": "count_where",
+            "when": {"lhs": {"src": "close"}, "op": ">", "rhs": {"src": "open"}}}
+    assert validate_spec(_count_where_spec(node), count_where_vocab) == []
+
+
+def test_a_second_condition_taking_term_refuses_an_absent_condition_arg(
+        count_where_vocab):
+    """The ABSENT branch, which is _check_args' condition loop, NOT guard 1.
+
+    A condition-typed arg may declare no default (N3-D13), so its absence is
+    an error rather than a fallback. This test is named for the branch it
+    reaches rather than for the guard it was once named for: the two branches
+    used to emit the identical message, this was the only test either had, and
+    deleting guard 1's `errs.append` outright left all 1169 tests green. The
+    two shape cases below are what actually reach guard 1, and they are told
+    apart from this one by the message as well as by the input.
+    """
+    errs = validate_spec(_count_where_spec({"prim": "count_where"}),
+                         count_where_vocab)
+    assert any("count_where needs when" in e for e in errs), errs
+
+
+def test_a_second_condition_taking_term_inherits_guard_1_shape_non_dict(
+        count_where_vocab):
+    """Guard 1 proper. The arg is PRESENT, so `_check_args`' absent loop skips
+    it and only `_check_condition_arg`'s shape refusal can produce this."""
+    node = {"prim": "count_where", "when": 5}
+    errs = validate_spec(_count_where_spec(node), count_where_vocab)
+    assert any("count_where.when must be a condition {lhs, op, rhs}, got 5" in e
+               for e in errs), errs
+
+
+def test_a_second_condition_taking_term_inherits_guard_1_shape_missing_a_key(
+        count_where_vocab):
+    """Guard 1's other half: a dict, but not a condition. Left unrefused this
+    validates clean, is saved, and raises inside FrameEval.condition_series at
+    backtest and scan time, where detect_events swallows it and the symbol
+    reports zero events."""
+    node = {"prim": "count_where", "when": {"lhs": {"src": "close"}, "op": ">"}}
+    errs = validate_spec(_count_where_spec(node), count_where_vocab)
+    assert any("count_where.when must be a condition {lhs, op, rhs}, got "
+               "{'lhs': {'src': 'close'}, 'op': '>'}" in e for e in errs), errs
+
+
+def test_a_second_condition_taking_term_inherits_guard_2_no_cross_ops(
+        count_where_vocab):
+    node = {"prim": "count_where",
+            "when": {"lhs": {"src": "close"}, "op": "crosses_above",
+                     "rhs": {"src": "open"}}}
+    errs = validate_spec(_count_where_spec(node), count_where_vocab)
+    assert any("count_where.when conditions use comparison ops only" in e
+               for e in errs), errs
+
+
+def test_a_second_condition_taking_term_inherits_guard_3_no_end_anchored(
+        count_where_vocab):
+    node = {"prim": "count_where",
+            "when": {"lhs": {"src": "close"}, "op": ">", "rhs": FVG}}
+    errs = validate_spec(_count_where_spec(node), count_where_vocab)
+    assert any("fvg_nearest is anchored to the end of the frame and cannot "
+               "sit inside count_where.when" in e for e in errs), errs
+
+
+def test_a_second_condition_taking_term_inherits_guard_4_no_session_scoped_with_tf(
+        count_where_vocab):
+    node = {"prim": "count_where", "tf": "1h",
+            "when": {"lhs": {"prim": "day_of_week"}, "op": "<", "rhs": 1}}
+    errs = validate_spec(_count_where_spec(node), count_where_vocab)
+    assert any("day_of_week is session-scoped and cannot sit inside "
+               "count_where.when with tf" in e for e in errs), errs
+
+
+def test_describe_renders_a_second_condition_taking_terms_condition_readably(
+        count_where_vocab):
+    """Describe is what a user approves before saving or backtesting an
+    imported or NL-built strategy. The generic args path stringifies a value
+    with f"{v}", which on a condition dict prints its repr; the condition args
+    have to reach _condition_text by type instead."""
+    node = {"prim": "count_where",
+            "when": {"lhs": {"src": "close"}, "op": ">", "rhs": {"src": "open"}}}
+    assert (_expr_text(node, count_where_vocab)
+            == "count_where(5, close is above open)")
+
+
+# --- `not` (N3-D6, N3-D7, N3-D11) -------------------------------------------
+
+LEAF_A = {"lhs": {"src": "close"}, "op": ">", "rhs": 1000}
+LEAF_B = {"lhs": {"src": "volume"}, "op": ">", "rhs": 1_000_000}
+NOT_RISK = ORB["risk"]
+
+
+def test_not_validates_over_a_group():
+    spec = {"version": 2, "name": "x", "timeframe": "15m",
+            "long": {"not": {"any": [LEAF_A, LEAF_B]}}, "risk": NOT_RISK}
+    assert validate_spec(spec) == []
+
+
+def test_not_over_a_bare_leaf_is_refused_naming_the_accepted_form():
+    """N3-D6: one accepted shape."""
+    spec = {"version": 2, "name": "x", "timeframe": "15m",
+            "long": {"not": LEAF_A}, "risk": NOT_RISK}
+    errs = validate_spec(spec)
+    assert any("expected a group" in e and '"all"' in e for e in errs), errs
+
+
+def test_not_may_contain_not_directly():
+    """N3-D7."""
+    spec = {"version": 2, "name": "x", "timeframe": "15m",
+            "long": {"not": {"not": {"all": [LEAF_A]}}}, "risk": NOT_RISK}
+    assert validate_spec(spec) == []
+
+
+def test_not_counts_against_max_depth():
+    group = {"all": [LEAF_A]}
+    for _ in range(MAX_DEPTH + 2):
+        group = {"not": group}
+    spec = {"version": 2, "name": "x", "timeframe": "1h", "long": group,
+            "risk": NOT_RISK}
+    errs = validate_spec(spec)
+    assert any("group depth exceeds" in e for e in errs), errs
+
+
+def test_not_readback_matches_the_frozen_shape_flat():
+    """N3-D11, example 1, verbatim."""
+    text = group_text({"not": {"any": [LEAF_A, LEAF_B]}})
+    assert text == ("NOT ANY of:\n"
+                    "  - close is above 1000\n"
+                    "  - volume is above 1e+06")
+
+
+def test_not_readback_matches_the_frozen_shape_nested():
+    """N3-D11, example 2, verbatim. The one that distinguishes a renderer that
+    scopes correctly from one that prefixes NOT onto the whole tree."""
+    leaf_c = {"lhs": {"src": "close"}, "op": "<", "rhs": 3}
+    text = group_text({"all": [{"not": {"any": [LEAF_A, LEAF_B]}}, leaf_c]})
+    assert text == ("ALL of:\n"
+                    "  NOT ANY of:\n"
+                    "    - close is above 1000\n"
+                    "    - volume is above 1e+06\n"
+                    "  - close is below 3")
+
+
+def test_a_nested_group_two_levels_deep_indents_by_exactly_two_per_level():
+    """The pre-existing bug the frozen goldens exposed, pinned on a plain
+    all/any tree with no `not` in it: the string-.replace() scheme
+    double-counted and put the grandchild leaf six spaces deep."""
+    text = group_text({"all": [{"any": [LEAF_A]}, LEAF_B]})
+    assert text == ("ALL of:\n"
+                    "  ANY of:\n"
+                    "    - close is above 1000\n"
+                    "  - volume is above 1e+06")
+
+
+def test_double_negation_canonicalizes_structurally_not_simplified():
+    """N3-D7's second half: {"not": {"not": G}} hashes differently from G."""
+    spec_dbl = {"version": 2, "name": "x", "timeframe": "1h",
+                "long": {"not": {"not": {"all": [LEAF_A]}}}, "risk": NOT_RISK}
+    spec_plain = {"version": 2, "name": "x", "timeframe": "1h",
+                  "long": {"all": [LEAF_A]}, "risk": NOT_RISK}
+    assert spec_hash(spec_dbl) != spec_hash(spec_plain)

@@ -5,9 +5,48 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from nakagai.strategies.rules.pine.lowerings import BARS_SINCE, emit_bars_since
+from nakagai.strategies.rules.pine.model import PineLowering
+from nakagai.strategies.rules.vocabulary import (
+    CONDITION_ARG, Term, core_vocabulary)
+
 CATALOG_SPECS = (Path(__file__).resolve().parents[1]
                  / "nakagai" / "strategies" / "catalog" / "specs")
 RULE_SPECS = Path(__file__).resolve().parent / "fixtures" / "rules"
+
+
+@pytest.fixture
+def count_where_vocab():
+    """The core vocabulary plus a second condition-taking term, registered
+    nowhere else, whose condition arg is named "when" rather than "cond".
+
+    The sites node 03 generalizes were each gated on a name: the evaluator
+    injection on the PRIMITIVE's name, canon and describe on the literal ARG
+    key "cond", the four guards on both, and the Pine lowering on that same
+    key twice over. A term called something else, whose condition arg is
+    called something else again, is what tells a reader keyed on the arg's
+    declared type from one keyed on either name. It lives here rather than in
+    one test module because the vocabulary tests (the injection and canon
+    halves), the spec tests (validation, the four guards, describe) and the
+    Pine tests all make their claim about the same term.
+
+    It carries a Pine lowering for that last reader. emit_bars_since is
+    borrowed rather than written fresh because the only thing under test on
+    that side is whether the WALK hands the emit function a lowered condition
+    in call.source; what the emit then writes belongs to bars_since's own
+    tests.
+    """
+
+    def count_where(ctx, bars, when, n=5, eval_fn=None):
+        if eval_fn is None:
+            raise ValueError("count_where needs the evaluator's eval_fn")
+        return (eval_fn(when, bars).astype(float)
+                .rolling(int(n), min_periods=1).sum())
+
+    return core_vocabulary().with_terms(
+        Term("count_where", "primitive", {"when": CONDITION_ARG, "n": (1, 50)},
+             {"n": 5}, count_where,
+             pine=PineLowering(emit_bars_since, helpers=(BARS_SINCE,))))
 
 
 @pytest.fixture

@@ -69,8 +69,10 @@ from nakagai.strategies.rules.spec import (
     TARGET_RR_BOUNDS, TARGET_RR_DEFAULT, TIME_STOP_BOUNDS, TIMEFRAMES,
     TRAILING_ATR_MULT_BOUNDS, TRAILING_ATR_MULT_DEFAULT, TRAILING_ATR_N_BOUNDS,
     TRAILING_ATR_N_DEFAULT, TRAILING_PCT_BOUNDS, TRAILING_PCT_DEFAULT,
+    is_group_node,
 )
-from nakagai.strategies.rules.vocabulary import Vocabulary, is_choice_rule
+from nakagai.strategies.rules.vocabulary import (
+    Vocabulary, is_choice_rule, is_condition_rule)
 
 # The engine's timeframes in Pine's spelling. Every timeframe the grammar
 # admits needs an entry; one without would otherwise reach request.security as
@@ -92,6 +94,16 @@ GATE_HELPERS = (NEW_SESSION, SESSION_OPEN_BAR)
 # Group keys carry no meaning for a reader of the settings dialog, so a label
 # drops them; the index comes back only when two labels would otherwise read
 # alike (see _resolve_labels).
+#
+# Deliberately NOT spec.GROUP_KEYS, which is one key longer. This answers a
+# different question: not "what does the grammar admit as a group" but "which
+# path parts does a settings-dialog label drop", and the two only happen to
+# coincide. `not` is missing because it cannot reach here at all: _refuse_not
+# fires in both group walks BEFORE either builds a child path, so no compiled
+# program carries a "not" part for a label to drop. Widening this to the
+# grammar's set would couple a presentation rule to the grammar, so the next
+# group key added would silently restyle every label, and it would eat a
+# term's arg named "not" from a label that should have shown it.
 STRUCTURAL = ("all", "any")
 COMPARISONS = {"crosses_above": "ta.crossover", "crosses_below": "ta.crossunder"}
 
@@ -101,8 +113,24 @@ def _tuple(names: list[str]) -> str:
     return names[0] if len(names) == 1 else f"[{', '.join(names)}]"
 
 
-def _is_group(node) -> bool:
-    return isinstance(node, dict) and ("all" in node or "any" in node)
+def _refuse_not(key: str, path: RulePath) -> None:
+    """N3-D8: Pine refuses `not` loudly; it does not learn to compile it.
+
+    Pine is undeployed, so compiling negation buys nothing today, and a
+    mis-compiled chart that disagrees with the engine is worse than one that
+    does not render. The refusal has to be explicit because the recognizer
+    below now admits `not`: without this, a negation would route into the
+    all/any joiner logic, which reads `key == "all"` and otherwise assumes
+    "or", so it would silently render as ANY. Falling through to the leaf
+    lowerer instead, which is what a narrow recognizer did, reads `lhs` off a
+    key string. Silence is the one option not available.
+    """
+    if key == "not":
+        raise PineCompileError(
+            "pine_unsupported",
+            f"{path.text}: `not` has no Pine lowering; rewrite the spec "
+            "without a negation to generate a chart",
+            path=path.text)
 
 
 def _sanitize(part: str) -> str:
@@ -787,11 +815,12 @@ class SpecLowerer:
             return self._frame_value(
                 path, "nk_" + "_".join(_sanitize(p) for p in path.parts), "bool",
                 lambda frame: (self._group(node, path, frame, frame)
-                               if _is_group(node)
+                               if is_group_node(node)
                                else self._condition(node, path, frame, frame)))
-        if not _is_group(node):
+        if not is_group_node(node):
             return self._condition(node, path, self.frame, self.chart)
         key, items = next(iter(node.items()))
+        _refuse_not(key, path)
         joiner = " and " if key == "all" else " or "
         return "(" + joiner.join(
             self._tree(item, path.child(key, i))
@@ -908,12 +937,13 @@ class SpecLowerer:
     # operands that still belong to the play's own frame.
     def _group(self, group: dict, path: RulePath, frame: str, host: str) -> str:
         key, items = next(iter(group.items()))
+        _refuse_not(key, path)
         joiner = " and " if key == "all" else " or "
         parts = []
         for i, item in enumerate(items):
             child = path.child(key, i)
             parts.append(self._group(item, child, frame, host)
-                         if "all" in item or "any" in item
+                         if is_group_node(item)
                          else self._condition(item, child, frame, host))
         return "(" + joiner.join(parts) + ")"
 
@@ -1047,22 +1077,38 @@ class SpecLowerer:
 
     def _term(self, node: dict, term, path: RulePath,
               frame: str) -> dict[str, str]:
+        # Keyed on the arg's declared TYPE, the way canon.py and spec.py key
+        # theirs, rather than on the literal name "cond": a condition-taking
+        # term whose arg is called anything else reached its emit with an
+        # empty source and the raw condition dict still in args, and the emit
+        # wrote an empty call rather than refusing.
+        condition_args = {a for a, rule in term.args.items()
+                          if is_condition_rule(rule)}
         args = {**term.defaults,
                 **{k: v for k, v in node.items()
-                   if k not in ("ind", "prim", "of", "tf", "cond")}}
+                   if k not in ("ind", "prim", "of", "tf")
+                   and k not in condition_args}}
         source = ""
         if term.kind in ("series", "frame"):
             # A term's own operands inherit ITS timeframe and are emitted
             # where it is, so frame and host are one and the same here.
             source = self._expr(node.get("of", {"src": "close"}),
                                 path.child("of"), frame, frame)
-        elif "cond" in node:
+        elif condition_args & set(node):
             # bars_since measures a condition rather than a series, and a
             # condition is the walk's to lower: an emit function is handed
             # operands, never spec shapes. Same slot, because it is the same
             # concept, the operand the term is applied to.
-            source = self._condition(node["cond"], path.child("cond"),
-                                     frame, frame)
+            #
+            # Exactly one to find, and that is a fact about Term rather than an
+            # assumption here: N3-D13 refuses a default on a condition-typed
+            # arg, so the spec supplies every one a term declares, and Term
+            # refuses a term declaring more than one, because this slot holds
+            # one. Reading it off the set used to rest on the first half alone,
+            # which does not imply the second: two declared args both arrived
+            # and one was dropped without a word.
+            (arg,) = condition_args & set(node)
+            source = self._condition(node[arg], path.child(arg), frame, frame)
         call = TermCall(term=term, args=args, path=path,
                         slot=self.ctx.slot(f"nk_{term.name}", path),
                         source=source, content=_content(node, self.vocabulary))

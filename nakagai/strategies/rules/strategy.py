@@ -114,7 +114,7 @@ class RuleStrategy(Strategy):
         return stop_target(self.spec.get("risk", {}), ctx, bars, direction)
 
     def _group_at(self, ctx: MarketContext, group: dict) -> bool:
-        """One all/any tree at `now`.
+        """One all/any/not tree at `now`.
 
         The tree is evaluated on the SPEC's timeframe (so `crosses_above`
         compares consecutive spec-timeframe bars, as the per-bar path did) and

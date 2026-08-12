@@ -11,6 +11,7 @@ import pytest
 
 from nakagai.data.schema import DEFAULT_TIMEFRAMES as TFS
 from nakagai.strategies.indicators import rsi as _rsi
+from nakagai.strategies.rules import validate_spec
 from nakagai.strategies.rules.frame_eval import FrameEval
 from nakagai.strategies.rules.margins import (condition_margin, group_margin,
                                               spec_margin)
@@ -114,6 +115,88 @@ def test_all_group_propagates_warmup_nan_any_survives_it():
     g_any = group_margin({"any": [c_warm, c_ok]}, fe, "15m", idx)
     assert g_all.iloc[:19].isna().all() and g_all.iloc[19:].notna().all()
     assert g_any.notna().all()
+
+
+def test_not_group_margin_is_the_rank_complement_and_obeys_de_morgan():
+    """De Morgan over a real frame, which is what forces `not` to be 1 - m.
+
+    group_margin works in rank-percentile space: a member is .rank(pct=True),
+    `all` takes the min and `any` the max. The complement of a margin m is
+    therefore 1 - m and nothing else, because that is the only reading under
+    which not(all(a, b)) and any(not a, not b) are the same number:
+
+        1 - min(ra, rb) == max(1 - ra, 1 - rb)
+
+    Any other choice would let two logically identical specs produce two
+    different factors, and the ICIR lens would score them apart.
+
+    The window starts past every member's warm-up on purpose. `all` reduces
+    with skipna=False and `any` with skipna=True, so the two sides of the law
+    disagree wherever a member is NaN; that asymmetry predates `not` and is
+    not what this test is about.
+    """
+    b = _bars(np.linspace(100, 120, 40))
+    fe = _fe(b)
+    idx = b.index[20:]
+    a = {"lhs": {"src": "close"}, "op": ">", "rhs": {"ind": "sma", "n": 5}}
+    c = {"lhs": {"ind": "rsi", "n": 14}, "op": "<", "rhs": 70}
+
+    negated_all = group_margin({"not": {"all": [a, c]}}, fe, "15m", idx)
+    # `not` takes a group, never a bare leaf (N3-D6), so a single negated
+    # condition is spelled {"not": {"all": [<leaf>]}}; a one-member `all` is
+    # that member's rank, so these two ARE `not a` and `not c`.
+    not_a = group_margin({"not": {"all": [a]}}, fe, "15m", idx)
+    not_c = group_margin({"not": {"all": [c]}}, fe, "15m", idx)
+    assert negated_all.notna().all() and not_a.notna().all()
+
+    pd.testing.assert_series_equal(
+        negated_all, pd.concat([not_a, not_c], axis=1).max(axis=1),
+        check_names=False)
+    # and the complement really is the complement of the group it negates,
+    # rather than the law holding vacuously over two constant series
+    plain_all = group_margin({"all": [a, c]}, fe, "15m", idx)
+    pd.testing.assert_series_equal(negated_all, 1.0 - plain_all,
+                                   check_names=False)
+    assert plain_all.nunique() > 1
+
+
+def test_spec_margin_ranks_a_not_group_top_level_and_nested():
+    """A validated spec carrying `not` produces a finite ranked factor.
+
+    margins.py recognized only all/any, so a top-level `not` reached
+    condition_margin and raised AttributeError on cond["lhs"], and a nested
+    one raised KeyError.
+
+    What that costs is an availability failure and not a wrong number, which
+    is worth stating precisely because it used to be the other way round. The
+    IC lens calls this through `strategy_operation` (engine/ic.py:249), and
+    that door swallows nothing: the AttributeError arrives as
+    StrategyRuntimeError("strategy_raised", "ic_factor raised AttributeError")
+    naming the play and the symbol, no `except` anywhere under nakagai/engine
+    catches it, and `run_portfolio` refuses the whole replay. Measured on this
+    branch by reverting margins.py alone and replaying one negated spec.
+
+    So without this walker every backtest of a negated spec dies, loudly. The
+    pre-Phase-1 engine substituted empty IC fields for any exception here, and
+    the same crash wrote null correlations over zero observations instead,
+    which read exactly like a legitimate abstention. That silent reading is
+    gone with the engine that produced it; see chrvsd/nakagai#411.
+    """
+    b = _bars(np.linspace(100, 120, 40))
+    fe = _fe(b)
+    idx = b.index[20:]
+    a = {"lhs": {"src": "close"}, "op": ">", "rhs": {"ind": "sma", "n": 5}}
+    c = {"lhs": {"ind": "rsi", "n": 14}, "op": "<", "rhs": 70}
+    top = {"version": 2, "name": "t", "timeframe": "15m",
+           "long": {"not": {"all": [a, c]}}}
+    nested = {"version": 2, "name": "t", "timeframe": "15m",
+              "long": {"all": [{"not": {"any": [a, c]}}, a]},
+              "short": {"any": [{"not": {"all": [c]}}, a]}}
+    for spec in (top, nested):
+        assert validate_spec(spec) == []
+        m = spec_margin(spec, fe, idx)
+        assert isinstance(m, pd.Series) and len(m) == len(idx)
+        assert np.isfinite(m.to_numpy()).all()
 
 
 def test_spec_margin_long_only_and_sides():

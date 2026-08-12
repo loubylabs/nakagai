@@ -10,10 +10,13 @@ trade differently.
 Everything reads a PineProgram or a helper's source, never a rendered artifact.
 """
 
+import dataclasses
+
 import pytest
 
 from nakagai.strategies.rules import lower_pine
 from nakagai.strategies.rules.pine.lowerings import HELPERS
+from nakagai.strategies.rules.pine.model import PineLowering
 from nakagai.strategies.rules.vocabulary import core_vocabulary, is_choice_rule
 
 LHS = "nk_long_all_0_lhs"
@@ -423,6 +426,47 @@ def test_bars_since_lowers_the_condition_it_is_handed():
             in program.calculations)
     assert (f"nk_bars_since_1 = nk_bars_since(nk_rsi_1 < {LHS}_cond_rhs)"
             in program.calculations)
+
+
+def test_a_condition_arg_named_anything_else_still_reaches_the_pine_walk(
+        count_where_vocab):
+    """The Pine walk keys its condition handling on the arg's declared TYPE.
+
+    _term gated on the literal key "cond" twice: once to keep the condition
+    out of the generic args merge, and once to decide whether to lower it into
+    call.source. A condition-taking term whose arg is named anything else
+    therefore reached its emit with source='' and a raw condition dict sitting
+    in call.args, which is silent: the emit writes an empty call rather than
+    refusing, so the artifact renders and the chart reads nothing.
+    """
+    spec = {"version": 2, "name": "probe", "timeframe": "15m",
+            "long": {"all": [{"lhs": {"prim": "count_where",
+                                      "when": CLOSE_OVER_OPEN},
+                              "op": ">", "rhs": 0}]}}
+    program = lower_pine(spec, count_where_vocab)
+    assert ("nk_count_where_1 = nk_bars_since(close > open)"
+            in program.calculations)
+
+    # And the condition did not ALSO land in the args merge. Read off the
+    # TermCall rather than off program.inputs: an earlier draft asserted that
+    # no input was named "when", reasoning that the raw dict "would have become
+    # an input the settings dialog cannot render". It would not. An arg becomes
+    # a PineInput only where an emit calls ctx.arg(call, name), and no emit
+    # asks that of a condition arg, so reverting the merge half left the
+    # program byte-identical and the assertion passed either way. The dict does
+    # reach call.args, which is where the claim is actually observable.
+    seen = {}
+    term = count_where_vocab.primitives["count_where"]
+
+    def spy(ctx, call):
+        seen["args"] = dict(call.args)
+        return term.pine.emit(ctx, call)
+
+    spied = core_vocabulary().with_terms(dataclasses.replace(
+        term, pine=PineLowering(spy, helpers=term.pine.helpers)))
+    lower_pine(spec, spied)
+    assert seen, "the spy emit never ran, so the assertion below proves nothing"
+    assert "when" not in seen["args"], seen["args"]
 
 
 def test_a_gap_exists_only_once_its_third_candle_has_closed():

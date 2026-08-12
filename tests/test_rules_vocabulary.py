@@ -14,9 +14,11 @@ from nakagai.screen.runner import run_screen
 from nakagai.screen.spec import describe_screen, validate_screen_spec
 from nakagai.strategies.catalog import load_entries
 from nakagai.strategies.rules import spec_hash, validate_spec
+from nakagai.strategies.rules.canon import canonical_expr, canonical_spec
 from nakagai.strategies.rules.frame_eval import FrameEval
 from nakagai.strategies.rules.spec import validate_condition_group
-from nakagai.strategies.rules.vocabulary import Term, core_vocabulary
+from nakagai.strategies.rules.vocabulary import (
+    CONDITION_ARG, Term, core_vocabulary, is_condition_rule)
 
 
 SPECS = (Path(__file__).resolve().parents[1]
@@ -149,6 +151,124 @@ def test_term_refuses_a_default_its_arg_schema_does_not_declare():
              lambda *_: None)
 
 
+def test_condition_arg_is_recognized_and_is_not_a_choice_rule():
+    assert is_condition_rule(CONDITION_ARG)
+    assert is_condition_rule(core_vocabulary().primitives["bars_since"].args["cond"])
+    assert not is_condition_rule(("safe", "fast"))
+    assert not is_condition_rule((2.0, 500.0))
+
+
+def test_a_condition_typed_arg_may_not_declare_a_default():
+    with pytest.raises(ValueError, match="condition-typed arg"):
+        Term("bad_default", "primitive", {"cond": CONDITION_ARG},
+             {"cond": {"lhs": 1, "op": ">", "rhs": 2}}, lambda *a: None)
+
+
+def test_a_condition_typed_arg_is_refused_outside_primitive_kind():
+    with pytest.raises(ValueError, match="condition-typed"):
+        Term("bad_kind", "series", {"cond": CONDITION_ARG}, {}, lambda *a: None)
+    # primitive kind is fine, and must stay fine
+    Term("ok_kind", "primitive", {"cond": CONDITION_ARG}, {}, lambda *a: None)
+
+
+def test_a_term_may_declare_at_most_one_condition_typed_arg():
+    """The third refusal in the constructor, and Pine's rather than N3-D13's.
+
+    `TermCall.source` is one slot, so the Pine walk lowers one condition and
+    hands it to an emit taking one operand. A term declaring two validated
+    clean and lowered to `nk_bars_since(close > open)` with the second
+    condition absent from the chart entirely, so the engine computed
+    `up AND down` and the chart computed `up`.
+
+    Refused where the term is built rather than where it is charted: a
+    vocabulary that cannot be charted is wrong when it is constructed, not
+    when someone asks for a chart. The message names both args, because the
+    author of a two-condition term needs to know which one Pine could not
+    take, and lifting this is a real piece of work rather than an oversight.
+    """
+    with pytest.raises(ValueError, match="at most one"):
+        Term("two_conds", "primitive",
+             {"up": CONDITION_ARG, "down": CONDITION_ARG}, {},
+             lambda *a: None)
+    # one is fine under any name, and must stay fine
+    Term("one_cond", "primitive", {"when": CONDITION_ARG}, {}, lambda *a: None)
+
+
+def test_a_condition_typed_arg_gets_the_evaluator_injected_by_type(
+        make_bars, count_where_vocab):
+    """N3-D9. The injection is keyed on the arg's declared type, so a term
+    registered outside core evaluates with no new evaluator code. Keyed on the
+    name "bars_since" instead, this validates clean and then raises."""
+    vocab = count_where_vocab
+    bars = make_bars(n=30)  # close is above open on every bar
+    node = {"prim": "count_where",
+            "when": {"lhs": {"src": "close"}, "op": ">", "rhs": {"src": "open"}}}
+    assert validate_spec(_spec(node), vocab) == []
+    out = FrameEval({"15m": bars}, vocabulary=vocab).series(node, "15m")
+    assert out.iloc[-1] == 5.0
+
+
+def test_an_end_anchored_primitive_gets_the_evaluator_injected_too(make_bars):
+    """The injection has to sit ABOVE frame_eval's end_anchored branch, and
+    the callback it injects has to answer for the frame it is handed.
+
+    N3-D13 refuses a condition-typed arg outside kind 'primitive' and nowhere
+    else, so an end-anchored primitive that declares one is constructible and
+    validates clean. It then dispatches through end_anchored_series, which
+    returns before the injection block, so the term is called without the
+    evaluator it declared it needs and raises at evaluation. The term needs
+    the callback regardless of which dispatch it takes.
+
+    `count_end` deliberately does NOT re-slice what the callback returns. An
+    earlier draft wrote `.loc[bars.index]` inside the term, which clipped what
+    the callback had failed to clip, so the assertion below passed against a
+    callback that answered over the whole frame: the guard compensated for the
+    defect it existed to catch. A term written the natural way is the only one
+    that can tell the two apart, and nothing obliges a term registered outside
+    core to write the defensive version.
+    """
+
+    def count_end(ctx, bars, when, eval_fn=None):
+        # One float off the tail of the frame handed in, which is what
+        # end_anchored means: the count of qualifying bars in the prefix.
+        if eval_fn is None:
+            raise RuntimeError("missing eval_fn")
+        return float(eval_fn(when, bars).sum())
+
+    vocab = core_vocabulary().with_terms(
+        Term("count_end", "primitive", {"when": CONDITION_ARG}, {}, count_end,
+             end_anchored=True))
+    bars = make_bars(n=30)  # close is above open on every bar
+    node = {"prim": "count_end",
+            "when": {"lhs": {"src": "close"}, "op": ">", "rhs": {"src": "open"}}}
+    assert validate_spec(_spec(node), vocab) == []
+    out = FrameEval({"15m": bars}, vocabulary=vocab).series(node, "15m")
+    # row i is the count over bars[:i+1], so the last row counts every bar and
+    # the first counts one: a broadcast tail value would read 30.0 on both.
+    assert out.iloc[-1] == 30.0 and out.iloc[0] == 1.0
+
+
+def test_canon_rekeys_a_second_condition_taking_terms_condition_arg(
+        count_where_vocab):
+    """Case 4, the subtle one. Keyed on the literal key "cond", a condition
+    arg named anything else falls into the generic args merge, where _num
+    passes a dict straight through: nothing INSIDE the condition is
+    canonicalized, so two nodes whose conditions differ only in an omitted
+    default or an int-versus-float literal canonicalize apart and hash apart.
+    """
+    vocab = count_where_vocab
+    implicit = {"prim": "count_where",
+                "when": {"lhs": {"ind": "sma", "n": 20}, "op": ">", "rhs": 1}}
+    explicit = {"prim": "count_where", "n": 5,
+                "when": {"lhs": {"ind": "sma", "n": 20, "of": {"src": "close"}},
+                         "op": ">", "rhs": 1.0}}
+    assert canonical_expr(implicit, vocab) == canonical_expr(explicit, vocab)
+    # and the interior really was canonicalized, rather than both sides being
+    # passed through untouched and comparing equal by accident
+    assert canonical_expr(implicit, vocab)["when"]["lhs"] == {
+        "ind": "sma", "n": 20.0, "of": {"src": "close"}}
+
+
 def test_every_core_term_satisfies_the_term_checks():
     # core_vocabulary() builds every Term through __post_init__, so this asserts
     # the checks above are satisfied by the shipped declarations rather than
@@ -207,3 +327,60 @@ def test_the_retired_exprs_module_is_gone():
     # the vocabulary. The helper lives in frame_eval.py now.
     with pytest.raises(ModuleNotFoundError):
         importlib.import_module("nakagai.strategies.rules.exprs")
+
+
+def _section(prompt: str, header: str) -> str:
+    """One "#" section of a rendered prompt, its header line included.
+
+    Scoped rather than searched whole, because a bare `x in prompt` over a
+    prompt this large passes for the wrong reason routinely: a term name
+    appears in an example, a word appears in unrelated prose, and the
+    assertion says nothing about the paragraph it claims to be about.
+    """
+    return prompt.split(header, 1)[1].split("\n#", 1)[0]
+
+
+def test_prompt_renders_a_condition_typed_arg_readably():
+    prompt = render_system_prompt()
+    # The rendered LIST line, whole: prose elsewhere mentioning the shape must
+    # not be able to satisfy this.
+    assert "- bars_since(cond={lhs,op,rhs})" in prompt.splitlines()
+    assert "cond=condition" not in prompt
+
+
+def test_prompt_describes_a_second_condition_taking_term_with_no_new_prose(
+        count_where_vocab):
+    """Why _bounds reads the arg's declared type rather than a name: a term
+    registered outside core is described correctly with nobody editing the
+    prompt's text, which is what node 02's generated terms need."""
+    prompt = render_system_prompt(None, vocabulary=count_where_vocab)
+    assert "- count_where(when={lhs,op,rhs}, n=(1, 50))" in prompt.splitlines()
+
+
+def test_the_primitives_header_states_the_cross_prohibition_generically():
+    # The header block only, up to the first rendered term line.
+    header = _section(render_system_prompt(), "# Primitives").split("\n- ", 1)[0]
+    assert "bars_since" not in header  # not hand-written for one term
+    assert "cross" in header  # and the prohibition it carried is not lost
+
+
+def test_prompt_documents_not_in_the_grammar_paragraph():
+    grammar = _section(render_system_prompt(), "# Grammar")
+    assert '{"not":' in grammar
+    # and the worked example shows its argument as a GROUP, the only shape
+    # _check_group accepts.
+    assert '{"not": {"all":' in grammar
+
+
+def test_canon_group_handles_not_without_iterating_its_dict_as_a_list():
+    """canon.py's _canon_group: `for i in g[key]` over a dict (not's value)
+    iterates the dict's KEY STRINGS rather than raising a shape error, and
+    _canon_cond then indexes a str."""
+    spec = {"version": 2, "timeframe": "1h",
+            "long": {"not": {"any": [
+                {"lhs": {"src": "close"}, "op": ">", "rhs": 1}]}},
+            "risk": {"stop": {"kind": "atr", "n": 14, "mult": 2.0},
+                     "target": {"kind": "rr", "rr": 2.0}}}
+    canon = canonical_spec(spec)
+    assert canon["long"] == {"not": {"any": [
+        {"lhs": {"src": "close"}, "op": ">", "rhs": 1.0}]}}
