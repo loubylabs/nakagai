@@ -266,8 +266,12 @@ catalog gets an example built from two inline legs.
 answering `in` will do, which is how its structural sibling has always read it.
 The rule the `PARAMS` read stood for is unconditional now: a block that is not
 the bespoke leg carries no params. A CATALOG definition binds its spec at
-construction, so an override there has no surface to land on and would be
-silently ignored rather than applied.
+construction, so an override has nowhere useful to land, and the two ways it can
+fail are both worse than a refusal here. `params.spec` is refused outright at the
+factory, with `ReplayInputError: this definition already binds its rule spec`, so
+that block would die mid-replay rather than at validation. Any other key is
+carried into the strategy and never read, so the play runs untuned while its
+author believes otherwise. That second half is tracked as chrvsd/nakagai#460.
 
 Known limitation, recorded rather than guessed at. `rules_definition` also
 builds UNBOUND definitions, whose spec legitimately travels in `params`, and the

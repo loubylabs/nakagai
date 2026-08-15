@@ -132,10 +132,12 @@ def validate_composite_blocks(spec: dict, members: Container,
 
     The rule the read stood for is unconditional now, and simpler for it: a
     block that is not the bespoke leg carries no params. A catalog definition
-    binds its spec at construction, so an override has no surface to land on;
-    one supplied would be silently ignored rather than applied, which is worse
-    than being refused, because the author would be running something other
-    than what they wrote.
+    binds its spec at construction, so an override has nowhere useful to land,
+    and both ways it can fail are worse than a refusal here. `params.spec` is
+    refused at the factory (`ReplayInputError`), so the block would die
+    mid-replay rather than at validation. Any other key is carried into the
+    strategy unread, so the play runs untuned while its author believes
+    otherwise; that half is tracked as chrvsd/nakagai#460.
 
     KNOWN LIMITATION, pinned by
     tests/test_composite.py::test_an_unbound_member_under_another_name_is_refused.

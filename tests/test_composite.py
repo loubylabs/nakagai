@@ -102,6 +102,23 @@ def test_a_definition_member_is_judged_rather_than_raising():
     assert validate_composite_blocks(spec, _MEMBERS) == []
 
 
+def test_what_a_bound_member_actually_does_with_an_override():
+    """The two failure modes the block rule exists to get ahead of, measured
+    rather than described. Both are worse than the refusal, in different ways,
+    and a docstring claiming only one of them sent a reader looking for the
+    wrong thing (the release-note correction in this branch).
+
+    `params.spec` is refused at the factory, so that block dies mid-replay
+    rather than at validation. Any other key is carried unread, so the play runs
+    untuned. The second half is chrvsd/nakagai#460."""
+    bound = catalog_definitions(SPECS, core_vocabulary)[0]
+    with pytest.raises(Exception, match="already binds its rule spec"):
+        bound.factory({"spec": {"version": 2}})
+    built = bound.factory({"made_up": 99})
+    assert "made_up" in built.params          # carried
+    assert built.spec.get("name") == bound.name   # and never read
+
+
 def test_an_unbound_member_under_another_name_is_refused():
     """A KNOWN limitation, pinned so it is found by reading rather than by
     debugging. The bespoke leg is recognized by the literal name `rules`, so an
