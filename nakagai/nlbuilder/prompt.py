@@ -33,10 +33,18 @@ Description: "trade based on my broker's news sentiment feed"
 {"not_expressible": "the grammar has no source for external news sentiment data, only price/volume series, indicators, and primitives"}\
 """
 
-# The inline leg the composite example writes when the caller declared one.
+# The inline legs the composite example writes when the caller declared the
+# bespoke leg. The second is only reached when the caller declared NO catalog
+# play, where legs are the only block kind available and one block would not
+# demonstrate a composite at all.
 _EXAMPLE_LEG = {
     "version": 2, "name": "rsi-under-40", "timeframe": "1d",
     "long": {"all": [{"lhs": {"ind": "rsi", "n": 14}, "op": "<", "rhs": 40}]},
+}
+_EXAMPLE_LEG_2 = {
+    "version": 2, "name": "above-the-50", "timeframe": "1d",
+    "long": {"all": [{"lhs": {"src": "close"}, "op": ">",
+                      "rhs": {"ind": "sma", "n": 50}}]},
 }
 
 
@@ -66,21 +74,29 @@ def _worked_example(plays: Mapping[str, Mapping]) -> str:
     an example reaching for a block kind the prompt just called unavailable
     teaches the model to spend retries on it.
 
-    Empty when the caller declared no catalog play at all: there is nothing to
-    combine, and a one-block composite is not worth teaching.
+    Empty only when the caller declared nothing a block could name. A caller
+    with the bespoke leg and no catalog at all still gets one, written from two
+    inline legs, because legs voting against each other is a composite the
+    grammar allows and one block would not demonstrate a composite at all.
     """
     names = [name for name in sorted(plays) if name != BESPOKE_LEG]
-    if not names:
+    has_leg = BESPOKE_LEG in plays
+    if not names and not has_leg:
         return ""
     blocks: dict = {chr(ord("a") + i): {"strategy": name}
                     for i, name in enumerate(names[:2])}
     described = " with ".join(names[:2])
-    if BESPOKE_LEG in plays:
-        blocks[chr(ord("a") + len(blocks))] = {
-            "strategy": BESPOKE_LEG,
-            "params": {"spec": {**_EXAMPLE_LEG, "risk": g.DEFAULT_RISK}}}
+    if has_leg:
+        legs = [_EXAMPLE_LEG] if names else [_EXAMPLE_LEG, _EXAMPLE_LEG_2]
+        for leg in legs:
+            blocks[chr(ord("a") + len(blocks))] = {
+                "strategy": BESPOKE_LEG,
+                "params": {"spec": {**leg, "risk": g.DEFAULT_RISK}}}
         described += (", plus my own leg that only takes it when rsi 14 is "
-                      "under 40")
+                      "under 40" if names else
+                      "two legs of my own: one that only takes it when rsi 14 "
+                      "is under 40, and one that needs the close above its 50 "
+                      "bar average")
     reply = {
         "kind": "composite",
         "spec": {"version": 1, "name": "confluence", "blocks": blocks,
@@ -99,8 +115,9 @@ def _composite_section(plays: Mapping[str, Mapping]) -> str:
     `plays` is CARD metadata, keyed by the name a block references: the title,
     the description, and the bound spec a timeframe is read off. That is what
     `strategies.catalog.load_entries` returns, and it is deliberately not a
-    `StrategyDefinition`, which carries a name, a digest and two functions and
-    nothing a reader could be told about. This read those three fields off each
+    `StrategyDefinition`, which carries a name, a digest, the functions a replay
+    builds and grades with, and its member tree: nothing a reader could be told
+    about. This read those three fields off each
     member as class attributes until 0.5.0 stopped minting the subclasses that
     carried them (chrvsd/nakagai#417).
 

@@ -245,7 +245,9 @@ timeframe is read off. That is exactly what `strategies.catalog.load_entries`
 returns.
 
 0.5.0 replaced member classes with `StrategyDefinition` values, which carry a
-name, a digest and two functions. `nlbuilder.prompt` was still reading
+name, a digest, the functions a replay builds and grades with, and the member
+tree a composite lowers onto. None of that is presentation. `nlbuilder.prompt`
+was still reading
 `DEFAULT_PARAMS`, `title` and `description` off each member, and
 `validate_composite_blocks` was still reading `PARAMS`, so both raised
 `AttributeError` on the very values `catalog_definitions` and
@@ -253,22 +255,27 @@ name, a digest and two functions. `nlbuilder.prompt` was still reading
 model it shipped alongside.
 
 A `rules` key in `plays` declares the bespoke leg, the block kind that writes
-its own RuleSpec inline. The prompt teaches that leg, writes its worked example,
-and words its risk sentence from that one value, so a caller who registers no
-such member is told every block names a catalog play rather than being taught a
-syntax it cannot build. The worked example's block names are read from `plays`
-too, for the same reason.
+its own RuleSpec inline. The prompt teaches that leg, puts it in the worked
+example, and words its risk sentence from that one value, so a caller who
+registers no such member is told every block names a catalog play rather than
+being taught a syntax it cannot build. The example's block names are read from
+`plays` too, for the same reason, and a caller who declared the leg and no
+catalog gets an example built from two inline legs.
 
 **`validate_composite_blocks` reads `members` for membership alone.** Anything
 answering `in` will do, which is how its structural sibling has always read it.
-The rule the `PARAMS` read stood for is unconditional under the value model: a
-definition binds its spec at construction, so a block that is not the bespoke
-leg has no param surface for an override to land on.
+The rule the `PARAMS` read stood for is unconditional now: a block that is not
+the bespoke leg carries no params. A CATALOG definition binds its spec at
+construction, so an override there has no surface to land on and would be
+silently ignored rather than applied.
 
-Known limitation, recorded rather than guessed at: the bespoke leg is recognized
-by the name `rules`, so an UNBOUND definition registered under any other name is
-refused for carrying params even though its factory would build it. The class
-model refused it identically.
+Known limitation, recorded rather than guessed at. `rules_definition` also
+builds UNBOUND definitions, whose spec legitimately travels in `params`, and the
+bespoke leg is recognized by the literal name `rules`. So an unbound definition
+registered under any other name is refused here even though its own factory
+builds it. The class model refused it identically, because `Strategy.PARAMS` was
+empty on every unbound adapter too. Closing it needs the caller to say which
+members are unbound, which the signature does not carry.
 
 ### 0.5.0
 

@@ -206,6 +206,26 @@ def test_the_bespoke_leg_declaration_is_a_key_and_never_a_value():
     assert "there is no way to write a leg inline here" not in rendered.pop()
 
 
+def test_a_caller_with_only_the_bespoke_leg_still_gets_a_worked_example():
+    """Legs voting against each other is a composite the grammar allows, so a
+    caller who declared the leg and no catalog is not taught the contract and
+    then shown nothing. The example used to be empty here, which made the
+    release note describing it false."""
+    p = render_system_prompt({"rules": {}})
+    assert "# Composites" in p
+    example = p.split("# Examples", 1)[1]
+    reply = json.loads(example[example.rindex("\n{"):].strip())
+    kinds = [b["strategy"] for b in reply["spec"]["blocks"].values()]
+    assert kinds == ["rules", "rules"], kinds
+    errors, _ = _check("composite", reply["spec"], {"rules": {}}, core_vocabulary())
+    assert errors == []
+
+
+def test_nothing_declared_at_all_renders_no_composite_section():
+    """The one case that really has nothing to combine."""
+    assert render_system_prompt({}) == render_system_prompt()
+
+
 def test_a_card_missing_fields_still_renders_a_line():
     """The catalog is content, and a half-filled card is worth less to the
     model than a full one but more than a prompt that will not render. Strict
