@@ -102,6 +102,29 @@ def test_a_definition_member_is_judged_rather_than_raising():
     assert validate_composite_blocks(spec, _MEMBERS) == []
 
 
+def test_an_unbound_member_under_another_name_is_refused():
+    """A KNOWN limitation, pinned so it is found by reading rather than by
+    debugging. The bespoke leg is recognized by the literal name `rules`, so an
+    unbound definition registered as anything else is refused for carrying
+    params even though its spec legitimately travels there and its own factory
+    builds it.
+
+    Not a regression: the class model refused it identically, because
+    `Strategy.PARAMS` is empty on an unbound adapter too. Closing it needs the
+    caller to say which members are unbound, which this signature does not
+    carry."""
+    unbound = rules_definition("private_rules",
+                               spec_base_digest({"$unbound_adapter": "private"}))
+    spec = {"blocks": {"a": {"strategy": "private_rules",
+                             "params": {"spec": _LEG_SPEC}}}}
+    errs = validate_composite_blocks(spec, {"private_rules": unbound})
+    assert errs == ["blocks.a: private_rules is a built-in spec and takes no "
+                    "param overrides; use a rules block for a tuned leg"]
+    # The half that makes it a limitation rather than a rule: the definition it
+    # just refused builds that exact block without complaint.
+    assert unbound.factory({"spec": _LEG_SPEC}) is not None
+
+
 def test_membership_is_all_that_is_read_of_a_member():
     """A bare name set validates identically to a mapping of definitions.
 

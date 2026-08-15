@@ -61,37 +61,27 @@ def _add_usage(result: CompileResult, resp) -> None:
     result.usage["cache_write_tokens"] += getattr(u, "cache_creation_input_tokens", 0) or 0
 
 
-# The bespoke-leg escape hatch. `render_system_prompt` teaches it
-# unconditionally beside the catalog ("or a bespoke or tuned leg written with
-# the RuleSpec grammar above"), so the validator has to accept a block naming
-# it whatever cards the caller supplied. It is core's own name rather than a
-# catalog play, which is why it is added here rather than expected in `plays`.
-BESPOKE_LEG = "rules"
-
-
-def _member_names(plays: Mapping[str, Mapping]) -> frozenset[str]:
-    """Exactly the strategy names a composite block may reference.
-
-    Derived from the same cards the prompt is rendered from, so the world the
-    model is told about and the world the validator enforces cannot drift: a
-    play described in the prompt but absent here would burn every retry on an
-    error the model has no way to act on."""
-    return frozenset(plays) | {BESPOKE_LEG}
-
-
 def _check(kind: str, spec, plays: Mapping[str, Mapping] | None,
            vocabulary: Vocabulary):
     """(errors, describer) for the spec kind the model claims it produced.
-    A composite needs the caller's catalog cards both to validate block
-    references and to render the prompt, so without them the only honest answer
-    is to send the model back to a single rules spec."""
+    A composite needs the caller's declared world both to validate block
+    references and to render the prompt, so without it the only honest answer
+    is to send the model back to a single rules spec.
+
+    `plays` goes to both validators unchanged, and core adds no name of its
+    own. It used to union in a `rules` member here, which made the compiler
+    accept a composite the caller could not build: core's own
+    `catalog_definitions` registers no `rules`, so a leg core had invented came
+    back clean from validation and then raised `unknown strategy 'rules'` at
+    `CompositeStrategy` construction. Whether the bespoke leg exists is the
+    caller's fact, and `render_system_prompt` teaches it on the same condition,
+    so the prompt, the validator and the caller's registry stay one world."""
     if kind == "composite":
         if not plays:
             return (["composite specs are not available here; "
                      "return a single rules spec instead"], describe_composite_spec)
-        members = _member_names(plays)
-        errors = (validate_composite_spec(spec, members, allow_refs=False)
-                  or validate_composite_blocks(spec, members, vocabulary))
+        errors = (validate_composite_spec(spec, plays, allow_refs=False)
+                  or validate_composite_blocks(spec, plays, vocabulary))
         return errors, describe_composite_spec
     return validate_spec(spec, vocabulary), lambda value: describe_spec(value, vocabulary)
 

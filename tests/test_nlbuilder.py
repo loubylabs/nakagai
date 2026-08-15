@@ -66,10 +66,14 @@ _CAT_SPEC = {"version": 2, "name": "donch", "timeframe": "1d",
 # title, no description, and no readable spec to take a timeframe off. `rules`
 # is deliberately absent. The bespoke-leg escape hatch is core's own and is
 # taught unconditionally, so it is not a card a caller supplies.
-_PLAYS = {"donchian_breakout": {
+_CARDS = {"donchian_breakout": {
     "title": "Donchian channel breakout",
     "description": "Buys a break of the upper Donchian channel.",
     "spec": _CAT_SPEC}}
+# The world a caller declares: catalog cards plus, when the caller registers
+# one, the bespoke leg under its own name. It has no card of its own, and the
+# value is never read; the key is the declaration.
+_PLAYS = {**_CARDS, "rules": {}}
 
 
 def test_prompt_flags_the_primitives_a_daily_spec_cannot_use():
@@ -97,8 +101,51 @@ def test_prompt_with_plays_renders_composite_contract_and_catalog():
                    "donchian_breakout", "Donchian channel breakout", "[1d]",
                    "take no param overrides"):
         assert needle in p, needle
-    # "rules" is the bespoke-leg escape hatch, not a catalog play entry
+
+
+def test_the_bespoke_leg_is_never_listed_as_a_catalog_play():
+    """`rules` is declared like any member and described by the grammar, so
+    listing it under "Catalog plays (usable as bare blocks)" would advertise a
+    bare block that fails every retry for want of `params.spec`.
+
+    The fixture carries a full card under that name on purpose. Asserting
+    absence against a `plays` that has no `rules` key at all is a guard that
+    cannot fail, which is what this file shipped before: deleting the filter
+    left the whole suite green."""
+    dressed = {**_PLAYS, "rules": {
+        "title": "House rules play", "description": "d",
+        "spec": {**_CAT_SPEC, "timeframe": "1h"}}}
+    p = render_system_prompt(dressed)
     assert "- rules [" not in p
+    assert "House rules play" not in p
+    # and the play beside it still is listed, so this is not passing by
+    # rendering nothing at all
+    assert "- donchian_breakout [1d]" in p
+
+
+def test_the_bespoke_leg_is_taught_only_when_the_caller_declares_it():
+    """Teaching a block kind the caller cannot build is the defect that made
+    the compiler return unbuildable composites: core registered `rules` for
+    itself, so validation passed and `CompositeStrategy` then raised
+    `unknown strategy 'rules'`."""
+    with_leg = render_system_prompt(_PLAYS)
+    assert '{"strategy": "rules", "params": {"spec": {<RuleSpec v2>}}}' in with_leg
+    assert '"strategy": "rules"' in with_leg          # and the worked example
+
+    without = render_system_prompt(_CARDS)
+    assert '{"strategy": "rules"' not in without
+    assert "there is no way to write a leg inline here" in without
+    assert "# Composites" in without                  # composites still offered
+
+
+def test_a_card_missing_fields_still_renders_a_line():
+    """The catalog is content, and a half-filled card is worth less to the
+    model than a full one but more than a prompt that will not render. Strict
+    subscripting here would raise inside `render_system_prompt`, which is the
+    same class of break as chrvsd/nakagai#417."""
+    p = render_system_prompt({"bare": {}, "no_desc": {"title": "T", "spec": _CAT_SPEC}})
+    assert "- bare [?] bare: " in p
+    assert "- no_desc [1d] T: " in p
 
 
 def test_prompt_with_plays_is_deterministic():
@@ -311,15 +358,33 @@ def test_plays_reach_the_system_prompt():
     assert "donchian_breakout" in client.requests[0]["system"][0]["text"]
 
 
-def test_a_bespoke_rules_leg_needs_no_card_to_be_accepted():
-    """`rules` is core's own escape hatch, taught unconditionally by the
-    prompt, so the validator has to accept a block naming it whatever cards the
-    caller supplied. `_PLAYS` holds no `rules` key and GOOD_COMPOSITE's second
-    block is one, so a member view built from the cards alone refuses this."""
-    assert "rules" not in _PLAYS
-    client = FakeClient([json.dumps({"kind": "composite", "spec": GOOD_COMPOSITE})])
+def test_a_bespoke_leg_the_caller_never_declared_is_sent_back():
+    """The regression the member view used to hide. Core added `rules` to the
+    membership itself, so a composite naming it validated clean and then raised
+    `unknown strategy 'rules'` at `CompositeStrategy` construction, which is
+    past every retry the model could have acted on.
+
+    `_CARDS` is the catalog without the bespoke leg, exactly what core's own
+    `catalog_definitions` registers."""
+    assert "rules" not in _CARDS
+    client = FakeClient([json.dumps({"kind": "composite", "spec": GOOD_COMPOSITE})] * 3)
+    res = compile_strategy("combine", client=client, plays=_CARDS, max_retries=2)
+    assert res.spec is None
+    assert "unknown strategy 'rules'" in res.not_expressible
+
+
+def test_an_unknown_play_is_sent_back_by_name():
+    """The permissive direction of the membership check. Accepting every name
+    would let the model invent a play, report success, and leave the failure to
+    surface at construction rather than as a retry it could act on."""
+    invented = {**GOOD_COMPOSITE,
+                "blocks": {**GOOD_COMPOSITE["blocks"],
+                           "a": {"strategy": "golden_cross"}}}
+    client = FakeClient([json.dumps({"kind": "composite", "spec": invented}),
+                         json.dumps({"kind": "composite", "spec": GOOD_COMPOSITE})])
     res = compile_strategy("combine", client=client, plays=_PLAYS)
-    assert res.kind == "composite" and res.spec == GOOD_COMPOSITE
+    assert res.spec == GOOD_COMPOSITE and res.attempts == 2
+    assert "golden_cross" in json.dumps(client.requests[1]["messages"])
 
 
 def test_a_catalog_play_carrying_param_overrides_is_sent_back():

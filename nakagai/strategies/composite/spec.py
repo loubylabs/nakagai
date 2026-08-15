@@ -117,11 +117,22 @@ def validate_composite_blocks(spec: dict, members: Container,
     on the value model got an AttributeError instead of an answer
     (chrvsd/nakagai#417).
 
-    The rule the read stood for is unconditional now, and simpler for it. A
-    definition binds its spec at construction, so a non-rules block has no
-    param surface for an override to land on; one supplied would be silently
-    ignored rather than applied, which is worse than being refused, because the
-    author would be running something other than what they wrote.
+    The rule the read stood for is unconditional now, and simpler for it: a
+    block that is not the bespoke leg carries no params. A catalog definition
+    binds its spec at construction, so an override has no surface to land on;
+    one supplied would be silently ignored rather than applied, which is worse
+    than being refused, because the author would be running something other
+    than what they wrote.
+
+    KNOWN LIMITATION, pinned by
+    tests/test_composite.py::test_an_unbound_member_under_another_name_is_refused.
+    The bespoke leg is recognized by the literal name `rules`, so an UNBOUND
+    definition registered under any other name is refused here even though its
+    spec legitimately travels in `params` and its factory would build it. The
+    class model refused it identically, for the same reason: `Strategy.PARAMS`
+    is empty on every unbound adapter too. Closing it needs the caller to say
+    which members are unbound, which this signature deliberately does not carry,
+    so it is recorded rather than guessed at.
 
     vocabulary=None defaults to core_vocabulary(): the honest default for a
     library whose own tests and catalog need a vocabulary to exist. A caller

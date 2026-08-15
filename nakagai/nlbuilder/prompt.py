@@ -46,6 +46,26 @@ Description: "combine the donchian breakout with the adx pullback, both have to 
 "clarifications": ["used a 4 bar vote window and the default ATR stop and 2R target"]}\
 """
 
+# The same worked example for a caller that declared no bespoke leg. It has to
+# be its own text rather than the one above with a block deleted: an example
+# using a block kind the prompt just said is unavailable teaches the model to
+# reach for it, and every such reply costs a retry to refuse.
+_CATALOG_ONLY_EXAMPLE = """\
+
+Description: "combine the donchian breakout with the adx pullback, both have to fire"
+{"kind": "composite", "spec": {"version": 1, "name": "donch-adx-confluence",
+"blocks": {"a": {"strategy": "donchian_breakout"}, "b": {"strategy": "adx_pullback"}},
+"long": {"all": ["a", "b"]}, "window_bars": 4,
+"risk": {"stop": {"kind": "atr", "n": 14, "mult": 2.0}, "target": {"kind": "rr", "rr": 2.0}}},
+"clarifications": ["used a 4 bar vote window and the default ATR stop and 2R target"]}\
+"""
+
+# The name a block uses to write its own RuleSpec inline instead of naming a
+# catalog play. It is a member like any other, declared by the caller in
+# `plays`, and it is NOT a catalog play: it has no card to render, so the
+# listing below skips it and the grammar above describes it instead.
+BESPOKE_LEG = "rules"
+
 
 def _bounds(schema: dict) -> str:
     # A condition-typed arg renders its real shape, {lhs,op,rhs}, rather than
@@ -73,11 +93,32 @@ def _composite_section(plays: Mapping[str, Mapping]) -> str:
     refused: the catalog is content, and a play with no description is worth
     less to the model than a full card but more than a prompt that would not
     render at all.
+
+    `BESPOKE_LEG` is taught only when the caller declared it. Teaching it
+    unconditionally is what let the compiler return a composite the caller
+    could not build, because core's own `catalog_definitions` registers no
+    such member and the block raised `unknown strategy 'rules'` at
+    construction. It is also skipped in the listing below whether or not it is
+    declared: it has no card, and a spec file that happened to be named
+    `rules` would otherwise be advertised as a bare block that then fails
+    every retry for want of `params.spec`.
     """
     lines = "\n".join(
         f"- {name} [{(entry.get('spec') or {}).get('timeframe', '?')}]"
         f" {entry.get('title') or name}: {(entry.get('description') or '').strip()}"
-        for name, entry in sorted(plays.items()) if name != "rules")
+        for name, entry in sorted(plays.items()) if name != BESPOKE_LEG)
+    bespoke = (f"""
+or a bespoke or tuned leg written with the RuleSpec grammar above:
+{{"strategy": "{BESPOKE_LEG}", "params": {{"spec": {{<RuleSpec v2>}}}}}}"""
+               if BESPOKE_LEG in plays else """
+Every block names a catalog play; there is no way to write a leg inline here,
+so express what the catalog cannot as a single rules spec instead.""")
+    risk = ("The composite owns its own stop and target, so member risk is "
+            f"ignored; a {BESPOKE_LEG}\nleg still needs a valid \"risk\" block "
+            "to validate, it is simply unused."
+            if BESPOKE_LEG in plays else
+            "The composite owns its own stop and target, so member risk is "
+            "ignored.")
     return f"""
 
 # Composites (one strategy built from several)
@@ -88,13 +129,10 @@ rules spec. A composite spec:
 "long"/"short": <vote tree>, "window_bars": {WINDOW_BARS_BOUNDS[0]}-{WINDOW_BARS_BOUNDS[1]}
 (default {DEFAULT_WINDOW_BARS}), "risk": {{...}}}}
 A block is either a catalog play referenced by name, carrying NO params:
-{{"strategy": "<catalog name>"}}
-or a bespoke or tuned leg written with the RuleSpec grammar above:
-{{"strategy": "rules", "params": {{"spec": {{<RuleSpec v2>}}}}}}
+{{"strategy": "<catalog name>"}}{bespoke}
 A vote tree is {{"all": [...]}} or {{"any": [...]}} over block ids, nestable.
 At most {MAX_BLOCKS} blocks; a composite cannot contain another composite.
-The composite owns its own stop and target, so member risk is ignored; a rules
-leg still needs a valid "risk" block to validate, it is simply unused.
+{risk}
 Prefer legs that share one timeframe.
 
 # Catalog plays (usable as bare blocks; they take no param overrides)
@@ -118,7 +156,9 @@ def render_system_prompt(plays: Mapping[str, Mapping] | None = None, *,
            if term.driving_frame_intraday else "")
         for name, term in sorted(vocabulary.primitives.items()))
     composite = _composite_section(plays) if plays else ""
-    example = _COMPOSITE_EXAMPLE if plays else ""
+    example = ("" if not plays else
+               _COMPOSITE_EXAMPLE if BESPOKE_LEG in plays else
+               _CATALOG_ONLY_EXAMPLE)
     return f"""You compile plain-English trading strategy descriptions into
 nakagai strategy JSON. Reply with EXACTLY ONE JSON object and nothing else
 (no prose, no code fences): either
