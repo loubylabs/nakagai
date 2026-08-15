@@ -7,6 +7,7 @@ retries always survives."""
 
 import json
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 from nakagai.nlbuilder.prompt import render_system_prompt
@@ -60,15 +61,35 @@ def _add_usage(result: CompileResult, resp) -> None:
     result.usage["cache_write_tokens"] += getattr(u, "cache_creation_input_tokens", 0) or 0
 
 
-def _check(kind: str, spec, members: dict | None, vocabulary: Vocabulary):
+# The bespoke-leg escape hatch. `render_system_prompt` teaches it
+# unconditionally beside the catalog ("or a bespoke or tuned leg written with
+# the RuleSpec grammar above"), so the validator has to accept a block naming
+# it whatever cards the caller supplied. It is core's own name rather than a
+# catalog play, which is why it is added here rather than expected in `plays`.
+BESPOKE_LEG = "rules"
+
+
+def _member_names(plays: Mapping[str, Mapping]) -> frozenset[str]:
+    """Exactly the strategy names a composite block may reference.
+
+    Derived from the same cards the prompt is rendered from, so the world the
+    model is told about and the world the validator enforces cannot drift: a
+    play described in the prompt but absent here would burn every retry on an
+    error the model has no way to act on."""
+    return frozenset(plays) | {BESPOKE_LEG}
+
+
+def _check(kind: str, spec, plays: Mapping[str, Mapping] | None,
+           vocabulary: Vocabulary):
     """(errors, describer) for the spec kind the model claims it produced.
-    A composite needs the caller's member registry both to validate block
-    references and to render the prompt, so without one the only honest answer
+    A composite needs the caller's catalog cards both to validate block
+    references and to render the prompt, so without them the only honest answer
     is to send the model back to a single rules spec."""
     if kind == "composite":
-        if not members:
+        if not plays:
             return (["composite specs are not available here; "
                      "return a single rules spec instead"], describe_composite_spec)
+        members = _member_names(plays)
         errors = (validate_composite_spec(spec, members, allow_refs=False)
                   or validate_composite_blocks(spec, members, vocabulary))
         return errors, describe_composite_spec
@@ -77,12 +98,13 @@ def _check(kind: str, spec, members: dict | None, vocabulary: Vocabulary):
 
 def compile_strategy(description: str, current_spec: dict | None = None,
                      client=None, model: str = MODEL,
-                     max_retries: int = 2, members: dict | None = None, *,
+                     max_retries: int = 2,
+                     plays: Mapping[str, Mapping] | None = None, *,
                      vocabulary: Vocabulary | None = None) -> CompileResult:
     vocabulary = resolve_vocabulary(vocabulary)
     client = _client_or_default(client)
     system = [{"type": "text",
-               "text": render_system_prompt(members, vocabulary=vocabulary),
+               "text": render_system_prompt(plays, vocabulary=vocabulary),
                "cache_control": {"type": "ephemeral"}}]
     user = description.strip()
     if current_spec is not None:
@@ -120,7 +142,7 @@ def compile_strategy(description: str, current_spec: dict | None = None,
         kind = doc.get("kind") or "rules"
         if kind not in ("rules", "composite"):
             kind = "rules"
-        errors, describe = _check(kind, spec, members, vocabulary)
+        errors, describe = _check(kind, spec, plays, vocabulary)
         if not errors:
             result.spec = spec
             result.kind = kind

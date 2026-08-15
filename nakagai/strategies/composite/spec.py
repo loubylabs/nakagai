@@ -20,6 +20,8 @@ owns its own risk block (members' stops/targets are ignored).
     }
 """
 
+from collections.abc import Container
+
 from nakagai.strategies.rules.spec import (
     DEFAULT_RISK, risk_text, validate_risk, validate_spec)
 from nakagai.strategies.rules.vocabulary import Vocabulary, resolve_vocabulary
@@ -48,9 +50,12 @@ def _check_tree(tree, blocks: dict, path: str, errs: list[str]) -> None:
             errs.append(f"{p}: entries are block ids or nested groups")
 
 
-def validate_composite_spec(spec, members, allow_refs: bool = True) -> list[str]:
-    """Structural validation; empty list = usable. `members` is the mapping of
-    strategy name to class a block may reference (the caller's registry view).
+def validate_composite_spec(spec, members: Container,
+                            allow_refs: bool = True) -> list[str]:
+    """Structural validation; empty list = usable. `members` names the
+    strategies a block may reference and is read for membership alone, so a
+    mapping of definitions and a bare set of names answer identically. There is
+    no class to read here: 0.5.0 replaced member classes with frozen values.
     allow_refs=False also rejects unresolved {"config": ...} blocks, since the
     engine only accepts self-contained specs. Per-block param bounds are the
     API layer's job (it owns guardrails)."""
@@ -94,14 +99,29 @@ def validate_composite_spec(spec, members, allow_refs: bool = True) -> list[str]
     return errs
 
 
-def validate_composite_blocks(spec: dict, members: dict,
+def validate_composite_blocks(spec: dict, members: Container,
                               vocabulary: Vocabulary | None = None) -> list[str]:
     """Per-block param validation, the layer validate_composite_spec leaves to
     its caller. Two block kinds carry params worth checking: a "rules" block
-    whose params.spec is a full RuleSpec, and a catalog play, which declares no
-    PARAMS at all and therefore takes no overrides. Blocks the structural
+    whose params.spec is a full RuleSpec, and any other member, whose body is
+    already bound and which therefore takes no overrides. Blocks the structural
     validator already rejected (unknown member, non-dict params) are skipped so
     one mistake is reported once.
+
+    `members` is read for MEMBERSHIP alone, so anything answering `in` will do:
+    the sibling structural validator reads it the same way, and the NL builder
+    hands a set of names it built from the caller's catalog cards. It used to
+    read `cls.PARAMS` off each member and refuse an override only where that
+    was empty, which stopped being callable when 0.5.0 replaced member classes
+    with `StrategyDefinition` values carrying no such attribute: every caller
+    on the value model got an AttributeError instead of an answer
+    (chrvsd/nakagai#417).
+
+    The rule the read stood for is unconditional now, and simpler for it. A
+    definition binds its spec at construction, so a non-rules block has no
+    param surface for an override to land on; one supplied would be silently
+    ignored rather than applied, which is worse than being refused, because the
+    author would be running something other than what they wrote.
 
     vocabulary=None defaults to core_vocabulary(): the honest default for a
     library whose own tests and catalog need a vocabulary to exist. A caller
@@ -115,9 +135,8 @@ def validate_composite_blocks(spec: dict, members: dict,
         if not isinstance(block, dict) or "config" in block:
             continue
         name = block.get("strategy")
-        cls = members.get(name)
         params = block.get("params", {})
-        if cls is None or not isinstance(params, dict):
+        if name not in members or not isinstance(params, dict):
             continue
         if name == "rules":
             inner = params.get("spec")
@@ -127,7 +146,7 @@ def validate_composite_blocks(spec: dict, members: dict,
             else:
                 errs.extend(f"blocks.{bid}: {e}"
                             for e in validate_spec(inner, vocabulary))
-        elif not cls.PARAMS and params:
+        elif params:
             errs.append(f"blocks.{bid}: {name} is a built-in spec and takes no "
                         "param overrides; use a rules block for a tuned leg")
     return errs

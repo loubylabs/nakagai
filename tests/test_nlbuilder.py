@@ -1,11 +1,15 @@
 import json
+from pathlib import Path
 
 import pandas as pd
 
 from nakagai.nlbuilder.compiler import _check, compile_strategy
 from nakagai.nlbuilder.prompt import render_system_prompt
-from nakagai.strategies.rules import RuleStrategy, core_vocabulary
+from nakagai.strategies.catalog import catalog_definitions, load_entries
+from nakagai.strategies.rules import core_vocabulary
 from nakagai.strategies.rules.vocabulary import Term
+
+SPECS = Path(__file__).resolve().parents[1] / "nakagai" / "strategies" / "catalog" / "specs"
 
 GOOD_SPEC = {"version": 2, "name": "dip", "timeframe": "1h",
              "long": {"all": [{"lhs": {"ind": "rsi", "n": 14}, "op": "crosses_above", "rhs": 30}]},
@@ -57,11 +61,15 @@ _CAT_SPEC = {"version": 2, "name": "donch", "timeframe": "1d",
                                "rhs": {"ind": "sma", "n": 50}}]},
              "risk": {"stop": {"kind": "atr", "n": 14, "mult": 2.0},
                       "target": {"kind": "rr", "rr": 2.0}}}
-_Donch = type("_Donch", (RuleStrategy,), {
-    "name": "donchian_breakout", "title": "Donchian channel breakout",
+# Catalog CARD metadata, the shape `load_entries` hands back and the only shape
+# that carries what this prompt needs: a frozen `StrategyDefinition` has no
+# title, no description, and no readable spec to take a timeframe off. `rules`
+# is deliberately absent. The bespoke-leg escape hatch is core's own and is
+# taught unconditionally, so it is not a card a caller supplies.
+_PLAYS = {"donchian_breakout": {
+    "title": "Donchian channel breakout",
     "description": "Buys a break of the upper Donchian channel.",
-    "PARAMS": {}, "DEFAULT_PARAMS": {"spec": _CAT_SPEC}})
-_MEMBERS = {"rules": RuleStrategy, "donchian_breakout": _Donch}
+    "spec": _CAT_SPEC}}
 
 
 def test_prompt_flags_the_primitives_a_daily_spec_cannot_use():
@@ -77,14 +85,14 @@ def test_prompt_flags_the_primitives_a_daily_spec_cannot_use():
     assert "intraday spec timeframe" not in dow, dow
 
 
-def test_prompt_without_members_has_no_composite_section():
+def test_prompt_without_plays_has_no_composite_section():
     p = render_system_prompt()
     assert "composite" not in p.lower()
     assert '"kind"' in p          # the discriminator is always taught
 
 
-def test_prompt_with_members_renders_composite_contract_and_catalog():
-    p = render_system_prompt(_MEMBERS)
+def test_prompt_with_plays_renders_composite_contract_and_catalog():
+    p = render_system_prompt(_PLAYS)
     for needle in ("# Composites", '"kind": "composite"', "window_bars",
                    "donchian_breakout", "Donchian channel breakout", "[1d]",
                    "take no param overrides"):
@@ -93,8 +101,31 @@ def test_prompt_with_members_renders_composite_contract_and_catalog():
     assert "- rules [" not in p
 
 
-def test_prompt_with_members_is_deterministic():
-    assert render_system_prompt(_MEMBERS) == render_system_prompt(_MEMBERS)
+def test_prompt_with_plays_is_deterministic():
+    assert render_system_prompt(_PLAYS) == render_system_prompt(_PLAYS)
+
+
+def test_the_prompt_takes_the_catalog_the_way_core_ships_it():
+    """The regression every fixture in this file used to hide.
+
+    `_PLAYS` above is hand-written, and the shape it replaced was a minted
+    `RuleStrategy` subclass carrying `title`, `description` and
+    `DEFAULT_PARAMS`, which core 0.5.0 stopped producing. So the suite stayed
+    green over a prompt no shipped caller could render: the platform hands
+    `load_entries`/`catalog_definitions` output and got AttributeError
+    (chrvsd/nakagai#417).
+
+    This drives core's own two producers instead, and asserts the pair agrees:
+    one card per definition, and every card reaching the prompt.
+    """
+    plays = load_entries(SPECS, core_vocabulary)
+    assert plays, "the shipped catalog is what makes this test meaningful"
+    p = render_system_prompt(plays)
+    for name, entry in plays.items():
+        assert f"- {name} [{entry['spec']['timeframe']}]" in p
+        assert entry["title"] in p
+        assert entry["description"].strip() in p
+    assert {d.name for d in catalog_definitions(SPECS, core_vocabulary)} == set(plays)
 
 
 def test_happy_path_returns_spec_and_readback():
@@ -228,7 +259,7 @@ GOOD_COMPOSITE = {
 
 def test_composite_kind_validates_and_describes_as_a_composite():
     client = FakeClient([json.dumps({"kind": "composite", "spec": GOOD_COMPOSITE})])
-    res = compile_strategy("combine them", client=client, members=_MEMBERS)
+    res = compile_strategy("combine them", client=client, plays=_PLAYS)
     assert res.kind == "composite"
     assert res.spec == GOOD_COMPOSITE
     assert "Composite" in res.readback and "2 blocks" in res.readback
@@ -236,13 +267,13 @@ def test_composite_kind_validates_and_describes_as_a_composite():
 
 def test_missing_kind_defaults_to_rules():
     client = FakeClient([json.dumps({"spec": GOOD_SPEC})])
-    res = compile_strategy("buy rsi dips", client=client, members=_MEMBERS)
+    res = compile_strategy("buy rsi dips", client=client, plays=_PLAYS)
     assert res.kind == "rules" and res.spec == GOOD_SPEC
 
 
 def test_unrecognized_kind_falls_back_to_rules():
     client = FakeClient([json.dumps({"kind": "Composite", "spec": GOOD_SPEC})])
-    res = compile_strategy("buy rsi dips", client=client, members=_MEMBERS)
+    res = compile_strategy("buy rsi dips", client=client, plays=_PLAYS)
     assert res.kind == "rules" and res.spec == GOOD_SPEC
 
 
@@ -250,7 +281,7 @@ def test_bad_vote_tree_retries_with_composite_errors():
     bad = {**GOOD_COMPOSITE, "long": {"all": ["a", "zz"]}}
     client = FakeClient([json.dumps({"kind": "composite", "spec": bad}),
                          json.dumps({"kind": "composite", "spec": GOOD_COMPOSITE})])
-    res = compile_strategy("combine", client=client, members=_MEMBERS)
+    res = compile_strategy("combine", client=client, plays=_PLAYS)
     assert res.spec == GOOD_COMPOSITE and res.attempts == 2
     assert "zz" in json.dumps(client.requests[1]["messages"])
 
@@ -262,22 +293,49 @@ def test_bad_rules_leg_retries_with_block_prefixed_errors():
                             "params": {"spec": {**GOOD_SPEC, "timeframe": "2h"}}}}}
     client = FakeClient([json.dumps({"kind": "composite", "spec": bad}),
                          json.dumps({"kind": "composite", "spec": GOOD_COMPOSITE})])
-    res = compile_strategy("combine", client=client, members=_MEMBERS)
+    res = compile_strategy("combine", client=client, plays=_PLAYS)
     assert res.spec == GOOD_COMPOSITE and res.attempts == 2
     assert "blocks.b" in json.dumps(client.requests[1]["messages"])
 
 
-def test_composite_without_members_is_rejected_not_crashed():
+def test_composite_without_plays_is_rejected_not_crashed():
     client = FakeClient([json.dumps({"kind": "composite", "spec": GOOD_COMPOSITE})] * 3)
     res = compile_strategy("combine", client=client, max_retries=2)
     assert res.spec is None
     assert "not available" in res.not_expressible
 
 
-def test_members_reach_the_system_prompt():
+def test_plays_reach_the_system_prompt():
     client = FakeClient([json.dumps({"kind": "composite", "spec": GOOD_COMPOSITE})])
-    compile_strategy("combine", client=client, members=_MEMBERS)
+    compile_strategy("combine", client=client, plays=_PLAYS)
     assert "donchian_breakout" in client.requests[0]["system"][0]["text"]
+
+
+def test_a_bespoke_rules_leg_needs_no_card_to_be_accepted():
+    """`rules` is core's own escape hatch, taught unconditionally by the
+    prompt, so the validator has to accept a block naming it whatever cards the
+    caller supplied. `_PLAYS` holds no `rules` key and GOOD_COMPOSITE's second
+    block is one, so a member view built from the cards alone refuses this."""
+    assert "rules" not in _PLAYS
+    client = FakeClient([json.dumps({"kind": "composite", "spec": GOOD_COMPOSITE})])
+    res = compile_strategy("combine", client=client, plays=_PLAYS)
+    assert res.kind == "composite" and res.spec == GOOD_COMPOSITE
+
+
+def test_a_catalog_play_carrying_param_overrides_is_sent_back():
+    """The other half of the block rule, end to end. A card's spec is bound, so
+    a block naming it has no param surface for an override to land on, and an
+    override that was silently ignored would run something other than what the
+    author asked for."""
+    tuned = {**GOOD_COMPOSITE,
+             "blocks": {"a": {"strategy": "donchian_breakout",
+                              "params": {"n": 55}},
+                        "b": {"strategy": "rules", "params": {"spec": GOOD_SPEC}}}}
+    client = FakeClient([json.dumps({"kind": "composite", "spec": tuned}),
+                         json.dumps({"kind": "composite", "spec": GOOD_COMPOSITE})])
+    res = compile_strategy("combine", client=client, plays=_PLAYS)
+    assert res.spec == GOOD_COMPOSITE and res.attempts == 2
+    assert "takes no param overrides" in json.dumps(client.requests[1]["messages"])
 
 
 def test_composite_check_does_not_drop_the_caller_vocabulary():
@@ -298,6 +356,6 @@ def test_composite_check_does_not_drop_the_caller_vocabulary():
                                           "params": {"spec": inner}}},
             "long": {"all": ["a"]}}
 
-    errors, _ = _check("composite", spec, {"rules": RuleStrategy}, house)
+    errors, _ = _check("composite", spec, _PLAYS, house)
 
     assert errors == []

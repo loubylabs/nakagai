@@ -15,6 +15,7 @@ import pandas as pd
 from nakagai.engine.portfolio_types import (
     Signal, StrategyOutputError, StrategyRuntimeError,
 )
+from nakagai.engine import rules_definition, spec_base_digest
 from nakagai.strategies.base import MarketContext, Strategy
 from nakagai.strategies.catalog import catalog_definitions
 from nakagai.strategies.composite import CompositeStrategy, validate_composite_spec
@@ -77,10 +78,40 @@ _LEG_SPEC = {"version": 2, "name": "rsi-leg", "timeframe": "1h",
              "risk": {"stop": {"kind": "atr", "n": 14, "mult": 2.0},
                       "target": {"kind": "rr", "rr": 2.0}}}
 
-# Mirrors how a catalog definition builds a play: empty params, spec bound.
-_Bare = type("_Bare", (RuleStrategy,),
-             {"name": "bare_play", "PARAMS": {}, "DEFAULT_PARAMS": {"spec": _LEG_SPEC}})
-_MEMBERS = {"rules": RuleStrategy, "bare_play": _Bare}
+# The value model, which is the only shape core's own producers hand this
+# function: `catalog_definitions` returns definitions and `composite_definition`
+# takes a mapping of them. The retired shape was a minted RuleStrategy subclass
+# carrying a `PARAMS` class attribute, and pinning THAT here is what let this
+# validator keep reading an attribute no caller on 0.5.0 could supply while the
+# suite stayed green (chrvsd/nakagai#417).
+_MEMBERS = {
+    "rules": rules_definition("rules",
+                              spec_base_digest({"$unbound_adapter": "rules"})),
+    "bare_play": rules_definition("bare_play", spec_base_digest(_LEG_SPEC),
+                                  spec=_LEG_SPEC),
+}
+
+
+def test_a_definition_member_is_judged_rather_than_raising():
+    """The break itself. `members` is read for MEMBERSHIP and nothing else, so
+    a frozen definition answers here exactly as a class used to. Before the
+    fix this raised AttributeError: 'StrategyDefinition' object has no
+    attribute 'PARAMS', which reached the platform as a 500 rather than as a
+    validation answer."""
+    spec = {"blocks": {"a": {"strategy": "bare_play"}}}
+    assert validate_composite_blocks(spec, _MEMBERS) == []
+
+
+def test_membership_is_all_that_is_read_of_a_member():
+    """A bare name set validates identically to a mapping of definitions.
+
+    Stated as a test because it is the contract the NL builder now relies on:
+    `_check` builds its member view from the caller's catalog CARDS plus the
+    bespoke-leg name, and never holds a definition at all."""
+    spec = {"blocks": {"a": {"strategy": "bare_play", "params": {"rsi_n": 10}},
+                       "b": {"strategy": "rules", "params": {"spec": _LEG_SPEC}}}}
+    assert (validate_composite_blocks(spec, frozenset(_MEMBERS))
+            == validate_composite_blocks(spec, _MEMBERS))
 
 
 def test_valid_blocks_produce_no_errors():
@@ -282,7 +313,7 @@ def test_a_composite_builds_members_from_supplied_factories():
 
     def build_bare(params):
         calls.append(params)
-        return _Bare(params)
+        return _MEMBERS["bare_play"].factory(params)
 
     spec = _two_member_spec()
     spec["blocks"] = {"a": {"strategy": "bare_play", "params": {}}}
@@ -303,6 +334,8 @@ def test_only_the_supplied_membership_decides_what_a_block_may_name():
     # A membership that knows only bare_play cannot build this block, and there
     # is no second place a name could resolve from.
     with pytest.raises(ValueError):
-        CompositeStrategy({"spec": spec}, members={"bare_play": _Bare})
-    built = CompositeStrategy({"spec": spec}, members={"rules": RuleStrategy})
+        CompositeStrategy({"spec": spec},
+                          members={"bare_play": _MEMBERS["bare_play"].factory})
+    built = CompositeStrategy({"spec": spec},
+                              members={"rules": _MEMBERS["rules"].factory})
     assert isinstance(built._members["a"], RuleStrategy)

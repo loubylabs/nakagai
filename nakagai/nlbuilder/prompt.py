@@ -3,6 +3,7 @@ vocabulary so it can never drift from the validator that will judge the
 reply."""
 
 import json
+from collections.abc import Mapping
 
 from nakagai.strategies.composite.spec import (
     DEFAULT_WINDOW_BARS, MAX_BLOCKS, WINDOW_BARS_BOUNDS)
@@ -57,11 +58,26 @@ def _bounds(schema: dict) -> str:
         for k, v in schema.items()) or "no args"
 
 
-def _composite_section(members: dict) -> str:
-    plays = "\n".join(
-        f"- {name} [{(cls.DEFAULT_PARAMS.get('spec') or {}).get('timeframe', '?')}]"
-        f" {cls.title or name}: {(cls.description or '').strip()}"
-        for name, cls in sorted(members.items()) if name != "rules")
+def _composite_section(plays: Mapping[str, Mapping]) -> str:
+    """The catalog the model may name as bare blocks, one line per play.
+
+    `plays` is CARD metadata, keyed by the name a block references: the title,
+    the description, and the bound spec a timeframe is read off. That is what
+    `strategies.catalog.load_entries` returns, and it is deliberately not a
+    `StrategyDefinition`, which carries a name, a digest and two functions and
+    nothing a reader could be told about. This read those three fields off each
+    member as class attributes until 0.5.0 stopped minting the subclasses that
+    carried them (chrvsd/nakagai#417).
+
+    A card missing a field is described by what it does have rather than
+    refused: the catalog is content, and a play with no description is worth
+    less to the model than a full card but more than a prompt that would not
+    render at all.
+    """
+    lines = "\n".join(
+        f"- {name} [{(entry.get('spec') or {}).get('timeframe', '?')}]"
+        f" {entry.get('title') or name}: {(entry.get('description') or '').strip()}"
+        for name, entry in sorted(plays.items()) if name != "rules")
     return f"""
 
 # Composites (one strategy built from several)
@@ -82,10 +98,10 @@ leg still needs a valid "risk" block to validate, it is simply unused.
 Prefer legs that share one timeframe.
 
 # Catalog plays (usable as bare blocks; they take no param overrides)
-{plays}"""
+{lines}"""
 
 
-def render_system_prompt(members: dict | None = None, *,
+def render_system_prompt(plays: Mapping[str, Mapping] | None = None, *,
                          vocabulary: Vocabulary | None = None) -> str:
     vocabulary = resolve_vocabulary(vocabulary)
     ind_lines = "\n".join(
@@ -101,8 +117,8 @@ def render_system_prompt(members: dict | None = None, *,
         + (" [needs an intraday spec timeframe]"
            if term.driving_frame_intraday else "")
         for name, term in sorted(vocabulary.primitives.items()))
-    composite = _composite_section(members) if members else ""
-    example = _COMPOSITE_EXAMPLE if members else ""
+    composite = _composite_section(plays) if plays else ""
+    example = _COMPOSITE_EXAMPLE if plays else ""
     return f"""You compile plain-English trading strategy descriptions into
 nakagai strategy JSON. Reply with EXACTLY ONE JSON object and nothing else
 (no prose, no code fences): either
