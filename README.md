@@ -231,6 +231,56 @@ The hosted product at nakag.ai is built on top of this core.
 
 ## Release notes
 
+### 0.6.0
+
+A breaking release, small in size and narrow in blast radius: it closes the last
+two doors in the library that had not moved onto the 0.5.0 value model.
+
+**Breaking: the NL builder takes catalog cards, not member classes.**
+`compile_strategy(..., members=...)` is now `compile_strategy(..., plays=...)`,
+and `render_system_prompt(members)` is `render_system_prompt(plays)`. `plays` is
+the caller's declared world, keyed by the name a composite block may reference,
+whose values are CARD metadata: `title`, `description`, and the bound `spec` a
+timeframe is read off. That is exactly what `strategies.catalog.load_entries`
+returns.
+
+0.5.0 replaced member classes with `StrategyDefinition` values, which carry a
+name, a digest, the functions a replay builds and grades with, and the member
+tree a composite lowers onto. None of that is presentation. `nlbuilder.prompt`
+was still reading
+`DEFAULT_PARAMS`, `title` and `description` off each member, and
+`validate_composite_blocks` was still reading `PARAMS`, so both raised
+`AttributeError` on the very values `catalog_definitions` and
+`composite_definition` produce. The NL builder was uncallable from the value
+model it shipped alongside.
+
+A `rules` key in `plays` declares the bespoke leg, the block kind that writes
+its own RuleSpec inline. The prompt teaches that leg, puts it in the worked
+example, and words its risk sentence from that one value, so a caller who
+registers no such member is told every block names a catalog play rather than
+being taught a syntax it cannot build. The example's block names are read from
+`plays` too, for the same reason, and a caller who declared the leg and no
+catalog gets an example built from two inline legs.
+
+**`validate_composite_blocks` reads `members` for membership alone.** Anything
+answering `in` will do, which is how its structural sibling has always read it.
+The rule the `PARAMS` read stood for is unconditional now: a block that is not
+the bespoke leg carries no params. A CATALOG definition binds its spec at
+construction, so an override has nowhere useful to land, and the two ways it can
+fail are both worse than a refusal here. `params.spec` is refused outright at the
+factory, with `ReplayInputError: this definition already binds its rule spec`, so
+that block would die mid-replay rather than at validation. Any other key is
+carried into the strategy and never read, so the play runs untuned while its
+author believes otherwise. That second half is tracked as chrvsd/nakagai#460.
+
+Known limitation, recorded rather than guessed at. `rules_definition` also
+builds UNBOUND definitions, whose spec legitimately travels in `params`, and the
+bespoke leg is recognized by the literal name `rules`. So an unbound definition
+registered under any other name is refused here even though its own factory
+builds it. The class model refused it identically, because `Strategy.PARAMS` was
+empty on every unbound adapter too. Closing it needs the caller to say which
+members are unbound, which the signature does not carry.
+
 ### 0.5.0
 
 An intentional pre-1.0 breaking release. Every replay entry point 0.4.x offered

@@ -6,6 +6,7 @@ alternative, so a composite handed no membership only ever accepts an empty
 spec and every populated one names its members explicitly.
 """
 
+import json
 from pathlib import Path
 
 import pytest
@@ -13,8 +14,9 @@ import pytest
 import pandas as pd
 
 from nakagai.engine.portfolio_types import (
-    Signal, StrategyOutputError, StrategyRuntimeError,
+    ReplayInputError, Signal, StrategyOutputError, StrategyRuntimeError,
 )
+from nakagai.engine import rules_definition, spec_base_digest
 from nakagai.strategies.base import MarketContext, Strategy
 from nakagai.strategies.catalog import catalog_definitions
 from nakagai.strategies.composite import CompositeStrategy, validate_composite_spec
@@ -77,10 +79,101 @@ _LEG_SPEC = {"version": 2, "name": "rsi-leg", "timeframe": "1h",
              "risk": {"stop": {"kind": "atr", "n": 14, "mult": 2.0},
                       "target": {"kind": "rr", "rr": 2.0}}}
 
-# Mirrors how a catalog definition builds a play: empty params, spec bound.
-_Bare = type("_Bare", (RuleStrategy,),
-             {"name": "bare_play", "PARAMS": {}, "DEFAULT_PARAMS": {"spec": _LEG_SPEC}})
-_MEMBERS = {"rules": RuleStrategy, "bare_play": _Bare}
+# The value model, which is the only shape core's own producers hand this
+# function: `catalog_definitions` returns definitions and `composite_definition`
+# takes a mapping of them. The retired shape was a minted RuleStrategy subclass
+# carrying a `PARAMS` class attribute, and pinning THAT here is what let this
+# validator keep reading an attribute no caller on 0.5.0 could supply while the
+# suite stayed green (chrvsd/nakagai#417).
+_MEMBERS = {
+    "rules": rules_definition("rules",
+                              spec_base_digest({"$unbound_adapter": "rules"})),
+    "bare_play": rules_definition("bare_play", spec_base_digest(_LEG_SPEC),
+                                  spec=_LEG_SPEC),
+}
+
+
+def test_a_definition_member_is_judged_rather_than_raising():
+    """The break itself. `members` is read for MEMBERSHIP and nothing else, so
+    a frozen definition answers here exactly as a class used to. Before the
+    fix this raised AttributeError: 'StrategyDefinition' object has no
+    attribute 'PARAMS', which reached the platform as a 500 rather than as a
+    validation answer."""
+    spec = {"blocks": {"a": {"strategy": "bare_play"}}}
+    assert validate_composite_blocks(spec, _MEMBERS) == []
+
+
+def test_what_a_bound_member_actually_does_with_an_override():
+    """The two failure modes the block rule exists to get ahead of, measured
+    rather than described. Both are worse than the refusal, in different ways,
+    and a docstring claiming only one of them sent a reader looking for the
+    wrong thing (the release-note correction in this branch).
+
+    `params.spec` is refused at the factory, by the contract's own
+    `ReplayInputError` and not merely by something with that message, so a block
+    supplying one dies mid-replay rather than at validation.
+
+    Any other key is carried into `params` and does not reach the spec the
+    strategy decides from. That is the provable half of "silently ignored": the
+    factory does not merge it, so the play a tuned-looking block runs is the
+    untuned one. Whether a future `RuleStrategy` starts consulting such a key is
+    that class's business and chrvsd/nakagai#460's.
+    """
+    bound = catalog_definitions(SPECS, core_vocabulary)[0]
+    with pytest.raises(ReplayInputError, match="already binds its rule spec"):
+        bound.factory({"spec": {"version": 2}})
+
+    plain = bound.factory({})
+    # EVERY field the bound spec actually has, read off the spec rather than
+    # listed here, plus one name it does not. A merge is likeliest to be written
+    # for a field the spec already carries, and a hand-written list of probes is
+    # outrun by the next field added to the grammar; deriving them keeps this
+    # exhaustive over whatever a catalog spec holds.
+    probes = {key: f"probe-{key}" for key in plain.spec}
+    probes["made_up"] = 99
+    assert len(probes) > 3, probes           # the catalog spec is not degenerate
+    for key, value in sorted(probes.items()):
+        built = bound.factory({key: value})
+        # the VALUE, not merely the key: a factory that kept the key and
+        # replaced what it held would satisfy a presence check.
+        assert built.params[key] == value, key
+        assert built.spec == plain.spec, key            # and the spec is untouched
+    assert "made_up" not in json.dumps(plain.spec)
+
+
+def test_an_unbound_member_under_another_name_is_refused():
+    """A KNOWN limitation, pinned so it is found by reading rather than by
+    debugging. The bespoke leg is recognized by the literal name `rules`, so an
+    unbound definition registered as anything else is refused for carrying
+    params even though its spec legitimately travels there and its own factory
+    builds it.
+
+    Not a regression: the class model refused it identically, because
+    `Strategy.PARAMS` is empty on an unbound adapter too. Closing it needs the
+    caller to say which members are unbound, which this signature does not
+    carry."""
+    unbound = rules_definition("private_rules",
+                               spec_base_digest({"$unbound_adapter": "private"}))
+    spec = {"blocks": {"a": {"strategy": "private_rules",
+                             "params": {"spec": _LEG_SPEC}}}}
+    errs = validate_composite_blocks(spec, {"private_rules": unbound})
+    assert errs == ["blocks.a: private_rules is a built-in spec and takes no "
+                    "param overrides; use a rules block for a tuned leg"]
+    # The half that makes it a limitation rather than a rule: the definition it
+    # just refused builds that exact block without complaint.
+    assert unbound.factory({"spec": _LEG_SPEC}) is not None
+
+
+def test_membership_is_all_that_is_read_of_a_member():
+    """A bare name set validates identically to a mapping of definitions.
+
+    Stated as a test because it is the contract the NL builder now relies on:
+    `_check` hands its caller's catalog CARDS straight to both validators, and
+    never holds a definition at all."""
+    spec = {"blocks": {"a": {"strategy": "bare_play", "params": {"rsi_n": 10}},
+                       "b": {"strategy": "rules", "params": {"spec": _LEG_SPEC}}}}
+    assert (validate_composite_blocks(spec, frozenset(_MEMBERS))
+            == validate_composite_blocks(spec, _MEMBERS))
 
 
 def test_valid_blocks_produce_no_errors():
@@ -282,7 +375,7 @@ def test_a_composite_builds_members_from_supplied_factories():
 
     def build_bare(params):
         calls.append(params)
-        return _Bare(params)
+        return _MEMBERS["bare_play"].factory(params)
 
     spec = _two_member_spec()
     spec["blocks"] = {"a": {"strategy": "bare_play", "params": {}}}
@@ -303,6 +396,8 @@ def test_only_the_supplied_membership_decides_what_a_block_may_name():
     # A membership that knows only bare_play cannot build this block, and there
     # is no second place a name could resolve from.
     with pytest.raises(ValueError):
-        CompositeStrategy({"spec": spec}, members={"bare_play": _Bare})
-    built = CompositeStrategy({"spec": spec}, members={"rules": RuleStrategy})
+        CompositeStrategy({"spec": spec},
+                          members={"bare_play": _MEMBERS["bare_play"].factory})
+    built = CompositeStrategy({"spec": spec},
+                              members={"rules": _MEMBERS["rules"].factory})
     assert isinstance(built._members["a"], RuleStrategy)
