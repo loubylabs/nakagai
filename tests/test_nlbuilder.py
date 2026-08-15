@@ -1,4 +1,5 @@
 import json
+import re
 from pathlib import Path
 
 import pandas as pd
@@ -64,8 +65,8 @@ _CAT_SPEC = {"version": 2, "name": "donch", "timeframe": "1d",
 # Catalog CARD metadata, the shape `load_entries` hands back and the only shape
 # that carries what this prompt needs: a frozen `StrategyDefinition` has no
 # title, no description, and no readable spec to take a timeframe off. `rules`
-# is deliberately absent. The bespoke-leg escape hatch is core's own and is
-# taught unconditionally, so it is not a card a caller supplies.
+# is deliberately absent here, so this is a caller that registered no bespoke
+# leg, which is what core's own `catalog_definitions` produces.
 _CARDS = {"donchian_breakout": {
     "title": "Donchian channel breakout",
     "description": "Buys a break of the upper Donchian channel.",
@@ -123,6 +124,31 @@ def test_the_bespoke_leg_is_never_listed_as_a_catalog_play():
     assert "- donchian_breakout [1d]" in p
 
 
+def test_the_worked_example_names_only_plays_the_caller_declared():
+    """An example is the part of a prompt a model copies most literally, so a
+    name invented here is a block the validator refuses on every retry. The
+    example used to hard-code two plays core's own shipped catalog does not
+    contain, which is the state this asserts against."""
+    plays = load_entries(SPECS, core_vocabulary)
+    p = render_system_prompt(plays)
+    example = p.split("# Examples", 1)[1]
+    named = set(re.findall(r'"strategy": "([^"]+)"', example))
+    assert named, "the composite example has to name something"
+    assert named <= set(plays) | {"rules"}, named
+    # and it is genuinely built from this caller's catalog, not a fixed pair
+    assert named & set(plays)
+
+
+def test_the_worked_example_is_validated_by_the_checker_it_teaches():
+    """The strongest form of the same guard: run the example through the
+    validator the reply will meet."""
+    plays = load_entries(SPECS, core_vocabulary)
+    example = render_system_prompt(plays).split("# Examples", 1)[1]
+    reply = json.loads(example[example.rindex("\n{"):].strip())
+    errors, _ = _check("composite", reply["spec"], plays, core_vocabulary())
+    assert errors == []
+
+
 def test_the_bespoke_leg_is_taught_only_when_the_caller_declares_it():
     """Teaching a block kind the caller cannot build is the defect that made
     the compiler return unbuildable composites: core registered `rules` for
@@ -132,10 +158,27 @@ def test_the_bespoke_leg_is_taught_only_when_the_caller_declares_it():
     assert '{"strategy": "rules", "params": {"spec": {<RuleSpec v2>}}}' in with_leg
     assert '"strategy": "rules"' in with_leg          # and the worked example
 
+    # The worked example moves with the grammar, asserted on text only the
+    # three-block form carries. Asserting '"strategy": "rules"' alone cannot
+    # fail here: the grammar line above already contains that substring, so it
+    # would pass with the example collapsed to the catalog-only form.
+    assert '"strategy": "rules", "params"' in with_leg.split("# Examples", 1)[1]
+
     without = render_system_prompt(_CARDS)
     assert '{"strategy": "rules"' not in without
+    assert "rules" not in without.split("# Examples", 1)[1]
     assert "there is no way to write a leg inline here" in without
     assert "# Composites" in without                  # composites still offered
+
+
+def test_the_prompt_and_the_validator_spell_the_bespoke_leg_once():
+    """One protocol name, one declaration. Renaming it in the prompt alone
+    would teach a grammar the validator refuses, and the refusal would advise
+    the model to use a word the prompt no longer contains."""
+    from nakagai.nlbuilder import prompt as prompt_module
+    from nakagai.strategies.composite import spec as spec_module
+
+    assert prompt_module.BESPOKE_LEG is spec_module.BESPOKE_LEG
 
 
 def test_a_card_missing_fields_still_renders_a_line():

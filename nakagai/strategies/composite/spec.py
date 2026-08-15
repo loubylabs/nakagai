@@ -30,6 +30,19 @@ MAX_BLOCKS = 8
 WINDOW_BARS_BOUNDS = (1, 20)
 DEFAULT_WINDOW_BARS = 4
 
+# The member name that means "this block writes its own RuleSpec inline",
+# rather than naming a member whose body is already bound.
+#
+# It lives HERE, with the validator that acts on it, because this module owns
+# the protocol: `validate_composite_blocks` decides what a block naming it must
+# carry. The NL builder's prompt imports it rather than spelling it again, so
+# renaming it moves the grammar the model is taught and the rule the reply is
+# judged by together. Two spellings of one protocol name drift silently: the
+# prompt would teach one word while the validator refused everything that was
+# not the other, and every reply would burn a retry on advice naming a word the
+# prompt no longer used.
+BESPOKE_LEG = "rules"
+
 
 def _check_tree(tree, blocks: dict, path: str, errs: list[str]) -> None:
     if not isinstance(tree, dict) or len(tree) != 1 or next(iter(tree)) not in ("all", "any"):
@@ -126,7 +139,7 @@ def validate_composite_blocks(spec: dict, members: Container,
 
     KNOWN LIMITATION, pinned by
     tests/test_composite.py::test_an_unbound_member_under_another_name_is_refused.
-    The bespoke leg is recognized by the literal name `rules`, so an UNBOUND
+    The bespoke leg is recognized by `BESPOKE_LEG`, so an UNBOUND
     definition registered under any other name is refused here even though its
     spec legitimately travels in `params` and its factory would build it. The
     class model refused it identically, for the same reason: `Strategy.PARAMS`
@@ -149,7 +162,7 @@ def validate_composite_blocks(spec: dict, members: Container,
         params = block.get("params", {})
         if name not in members or not isinstance(params, dict):
             continue
-        if name == "rules":
+        if name == BESPOKE_LEG:
             inner = params.get("spec")
             if not isinstance(inner, dict):
                 errs.append(f"blocks.{bid}: rules blocks need params.spec "

@@ -129,8 +129,8 @@ def test_membership_is_all_that_is_read_of_a_member():
     """A bare name set validates identically to a mapping of definitions.
 
     Stated as a test because it is the contract the NL builder now relies on:
-    `_check` builds its member view from the caller's catalog CARDS plus the
-    bespoke-leg name, and never holds a definition at all."""
+    `_check` hands its caller's catalog CARDS straight to both validators, and
+    never holds a definition at all."""
     spec = {"blocks": {"a": {"strategy": "bare_play", "params": {"rsi_n": 10}},
                        "b": {"strategy": "rules", "params": {"spec": _LEG_SPEC}}}}
     assert (validate_composite_blocks(spec, frozenset(_MEMBERS))

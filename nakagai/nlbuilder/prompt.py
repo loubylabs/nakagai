@@ -6,7 +6,7 @@ import json
 from collections.abc import Mapping
 
 from nakagai.strategies.composite.spec import (
-    DEFAULT_WINDOW_BARS, MAX_BLOCKS, WINDOW_BARS_BOUNDS)
+    BESPOKE_LEG, DEFAULT_WINDOW_BARS, MAX_BLOCKS, WINDOW_BARS_BOUNDS)
 from nakagai.strategies.rules import spec as g
 from nakagai.strategies.rules.vocabulary import (
     Vocabulary, is_condition_rule, resolve_vocabulary)
@@ -33,38 +33,11 @@ Description: "trade based on my broker's news sentiment feed"
 {"not_expressible": "the grammar has no source for external news sentiment data, only price/volume series, indicators, and primitives"}\
 """
 
-_COMPOSITE_EXAMPLE = """\
-
-Description: "combine the donchian breakout with the adx pullback, both have to fire, plus my own leg that only takes it when rsi 14 is under 40"
-{"kind": "composite", "spec": {"version": 1, "name": "donch-adx-rsi-confluence",
-"blocks": {"a": {"strategy": "donchian_breakout"}, "b": {"strategy": "adx_pullback"},
-"c": {"strategy": "rules", "params": {"spec": {"version": 2, "name": "rsi-under-40", "timeframe": "1d",
-"long": {"all": [{"lhs": {"ind": "rsi", "n": 14}, "op": "<", "rhs": 40}]},
-"risk": {"stop": {"kind": "atr", "n": 14, "mult": 2.0}, "target": {"kind": "rr", "rr": 2.0}}}}}},
-"long": {"all": ["a", "b", "c"]}, "window_bars": 4,
-"risk": {"stop": {"kind": "atr", "n": 14, "mult": 2.0}, "target": {"kind": "rr", "rr": 2.0}}},
-"clarifications": ["used a 4 bar vote window and the default ATR stop and 2R target"]}\
-"""
-
-# The same worked example for a caller that declared no bespoke leg. It has to
-# be its own text rather than the one above with a block deleted: an example
-# using a block kind the prompt just said is unavailable teaches the model to
-# reach for it, and every such reply costs a retry to refuse.
-_CATALOG_ONLY_EXAMPLE = """\
-
-Description: "combine the donchian breakout with the adx pullback, both have to fire"
-{"kind": "composite", "spec": {"version": 1, "name": "donch-adx-confluence",
-"blocks": {"a": {"strategy": "donchian_breakout"}, "b": {"strategy": "adx_pullback"}},
-"long": {"all": ["a", "b"]}, "window_bars": 4,
-"risk": {"stop": {"kind": "atr", "n": 14, "mult": 2.0}, "target": {"kind": "rr", "rr": 2.0}}},
-"clarifications": ["used a 4 bar vote window and the default ATR stop and 2R target"]}\
-"""
-
-# The name a block uses to write its own RuleSpec inline instead of naming a
-# catalog play. It is a member like any other, declared by the caller in
-# `plays`, and it is NOT a catalog play: it has no card to render, so the
-# listing below skips it and the grammar above describes it instead.
-BESPOKE_LEG = "rules"
+# The inline leg the composite example writes when the caller declared one.
+_EXAMPLE_LEG = {
+    "version": 2, "name": "rsi-under-40", "timeframe": "1d",
+    "long": {"all": [{"lhs": {"ind": "rsi", "n": 14}, "op": "<", "rhs": 40}]},
+}
 
 
 def _bounds(schema: dict) -> str:
@@ -76,6 +49,48 @@ def _bounds(schema: dict) -> str:
     return ", ".join(
         f"{k}={{lhs,op,rhs}}" if is_condition_rule(v) else f"{k}={v}"
         for k, v in schema.items()) or "no args"
+
+
+def _worked_example(plays: Mapping[str, Mapping]) -> str:
+    """One composite, written over plays this caller actually declared.
+
+    Every strategy name is READ from `plays` rather than written here. The
+    example used to name two plays hard-coded into this module, and core's own
+    shipped catalog contains neither, so a caller on it got a prompt teaching
+    `donchian_breakout` and `adx_pullback` beside a catalog listing three other
+    plays, and a validator answering `unknown strategy` to both. An example is
+    the part of a prompt a model copies most literally, so it is the last place
+    a name should be invented.
+
+    The inline leg appears on the same condition the grammar states it, because
+    an example reaching for a block kind the prompt just called unavailable
+    teaches the model to spend retries on it.
+
+    Empty when the caller declared no catalog play at all: there is nothing to
+    combine, and a one-block composite is not worth teaching.
+    """
+    names = [name for name in sorted(plays) if name != BESPOKE_LEG]
+    if not names:
+        return ""
+    blocks: dict = {chr(ord("a") + i): {"strategy": name}
+                    for i, name in enumerate(names[:2])}
+    described = " with ".join(names[:2])
+    if BESPOKE_LEG in plays:
+        blocks[chr(ord("a") + len(blocks))] = {
+            "strategy": BESPOKE_LEG,
+            "params": {"spec": {**_EXAMPLE_LEG, "risk": g.DEFAULT_RISK}}}
+        described += (", plus my own leg that only takes it when rsi 14 is "
+                      "under 40")
+    reply = {
+        "kind": "composite",
+        "spec": {"version": 1, "name": "confluence", "blocks": blocks,
+                 "long": {"all": sorted(blocks)},
+                 "window_bars": DEFAULT_WINDOW_BARS, "risk": g.DEFAULT_RISK},
+        "clarifications": [f"used a {DEFAULT_WINDOW_BARS} bar vote window and "
+                           "the default stop and target"],
+    }
+    return (f'\n\nDescription: "combine {described}, all of them have to fire"'
+            f"\n{json.dumps(reply)}")
 
 
 def _composite_section(plays: Mapping[str, Mapping]) -> str:
@@ -156,9 +171,7 @@ def render_system_prompt(plays: Mapping[str, Mapping] | None = None, *,
            if term.driving_frame_intraday else "")
         for name, term in sorted(vocabulary.primitives.items()))
     composite = _composite_section(plays) if plays else ""
-    example = ("" if not plays else
-               _COMPOSITE_EXAMPLE if BESPOKE_LEG in plays else
-               _CATALOG_ONLY_EXAMPLE)
+    example = _worked_example(plays) if plays else ""
     return f"""You compile plain-English trading strategy descriptions into
 nakagai strategy JSON. Reply with EXACTLY ONE JSON object and nothing else
 (no prose, no code fences): either
