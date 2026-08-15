@@ -169,6 +169,11 @@ def test_the_bespoke_leg_is_taught_only_when_the_caller_declares_it():
     assert "rules" not in without.split("# Examples", 1)[1]
     assert "there is no way to write a leg inline here" in without
     assert "# Composites" in without                  # composites still offered
+    # The risk sentence is the third thing that moves, and it was the one with
+    # no guard at all: leaving it on the bespoke-leg wording tells the model a
+    # rules leg exists three lines after saying one does not.
+    assert "a rules" not in without
+    assert "a rules" in with_leg
 
 
 def test_the_prompt_and_the_validator_spell_the_bespoke_leg_once():
@@ -179,6 +184,26 @@ def test_the_prompt_and_the_validator_spell_the_bespoke_leg_once():
     from nakagai.strategies.composite import spec as spec_module
 
     assert prompt_module.BESPOKE_LEG is spec_module.BESPOKE_LEG
+
+
+def test_the_bespoke_leg_declaration_is_a_key_and_never_a_value():
+    """What a caller must supply to declare the leg, pinned.
+
+    Core ships no producer that emits a `plays` mapping containing `rules`:
+    `load_entries` returns one entry per spec file. The platform assembles it
+    (`nakagai_platform.registry.builder_plays`), so core's own fixtures are
+    hand-written, which is the fixture-shape hazard that let #417 hide.
+
+    What makes that safe is that the VALUE is never read: the listing filters
+    the key out and both validators read membership alone. So an empty dict, a
+    full card, and anything else all render one prompt, and a platform that
+    supplies a different shape than these fixtures cannot break."""
+    shapes = [{}, {"title": "t", "description": "d", "spec": _CAT_SPEC}, None]
+    rendered = {render_system_prompt({**_CARDS, "rules": shape})
+                for shape in shapes}
+    assert len(rendered) == 1
+    # and it is genuinely the declared-leg prompt, not the undeclared one
+    assert "there is no way to write a leg inline here" not in rendered.pop()
 
 
 def test_a_card_missing_fields_still_renders_a_line():
@@ -427,7 +452,11 @@ def test_an_unknown_play_is_sent_back_by_name():
                          json.dumps({"kind": "composite", "spec": GOOD_COMPOSITE})])
     res = compile_strategy("combine", client=client, plays=_PLAYS)
     assert res.spec == GOOD_COMPOSITE and res.attempts == 2
-    assert "golden_cross" in json.dumps(client.requests[1]["messages"])
+    # The USER turn, which carries the validator's errors. Asserting over the
+    # whole message list cannot fail: it also holds the assistant echo of the
+    # model's own reply, which contains the invented name by construction.
+    retry = [m for m in client.requests[1]["messages"] if m["role"] == "user"][-1]
+    assert "unknown strategy 'golden_cross'" in retry["content"]
 
 
 def test_a_catalog_play_carrying_param_overrides_is_sent_back():
