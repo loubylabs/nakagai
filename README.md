@@ -231,6 +231,45 @@ The hosted product at nakag.ai is built on top of this core.
 
 ## Release notes
 
+### 0.6.0
+
+A breaking release, small in size and narrow in blast radius: it closes the last
+two doors in the library that had not moved onto the 0.5.0 value model.
+
+**Breaking: the NL builder takes catalog cards, not member classes.**
+`compile_strategy(..., members=...)` is now `compile_strategy(..., plays=...)`,
+and `render_system_prompt(members)` is `render_system_prompt(plays)`. `plays` is
+the caller's declared world, keyed by the name a composite block may reference,
+whose values are CARD metadata: `title`, `description`, and the bound `spec` a
+timeframe is read off. That is exactly what `strategies.catalog.load_entries`
+returns.
+
+0.5.0 replaced member classes with `StrategyDefinition` values, which carry a
+name, a digest and two functions. `nlbuilder.prompt` was still reading
+`DEFAULT_PARAMS`, `title` and `description` off each member, and
+`validate_composite_blocks` was still reading `PARAMS`, so both raised
+`AttributeError` on the very values `catalog_definitions` and
+`composite_definition` produce. The NL builder was uncallable from the value
+model it shipped alongside.
+
+A `rules` key in `plays` declares the bespoke leg, the block kind that writes
+its own RuleSpec inline. The prompt teaches that leg, writes its worked example,
+and words its risk sentence from that one value, so a caller who registers no
+such member is told every block names a catalog play rather than being taught a
+syntax it cannot build. The worked example's block names are read from `plays`
+too, for the same reason.
+
+**`validate_composite_blocks` reads `members` for membership alone.** Anything
+answering `in` will do, which is how its structural sibling has always read it.
+The rule the `PARAMS` read stood for is unconditional under the value model: a
+definition binds its spec at construction, so a block that is not the bespoke
+leg has no param surface for an override to land on.
+
+Known limitation, recorded rather than guessed at: the bespoke leg is recognized
+by the name `rules`, so an UNBOUND definition registered under any other name is
+refused for carrying params even though its factory would build it. The class
+model refused it identically.
+
 ### 0.5.0
 
 An intentional pre-1.0 breaking release. Every replay entry point 0.4.x offered
