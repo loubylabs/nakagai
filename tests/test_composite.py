@@ -124,15 +124,20 @@ def test_what_a_bound_member_actually_does_with_an_override():
         bound.factory({"spec": {"version": 2}})
 
     plain = bound.factory({})
-    # Keys that COLLIDE with real spec fields as well as an invented one: a
-    # merge is far more likely to be written for a name the spec already has,
-    # and a guard that probes only an invented key stays green through exactly
-    # that regression.
-    for key, value in (("made_up", 99), ("name", "mutated-play"),
-                       ("timeframe", "4h"), ("risk", {"stop": None})):
+    # EVERY field the bound spec actually has, read off the spec rather than
+    # listed here, plus one name it does not. A merge is likeliest to be written
+    # for a field the spec already carries, and a hand-written list of probes is
+    # outrun by the next field added to the grammar; deriving them keeps this
+    # exhaustive over whatever a catalog spec holds.
+    probes = {key: f"probe-{key}" for key in plain.spec}
+    probes["made_up"] = 99
+    assert len(probes) > 3, probes           # the catalog spec is not degenerate
+    for key, value in sorted(probes.items()):
         built = bound.factory({key: value})
-        assert key in built.params, key                 # carried
-        assert built.spec == plain.spec, key            # and not merged in
+        # the VALUE, not merely the key: a factory that kept the key and
+        # replaced what it held would satisfy a presence check.
+        assert built.params[key] == value, key
+        assert built.spec == plain.spec, key            # and the spec is untouched
     assert "made_up" not in json.dumps(plain.spec)
 
 
