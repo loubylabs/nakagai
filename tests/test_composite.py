@@ -123,11 +123,17 @@ def test_what_a_bound_member_actually_does_with_an_override():
     with pytest.raises(ReplayInputError, match="already binds its rule spec"):
         bound.factory({"spec": {"version": 2}})
 
-    built = bound.factory({"made_up": 99})
     plain = bound.factory({})
-    assert "made_up" in built.params                    # carried
-    assert built.spec == plain.spec                     # and not merged in
-    assert "made_up" not in json.dumps(built.spec)      # nor anywhere inside it
+    # Keys that COLLIDE with real spec fields as well as an invented one: a
+    # merge is far more likely to be written for a name the spec already has,
+    # and a guard that probes only an invented key stays green through exactly
+    # that regression.
+    for key, value in (("made_up", 99), ("name", "mutated-play"),
+                       ("timeframe", "4h"), ("risk", {"stop": None})):
+        built = bound.factory({key: value})
+        assert key in built.params, key                 # carried
+        assert built.spec == plain.spec, key            # and not merged in
+    assert "made_up" not in json.dumps(plain.spec)
 
 
 def test_an_unbound_member_under_another_name_is_refused():
