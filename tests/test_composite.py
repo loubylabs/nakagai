@@ -6,6 +6,7 @@ alternative, so a composite handed no membership only ever accepts an empty
 spec and every populated one names its members explicitly.
 """
 
+import json
 from pathlib import Path
 
 import pytest
@@ -13,7 +14,7 @@ import pytest
 import pandas as pd
 
 from nakagai.engine.portfolio_types import (
-    Signal, StrategyOutputError, StrategyRuntimeError,
+    ReplayInputError, Signal, StrategyOutputError, StrategyRuntimeError,
 )
 from nakagai.engine import rules_definition, spec_base_digest
 from nakagai.strategies.base import MarketContext, Strategy
@@ -108,15 +109,25 @@ def test_what_a_bound_member_actually_does_with_an_override():
     and a docstring claiming only one of them sent a reader looking for the
     wrong thing (the release-note correction in this branch).
 
-    `params.spec` is refused at the factory, so that block dies mid-replay
-    rather than at validation. Any other key is carried unread, so the play runs
-    untuned. The second half is chrvsd/nakagai#460."""
+    `params.spec` is refused at the factory, by the contract's own
+    `ReplayInputError` and not merely by something with that message, so a block
+    supplying one dies mid-replay rather than at validation.
+
+    Any other key is carried into `params` and does not reach the spec the
+    strategy decides from. That is the provable half of "silently ignored": the
+    factory does not merge it, so the play a tuned-looking block runs is the
+    untuned one. Whether a future `RuleStrategy` starts consulting such a key is
+    that class's business and chrvsd/nakagai#460's.
+    """
     bound = catalog_definitions(SPECS, core_vocabulary)[0]
-    with pytest.raises(Exception, match="already binds its rule spec"):
+    with pytest.raises(ReplayInputError, match="already binds its rule spec"):
         bound.factory({"spec": {"version": 2}})
+
     built = bound.factory({"made_up": 99})
-    assert "made_up" in built.params          # carried
-    assert built.spec.get("name") == bound.name   # and never read
+    plain = bound.factory({})
+    assert "made_up" in built.params                    # carried
+    assert built.spec == plain.spec                     # and not merged in
+    assert "made_up" not in json.dumps(built.spec)      # nor anywhere inside it
 
 
 def test_an_unbound_member_under_another_name_is_refused():
