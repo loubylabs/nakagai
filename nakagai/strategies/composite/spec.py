@@ -20,7 +20,7 @@ owns its own risk block (members' stops/targets are ignored).
     }
 """
 
-from collections.abc import Container
+from collections.abc import Container, Mapping
 
 from nakagai.strategies.rules.spec import (
     DEFAULT_RISK, risk_text, validate_risk, validate_spec)
@@ -44,7 +44,19 @@ DEFAULT_WINDOW_BARS = 4
 BESPOKE_LEG = "rules"
 
 
-def _check_tree(tree, blocks: dict, path: str, errs: list[str]) -> None:
+# A vote tree over at most MAX_BLOCKS ids needs nothing like this much nesting;
+# the bound exists so a tree that is absurd rather than merely wrong is REFUSED
+# instead of recursing until the interpreter stops it. A RecursionError out of
+# a validator is the same defect as any other raise: it reached the NL retry
+# loop as a dead request rather than as an error the model could act on.
+MAX_TREE_DEPTH = 32
+
+
+def _check_tree(tree, blocks: dict, path: str, errs: list[str],
+                depth: int = 0) -> None:
+    if depth > MAX_TREE_DEPTH:
+        errs.append(f"{path}: vote trees nest at most {MAX_TREE_DEPTH} deep")
+        return
     if not isinstance(tree, dict) or len(tree) != 1 or next(iter(tree)) not in ("all", "any"):
         errs.append(f'{path}: expected {{"all": [...]}} or {{"any": [...]}}')
         return
@@ -55,7 +67,7 @@ def _check_tree(tree, blocks: dict, path: str, errs: list[str]) -> None:
     for i, item in enumerate(items):
         p = f"{path}.{key}[{i}]"
         if isinstance(item, dict):
-            _check_tree(item, blocks, p, errs)
+            _check_tree(item, blocks, p, errs, depth + 1)
         elif isinstance(item, str):
             if item not in blocks:
                 errs.append(f"{p}: unknown block {item!r}")
@@ -95,7 +107,14 @@ def validate_composite_spec(spec, members: Container,
         name = block.get("strategy")
         if name == "composite":
             errs.append(f"{p}: composites cannot nest composites")
-        elif name not in members:
+        elif not isinstance(name, str) or name not in members:
+            # The isinstance guard is what keeps this a VALIDATOR. `name` is
+            # whatever arrived in the JSON, and a list or an object is
+            # unhashable, so testing membership on it raises TypeError out of a
+            # function whose whole contract is to return errors. The NL
+            # builder's retry loop is the caller that cannot survive it: a
+            # malformed reply became a 503 rather than the retry the model
+            # could have acted on.
             errs.append(f"{p}: unknown strategy {name!r}")
         if not isinstance(block.get("params", {}), dict):
             errs.append(f"{p}: params must be an object")
@@ -157,12 +176,23 @@ def validate_composite_blocks(spec: dict, members: Container,
     composite actually runs."""
     vocabulary = resolve_vocabulary(vocabulary)
     errs: list[str] = []
-    for bid, block in (spec.get("blocks") or {}).items():
+    # Shape first, and silently: `validate_composite_spec` reports a spec that
+    # is not an object and a `blocks` that is not one, so reporting it twice
+    # would double every such message. What matters here is that neither shape
+    # can raise out of a function whose contract is to return errors.
+    if not isinstance(spec, dict):
+        return errs
+    blocks = spec.get("blocks")
+    if not isinstance(blocks, dict):
+        return errs
+    for bid, block in blocks.items():
         if not isinstance(block, dict) or "config" in block:
             continue
         name = block.get("strategy")
         params = block.get("params", {})
-        if name not in members or not isinstance(params, dict):
+        if not isinstance(name, str) or name not in members:
+            continue          # unhashable or unknown: reported by the sibling
+        if not isinstance(params, dict):
             continue
         if name == BESPOKE_LEG:
             inner = params.get("spec")
@@ -186,15 +216,24 @@ def resolve_config_refs(spec: dict, configs: dict) -> tuple[dict, list[str]]:
     was; later edits don't silently change what an old run meant."""
     if not isinstance(spec, dict) or not isinstance(spec.get("blocks"), dict):
         return spec, []  # structural validation reports the real problem
+    if not isinstance(configs, Mapping):
+        return spec, ["configs must be a mapping of saved strategy configs"]
     errs: list[str] = []
     blocks: dict = {}
     for bid, block in spec["blocks"].items():
         if not (isinstance(block, dict) and "config" in block):
             blocks[bid] = block
             continue
-        saved = configs.get(block["config"])
+        ref = block["config"]
+        saved = configs.get(ref) if isinstance(ref, str) else None
+        # A saved config is a caller value too, and this inlines it into a spec
+        # the engine will run, so the shape it must have is checked before it is
+        # indexed rather than after it fails.
+        if not isinstance(saved, dict) or not isinstance(saved.get("params"), dict) \
+                or not isinstance(saved.get("strategy"), str):
+            saved = None
         if saved is None:
-            errs.append(f"blocks.{bid}: no saved strategy config {block['config']!r}")
+            errs.append(f"blocks.{bid}: no saved strategy config {ref!r}")
             blocks[bid] = block
         elif saved["strategy"] == "composite":
             errs.append(f"blocks.{bid}: composites cannot nest composites")
@@ -230,7 +269,11 @@ def _tree_text(tree, labels: dict) -> str:
 
 def describe_composite_spec(spec: dict) -> str:
     """Plain-English restatement: the trust step the composer shows live."""
-    blocks = spec.get("blocks", {})
+    if not isinstance(spec, dict):
+        return "Not a composite spec."
+    blocks = spec.get("blocks")
+    if not isinstance(blocks, dict):
+        blocks = {}
     labels = {bid: (b.get("config") or b.get("strategy") or bid)
               for bid, b in blocks.items() if isinstance(b, dict)}
     lines = [f'Composite "{spec.get("name", "unnamed")}" of {len(blocks)} blocks.']

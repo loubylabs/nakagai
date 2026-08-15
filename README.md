@@ -231,6 +231,72 @@ The hosted product at nakag.ai is built on top of this core.
 
 ## Release notes
 
+### 0.6.1
+
+A validator that raises is not a validator. `validate_composite_spec`,
+`validate_composite_blocks` and `resolve_config_refs` each looked a value up in
+a caller mapping without checking it was a name first, and `strategy` and
+`config` are whatever arrived in the JSON. A list or an object is unhashable, so
+`name not in members` raised `TypeError: unhashable type: 'list'` out of
+functions whose whole contract is to return a list of errors.
+
+The NL builder's retry loop is the caller that could not survive it. Its entire
+purpose is to hand the model its own validator's errors and ask again, and a
+model can emit anything, which is why the loop exists. Downstream, a malformed
+reply reached the HTTP boundary as a 503 rather than as the retry the model
+would have acted on.
+
+The fix is the whole class, not the three sites the first pass found. Every
+mapping and set in the rule grammar is keyed by string, so membership over a
+caller value goes through one `names()` helper that answers False for a
+non-string rather than raising: timeframes, sources, math ops, comparison ops,
+indicator names, primitive names, and the session-alignment walk. The composite
+block layer checks the shape of `spec` and `blocks` before iterating.
+`resolve_config_refs` checks the shape of the saved config it is about to
+inline, not just the name it looked it up by. And `nlbuilder`'s `_parse` now
+requires one JSON OBJECT: `json.loads` happily returns a list for `[]`, and the
+loop read `.get` off it.
+
+A value that names nothing is reported as unknown, which is what it is, so the
+model gets an error it can act on rather than a dead request. `_parse` also
+catches a bare `ValueError`, not only `JSONDecodeError`: `json.loads` raises the
+former for an integer past the interpreter's digit limit, and a reply the model
+could have corrected was escaping the loop.
+
+Three more the retry loop could not survive, all reached end to end through
+`compile_strategy` rather than by calling internals:
+
+- A reply nested thousands of levels deep raises `RecursionError` inside the
+  JSON decoder, which is not a `ValueError`.
+- An absurdly nested vote tree recursed `_check_tree` to the interpreter's
+  limit. There is a bound either way; the choice is between a stated one and
+  the interpreter's, so `MAX_TREE_DEPTH` is 32 and the builder prompt states it
+  beside `MAX_BLOCKS`. A validator stricter than its own prompt burns retries on
+  a rule nobody stated.
+- A number past the float range validated CLEAN and then raised `OverflowError`
+  in the readback, one step after the loop stopped watching. The RENDERER is
+  what could not cope, so that is what changed: `_expr_text` falls back to an
+  exact `str`. Refusing the number at validation was the first repair and it
+  changed the verdict on a spec the grammar accepts, which is not this
+  release's business.
+
+One more, and it is the one that mattered most for an injecting caller.
+`_ONE_BAR_SESSION` explains core's own primitives, and the flag it explains,
+`Term.driving_frame_intraday`, is settable by anyone injecting a vocabulary. The
+validator runs with the caller's terms in it, so the subscript raised `KeyError`
+on a term the prompt had just taught the model. It falls back to the flag's own
+meaning, which is true of every term that sets it.
+
+The two describers are NOT made total, and that is deliberate. Their contract is
+a spec that validated, every shipped path validates before describing, and
+asserting totality they do not claim would be an overclaim of the same kind this
+release exists to remove. What they do guarantee is a top-level shape check and
+a name the grammar does not define, since both can reach them without the
+validator having seen them.
+
+Two generative tests keep the class closed rather than the cases: every awkward
+JSON value crossed with every site that reads one.
+
 ### 0.6.0
 
 A breaking release, small in size and narrow in blast radius: it closes the last

@@ -461,6 +461,21 @@ def test_a_bespoke_leg_the_caller_never_declared_is_sent_back():
     assert "unknown strategy 'rules'" in res.not_expressible
 
 
+def test_a_malformed_strategy_name_becomes_a_retry_not_a_crash():
+    """End to end, over the loop that actually depends on it. The model can emit
+    anything, which is why the retry loop exists at all; a reply whose
+    `strategy` is a list used to raise TypeError out of validation, and the
+    platform turned that into a 503 rather than sending the model back."""
+    malformed = {**GOOD_COMPOSITE,
+                 "blocks": {**GOOD_COMPOSITE["blocks"], "a": {"strategy": []}}}
+    client = FakeClient([json.dumps({"kind": "composite", "spec": malformed}),
+                         json.dumps({"kind": "composite", "spec": GOOD_COMPOSITE})])
+    res = compile_strategy("combine", client=client, plays=_PLAYS)
+    assert res.spec == GOOD_COMPOSITE and res.attempts == 2
+    retry = [m for m in client.requests[1]["messages"] if m["role"] == "user"][-1]
+    assert "unknown strategy" in retry["content"]
+
+
 def test_an_unknown_play_is_sent_back_by_name():
     """The permissive direction of the membership check. Accepting every name
     would let the model invent a play, report success, and leave the failure to
@@ -516,3 +531,116 @@ def test_composite_check_does_not_drop_the_caller_vocabulary():
     errors, _ = _check("composite", spec, _PLAYS, house)
 
     assert errors == []
+
+
+def test_a_reply_that_is_valid_json_but_not_an_object_is_a_retry():
+    """`json.loads` returns a list for `[]`, and the loop read `.get` off it.
+    Valid JSON is not the contract; the contract is exactly one JSON object."""
+    client = FakeClient(["[]", json.dumps({"spec": GOOD_SPEC})])
+    res = compile_strategy("buy dips", client=client)
+    assert res.spec == GOOD_SPEC and res.attempts == 2
+    retry = [m for m in client.requests[1]["messages"] if m["role"] == "user"][-1]
+    assert "not parseable JSON" in retry["content"]
+
+
+def test_a_hostile_rules_leg_inside_a_composite_is_a_retry():
+    """The composite path reaches the rule grammar through `validate_spec`, so
+    a leg carrying an unhashable primitive name used to raise past the loop."""
+    hostile = {**GOOD_COMPOSITE,
+               "blocks": {**GOOD_COMPOSITE["blocks"],
+                          "b": {"strategy": "rules", "params": {"spec": {
+                              "version": 2, "name": "leg", "timeframe": "15m",
+                              "long": {"all": [{"lhs": {"prim": []},
+                                                "op": ">", "rhs": 1}]},
+                              "risk": {"stop": {"kind": "atr", "n": 14, "mult": 2.0},
+                                       "target": {"kind": "rr", "rr": 2.0}}}}}}}
+    client = FakeClient([json.dumps({"kind": "composite", "spec": hostile}),
+                         json.dumps({"kind": "composite", "spec": GOOD_COMPOSITE})])
+    res = compile_strategy("combine", client=client, plays=_PLAYS)
+    assert res.spec == GOOD_COMPOSITE and res.attempts == 2
+    retry = [m for m in client.requests[1]["messages"] if m["role"] == "user"][-1]
+    assert "unknown primitive" in retry["content"]
+
+
+def test_a_reply_json_cannot_even_parse_is_a_retry():
+    """`json.loads` raises a BARE ValueError for an integer past the
+    interpreter's digit limit, not the JSONDecodeError the retry boundary named,
+    so a reply the model could have corrected escaped the loop instead."""
+    huge = '{"spec": ' + "9" * 5000 + "}"
+    client = FakeClient([huge, json.dumps({"spec": GOOD_SPEC})])
+    res = compile_strategy("buy dips", client=client)
+    assert res.spec == GOOD_SPEC and res.attempts == 2
+    retry = [m for m in client.requests[1]["messages"] if m["role"] == "user"][-1]
+    assert "not parseable JSON" in retry["content"]
+
+
+def _deep(levels: int) -> str:
+    return "[" * levels + "]" * levels
+
+
+def test_a_reply_nested_past_the_decoder_is_a_retry():
+    """`json.loads` raises RecursionError inside the decoder itself, which is
+    not a ValueError, so a reply nested thousands deep escaped the loop."""
+    client = FakeClient(['{"spec": ' + _deep(10_000) + "}",
+                         json.dumps({"spec": GOOD_SPEC})])
+    res = compile_strategy("buy dips", client=client)
+    assert res.spec == GOOD_SPEC and res.attempts == 2
+
+
+def test_an_absurdly_nested_vote_tree_is_a_retry():
+    """`_check_tree` recursed to the interpreter's limit on a tree that is
+    absurd rather than merely wrong, and a RecursionError out of a validator is
+    a dead request rather than an error the model can act on."""
+    tree = {"all": ["a"]}
+    for _ in range(1000):
+        tree = {"all": [tree]}
+    deep = {**GOOD_COMPOSITE, "long": tree}
+    # and the bound is TAUGHT, so the model is not refused for following the
+    # grammar it was given: a validator stricter than its own prompt burns
+    # retries on a rule nobody stated.
+    assert "nest at most" in render_system_prompt(_PLAYS)
+    client = FakeClient([json.dumps({"kind": "composite", "spec": deep}),
+                         json.dumps({"kind": "composite", "spec": GOOD_COMPOSITE})])
+    res = compile_strategy("combine", client=client, plays=_PLAYS)
+    assert res.spec == GOOD_COMPOSITE and res.attempts == 2
+    retry = [m for m in client.requests[1]["messages"] if m["role"] == "user"][-1]
+    assert "nest at most" in retry["content"]
+
+
+def test_a_number_too_large_for_the_readback_is_rendered_not_refused():
+    """It validated clean and then raised OverflowError in the DESCRIBER, one
+    step after the retry loop stopped watching: the spec was good and the
+    request died anyway.
+
+    Refusing it at validation was the first repair, and a lens was right that
+    it changed the verdict on a spec the grammar accepts. The renderer is what
+    could not cope, so the renderer is what was fixed: this spec compiles on
+    attempt ONE, and its readback carries the number exactly."""
+    huge = {**GOOD_SPEC,
+            "long": {"all": [{"lhs": {"src": "close"}, "op": ">",
+                              "rhs": 10 ** 1000}]}}
+    client = FakeClient([json.dumps({"spec": huge})])
+    res = compile_strategy("buy dips", client=client)
+    assert res.spec == huge and res.attempts == 1
+    assert "1" + "0" * 1000 in res.readback
+
+
+def test_an_injected_intraday_primitive_is_a_retry_not_a_keyerror():
+    """`_ONE_BAR_SESSION` explains CORE's primitives, and the flag it explains
+    is settable by any caller injecting a vocabulary. The validator runs with
+    the caller's terms in it, so a subscript there raised KeyError on a term the
+    prompt had just taught the model. The platform injects house terms on every
+    compile, which is exactly this shape."""
+    vocab = core_vocabulary().with_terms(
+        Term("custom_intraday", "primitive", {}, {},
+             lambda s, a: pd.Series(1.0, index=s.index),
+             driving_frame_intraday=True))
+    daily = {**GOOD_SPEC, "timeframe": "1d",
+             "long": {"all": [{"lhs": {"prim": "custom_intraday"},
+                               "op": ">", "rhs": 0}]}}
+    client = FakeClient([json.dumps({"spec": daily}),
+                         json.dumps({"spec": GOOD_SPEC})])
+    res = compile_strategy("x", client=client, vocabulary=vocab)
+    assert res.spec == GOOD_SPEC and res.attempts == 2
+    retry = [m for m in client.requests[1]["messages"] if m["role"] == "user"][-1]
+    assert "needs intraday bars" in retry["content"]
