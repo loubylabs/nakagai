@@ -175,7 +175,23 @@ def _check_condition_arg(name: str, arg: str, cond, given: dict, path: str,
                         f"inside {name}.{arg} with tf")
 
 
-def _prims_in(node, names) -> set[str]:
+def names(value: object, allowed) -> bool:
+    """Whether an untrusted JSON value NAMES a member of `allowed`.
+
+    Every mapping and set in this grammar is keyed by string, and `value` is
+    whatever arrived in the caller's JSON. `value in allowed` raises
+    `TypeError: unhashable type` on a list or an object, out of a function whose
+    entire contract is to return a list of errors, and the NL builder's retry
+    loop is the caller that cannot survive it: a malformed model reply became a
+    503 rather than the retry the model could have acted on.
+
+    A non-string names nothing, so it is simply not known, and the caller
+    reports it with the same message it uses for a name it does not recognise.
+    """
+    return isinstance(value, str) and value in allowed
+
+
+def _prims_in(node, names_allowed) -> set[str]:
     """Which of `names` appear as primitives anywhere in an expression tree.
     Iterative walk with a seen set: this runs before the shape checks bound
     depth, so it must not recurse or loop on adversarially deep input."""
@@ -187,7 +203,7 @@ def _prims_in(node, names) -> set[str]:
             continue
         if isinstance(item, dict):
             seen.add(id(item))
-            if item.get("prim") in names:
+            if names(item.get("prim"), names_allowed):
                 found.add(item["prim"])
             stack.extend(item.values())
         elif isinstance(item, list):
@@ -212,6 +228,22 @@ _ONE_BAR_SESSION = {
             "trailing-median volume ratio (a daily relative-volume measure "
             "would be a separate primitive with its own name)",
 }
+
+
+def _one_bar_session(prim: str) -> str:
+    """Why this primitive reads wrong on a whole-session bar, in its own words
+    where core has them and in general terms where it does not.
+
+    `_ONE_BAR_SESSION` explains CORE's primitives. The flag it explains,
+    `Term.driving_frame_intraday`, is settable by any caller injecting a
+    vocabulary, and this validator is reached with the caller's terms in it, so
+    a subscript here raised KeyError on a term the prompt had just taught the
+    model. The fallback is the flag's own meaning, which is true of every term
+    that sets it.
+    """
+    return _ONE_BAR_SESSION.get(
+        prim, "it reads a position within the trading session, and a "
+              "whole-session bar has only one such position")
 
 
 def _check_session_aligned_refs(node, eval_tf: str, path: str,
@@ -268,11 +300,13 @@ def _check_session_aligned_refs(node, eval_tf: str, path: str,
                         f"{src_tf!r} has no well-defined visibility cutoff; "
                         "move it to an intraday timeframe")
         prim = item.get("prim")
-        term = vocabulary.primitives.get(prim)
+        # `names` rather than a bare `.get`: an unhashable prim raises out of
+        # the lookup, and this walk runs over the caller's whole condition tree.
+        term = vocabulary.primitives[prim] if names(prim, vocabulary.primitives) else None
         if term is not None and term.driving_frame_intraday and src_tf in SESSION_ALIGNED:
             errs.append(f"{at}: {prim} needs intraday bars and this one is "
                         f"evaluated on {src_tf!r}, where "
-                        f"{_ONE_BAR_SESSION[prim]}; move it to an intraday "
+                        f"{_one_bar_session(prim)}; move it to an intraday "
                         "timeframe")
         stack.extend((v, src_tf, f"{at}.{k}")
                      for k, v in item.items() if k != "tf")
@@ -282,7 +316,7 @@ def _check_tf(node: dict, path: str, errs: list[str],
               allowed_extra: tuple[str, ...] = ()) -> None:
     """Rejects a `tf` not in TIMEFRAMES, and (for src leaves) any extra key
     beyond src/tf."""
-    if "tf" in node and node["tf"] not in TIMEFRAMES:
+    if "tf" in node and not names(node["tf"], TIMEFRAMES):
         errs.append(f"{path}: tf must be one of {TIMEFRAMES}, got {node['tf']!r}")
     if allowed_extra:
         unknown = set(node) - set(allowed_extra) - {"tf"}
@@ -307,13 +341,13 @@ def _check_expr(node, path: str, errs: list[str], budget: _Budget,
         errs.append(f"{path}: operand must be a number or an expression object")
         return
     if "src" in node:
-        if node["src"] not in SOURCES:
+        if not names(node["src"], SOURCES):
             errs.append(f"{path}: unknown source {node['src']!r} (valid: {SOURCES})")
         _check_tf(node, path, errs, allowed_extra=("src",))
         return
     if "op" in node:
         op = node["op"]
-        if op not in MATH_OPS:
+        if not names(op, MATH_OPS):
             errs.append(f"{path}: unknown math op {op!r} (valid: {sorted(MATH_OPS)})")
             return
         args = node.get("args")
@@ -330,7 +364,7 @@ def _check_expr(node, path: str, errs: list[str], budget: _Budget,
     if "ind" in node:
         budget.nodes += 1
         name = node["ind"]
-        if name not in vocabulary.indicators:
+        if not names(name, vocabulary.indicators):
             errs.append(f"{path}: unknown indicator {name!r} "
                         f"(valid: {sorted(vocabulary.indicators)})")
             return
@@ -348,7 +382,7 @@ def _check_expr(node, path: str, errs: list[str], budget: _Budget,
     if "prim" in node:
         budget.nodes += 1
         name = node["prim"]
-        if name not in vocabulary.primitives:
+        if not names(name, vocabulary.primitives):
             errs.append(f"{path}: unknown primitive {name!r} "
                         f"(valid: {sorted(vocabulary.primitives)})")
             return
@@ -381,7 +415,7 @@ def _check_condition(cond, path: str, errs: list[str], budget: _Budget,
         errs.append(f"{path}: condition needs lhs, op, rhs")
         return
     op = cond["op"]
-    if op not in OPS:
+    if not names(op, OPS):
         errs.append(f"{path}: unknown op {op!r} (valid: {OPS})")
     _check_expr(cond["lhs"], f"{path}.lhs", errs, budget, vocabulary, depth,
                 series_required=op in CROSS_OPS)
@@ -409,6 +443,10 @@ def _check_condition(cond, path: str, errs: list[str], budget: _Budget,
         for side in ("lhs", "rhs"):
             node = cond[side]
             top = node.get("prim") if isinstance(node, dict) else None
+            # `{top}` below builds a SET, so an unhashable prim raises there
+            # even though nothing looks it up. A non-string names no primitive,
+            # so it stands for "no bare top" exactly as a missing key does.
+            top = top if isinstance(top, str) else None
             end_anchored = {n for n, t in vocabulary.primitives.items()
                             if t.end_anchored}
             nested = _prims_in(node, end_anchored) - {top}
@@ -566,7 +604,7 @@ def validate_spec(spec, vocabulary: Vocabulary | None = None) -> list[str]:
         errs.append(f"spec version must be {VERSION} (got {spec.get('version')!r})")
     if not str(spec.get("name", "")).strip():
         errs.append("spec needs a name")
-    if spec.get("timeframe", "1h") not in TIMEFRAMES:
+    if not names(spec.get("timeframe", "1h"), TIMEFRAMES):
         errs.append(f"timeframe must be one of {TIMEFRAMES}")
     sides = [s for s in ("long", "short") if s in spec]
     if not sides:
@@ -621,7 +659,15 @@ def group_text(group: dict, vocabulary: Vocabulary | None = None) -> str:
 
 def _expr_text(node, vocabulary: Vocabulary) -> str:
     if isinstance(node, (int, float)):
-        return f"{node:g}"
+        try:
+            return f"{node:g}"
+        except (OverflowError, ValueError):
+            # `:g` goes through float, which overflows on an int past the float
+            # range. The grammar accepts any JSON number, so the readback
+            # renders any JSON number: exactly, here, rather than refusing a
+            # spec that is merely eccentric. Refusing it at validation was the
+            # first fix and it changed the verdict on an input that was legal.
+            return str(node)
     if "src" in node:
         return node["src"] if "tf" not in node else f"{node['src']}[{node['tf']}]"
     if "op" in node:
@@ -631,6 +677,12 @@ def _expr_text(node, vocabulary: Vocabulary) -> str:
         return "(" + f" {op} ".join(_expr_text(a, vocabulary) for a in args) + ")"
     if "ind" in node:
         name = node["ind"]
+        # A describer renders whatever it is handed. An unknown or non-string
+        # name is the validator's to refuse, not this function's to raise on:
+        # it is called on a spec the caller has usually validated first, and
+        # "usually" is not a contract.
+        if not names(name, vocabulary.indicators):
+            return repr(name)
         term = vocabulary.indicators[name]
         args = {**term.defaults,
                 **{k: v for k, v in node.items() if k not in ("ind", "of", "tf")}}
@@ -646,6 +698,8 @@ def _expr_text(node, vocabulary: Vocabulary) -> str:
             text += f"[{node['tf']}]"
         return f"{text}.{field}" if field else text
     name = node["prim"]
+    if not names(name, vocabulary.primitives):
+        return repr(name)
     term = vocabulary.primitives[name]
     condition_args = {a for a, rule in term.args.items() if is_condition_rule(rule)}
     args = {**term.defaults,
@@ -675,8 +729,13 @@ _OP_TEXT = {">": "is above", "<": "is below", ">=": "is at or above",
 
 
 def _condition_text(cond: dict, vocabulary: Vocabulary) -> str:
-    return (f"{_expr_text(cond['lhs'], vocabulary)} {_OP_TEXT[cond['op']]} "
-            f"{_expr_text(cond['rhs'], vocabulary)}")
+    # `_OP_TEXT[op]` is the last lookup in this file that took a caller value
+    # straight to a subscript. An op the grammar does not define renders as
+    # itself, which is what a reader needs to see anyway.
+    op = cond.get("op")
+    text = _OP_TEXT[op] if names(op, _OP_TEXT) else repr(op)
+    return (f"{_expr_text(cond.get('lhs'), vocabulary)} {text} "
+            f"{_expr_text(cond.get('rhs'), vocabulary)}")
 
 
 def _group_text(group, vocabulary: Vocabulary, depth: int = 0) -> str:
@@ -735,6 +794,11 @@ def describe_spec(spec: dict, vocabulary: Vocabulary | None = None) -> str:
     """Plain-English restatement of a validated spec: the trust step shown to
     the user before they save or backtest an imported/NL-built strategy."""
     vocabulary = resolve_vocabulary(vocabulary)
+    # A describer is a validator's twin: both are handed whatever arrived, and
+    # both are read by a surface that must not 500. This one is called on a spec
+    # the caller has usually validated first, but "usually" is not a contract.
+    if not isinstance(spec, dict):
+        return "Not a strategy spec."
     lines = [f"Strategy \"{spec.get('name', 'unnamed')}\" on {spec.get('timeframe', '1h')} bars."]
     for side in ("long", "short"):
         if side in spec:

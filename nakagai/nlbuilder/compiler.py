@@ -43,8 +43,20 @@ def _client_or_default(client):
 
 
 def _parse(text: str) -> dict:
+    """The reply as a JSON OBJECT, or a raise the retry loop already handles.
+
+    `json.loads` happily returns a list, a string or a number for a reply that
+    is valid JSON and not the contract, and the caller reads `.get` off the
+    result immediately. That was an AttributeError out of the loop rather than
+    the retry the model could have acted on, which is the same defect as a
+    validator that raises: the loop exists because a model can emit anything.
+    """
     text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip())
-    return json.loads(text)
+    doc = json.loads(text)
+    if not isinstance(doc, dict):
+        raise json.JSONDecodeError(
+            f"expected one JSON object, got {type(doc).__name__}", text, 0)
+    return doc
 
 
 def _text(resp) -> str:
@@ -118,7 +130,13 @@ def compile_strategy(description: str, current_spec: dict | None = None,
         try:
             raw = _text(resp)
             doc = _parse(raw)
-        except (json.JSONDecodeError, StopIteration):
+        except (ValueError, RecursionError, StopIteration):
+            # Three, and each for its own reason. JSONDecodeError is a
+            # ValueError subclass, so naming ValueError catches both it and the
+            # BARE ValueError `json.loads` raises for an integer past the
+            # interpreter's digit limit. RecursionError is what a reply nested
+            # thousands of levels deep produces, inside the decoder itself. All
+            # three are the model sending something it can be asked to fix.
             last_errors = ["reply was not a single JSON object"]
             messages = messages + [
                 {"role": "assistant", "content": raw},
@@ -137,7 +155,12 @@ def compile_strategy(description: str, current_spec: dict | None = None,
             result.spec = spec
             result.kind = kind
             result.readback = describe(spec)
-            result.clarifications = [str(c) for c in doc.get("clarifications", [])]
+            # The model owns this field, so it is whatever the model sent. A
+            # null or a string here used to raise AFTER validation passed,
+            # which is the worst place: the spec was good and the request died.
+            clarifications = doc.get("clarifications")
+            result.clarifications = ([str(c) for c in clarifications]
+                                     if isinstance(clarifications, list) else [])
             return result
         last_errors = errors
         messages = messages + [

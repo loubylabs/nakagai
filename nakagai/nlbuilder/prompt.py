@@ -6,7 +6,8 @@ import json
 from collections.abc import Mapping
 
 from nakagai.strategies.composite.spec import (
-    BESPOKE_LEG, DEFAULT_WINDOW_BARS, MAX_BLOCKS, WINDOW_BARS_BOUNDS)
+    BESPOKE_LEG, DEFAULT_WINDOW_BARS, MAX_BLOCKS, MAX_TREE_DEPTH,
+    WINDOW_BARS_BOUNDS)
 from nakagai.strategies.rules import spec as g
 from nakagai.strategies.rules.vocabulary import (
     Vocabulary, is_condition_rule, resolve_vocabulary)
@@ -163,7 +164,8 @@ rules spec. A composite spec:
 A block is either a catalog play referenced by name, carrying NO params:
 {{"strategy": "<catalog name>"}}{bespoke}
 A vote tree is {{"all": [...]}} or {{"any": [...]}} over block ids, nestable.
-At most {MAX_BLOCKS} blocks; a composite cannot contain another composite.
+At most {MAX_BLOCKS} blocks, and vote trees nest at most {MAX_TREE_DEPTH} deep;
+a composite cannot contain another composite.
 {risk}
 Prefer legs that share one timeframe.
 

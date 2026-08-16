@@ -19,7 +19,9 @@ from nakagai.engine.portfolio_types import (
 from nakagai.engine import rules_definition, spec_base_digest
 from nakagai.strategies.base import MarketContext, Strategy
 from nakagai.strategies.catalog import catalog_definitions
-from nakagai.strategies.composite import CompositeStrategy, validate_composite_spec
+from nakagai.strategies.composite import (CompositeStrategy, describe_composite_spec,
+                                          resolve_config_refs,
+                                          validate_composite_spec)
 from nakagai.strategies.composite.strategy import member_blocks
 from nakagai.strategies.rules import RuleStrategy, core_vocabulary
 from nakagai.strategies.rules.vocabulary import Term
@@ -162,6 +164,35 @@ def test_an_unbound_member_under_another_name_is_refused():
     # The half that makes it a limitation rather than a rule: the definition it
     # just refused builds that exact block without complaint.
     assert unbound.factory({"spec": _LEG_SPEC}) is not None
+
+
+def test_an_unhashable_strategy_name_is_an_error_and_not_a_crash():
+    """A validator that raises is not a validator.
+
+    `strategy` is whatever arrived in the JSON. A list or an object is
+    unhashable, so a membership test on it raised TypeError out of both of these
+    functions, and the NL builder's retry loop is the caller that could not
+    survive it: `metered_compile` turned the raise into a 503, so a malformed
+    model reply ended the request instead of becoming the retry the model could
+    have acted on."""
+    for bad in ([], {"a": 1}, {"nested": {}}, 7.5, None):
+        spec = {"name": "c", "blocks": {"a": {"strategy": bad}},
+                "long": {"all": ["a"]},
+                "risk": {"stop": {"kind": "atr", "n": 14, "mult": 2.0},
+                         "target": {"kind": "rr", "rr": 2.0}}}
+        errs = validate_composite_spec(spec, _MEMBERS, allow_refs=False)
+        assert any("unknown strategy" in e for e in errs), (bad, errs)
+        # and the per-block layer leaves it to the sibling rather than raising
+        assert validate_composite_blocks(spec, _MEMBERS) == [], bad
+
+
+def test_an_unhashable_config_ref_is_an_error_and_not_a_crash():
+    """`resolve_config_refs` had the same shape one function down: it looked a
+    ref up in the caller's saved configs without checking it was a name."""
+    spec = {"blocks": {"a": {"config": ["not", "a", "name"]}}}
+    resolved, errs = resolve_config_refs(spec, {"real-one": {}})
+    assert errs and "no saved strategy config" in errs[0]
+    assert resolved["blocks"]["a"] == spec["blocks"]["a"]
 
 
 def test_membership_is_all_that_is_read_of_a_member():
@@ -401,3 +432,122 @@ def test_only_the_supplied_membership_decides_what_a_block_may_name():
     built = CompositeStrategy({"spec": spec},
                               members={"rules": _MEMBERS["rules"].factory})
     assert isinstance(built._members["a"], RuleStrategy)
+
+
+# --------------------------------------------------------------------------
+# A validator must RETURN errors, never raise. The NL builder's retry loop is
+# the caller that depends on it: its whole purpose is to hand the model its own
+# validator's errors and ask again, and a model can emit anything.
+
+
+_HOSTILE = ([], {}, {"a": 1}, 7, 7.5, None, True, "", [[]], {"k": []})
+
+
+def _hostile_specs():
+    """One spec per place a caller value reaches a lookup, times every awkward
+    JSON value. Generated rather than listed, because the defect was never one
+    site: it was a habit of testing membership on whatever arrived."""
+    risk = {"stop": {"kind": "atr", "n": 14, "mult": 2.0},
+            "target": {"kind": "rr", "rr": 2.0}}
+    for bad in _HOSTILE:
+        yield {"version": 2, "name": "x", "timeframe": bad,
+               "long": {"all": []}, "risk": risk}
+        for leaf in ({"prim": bad}, {"ind": bad}, {"src": bad},
+                     {"op": bad, "args": [1, 2]},
+                     # NESTED, and under a crossing op. The end-anchored and
+                     # session-scoped walks reach their lookup by a different
+                     # route than the leaf checker, and a crossing is what
+                     # triggers them, so a crossing-free crossing missed a
+                     # whole site.
+                     {"op": "+", "args": [{"src": "close"}, {"prim": bad}]}):
+            for op in (">", "crosses_above"):
+                yield {"version": 2, "name": "x", "timeframe": "15m",
+                       "long": {"all": [{"lhs": leaf, "op": op, "rhs": 1}]},
+                       "risk": risk}
+        yield {"version": 2, "name": "x", "timeframe": "15m",
+               "long": {"all": [{"lhs": {"src": "close"}, "op": bad, "rhs": 1}]},
+               "risk": risk}
+        yield {"version": 2, "name": "x", "timeframe": "15m",
+               "long": {"all": [{"lhs": {"src": "close", "tf": bad},
+                                 "op": ">", "rhs": 1}]}, "risk": risk}
+
+
+def test_no_hostile_json_makes_the_rule_validator_raise():
+    from nakagai.strategies.rules import validate_spec
+    vocab = core_vocabulary()
+    for spec in _hostile_specs():
+        errs = validate_spec(spec, vocab)
+        assert isinstance(errs, list), spec
+        assert errs, spec        # and it says something, rather than accepting
+
+
+def test_no_hostile_json_makes_the_composite_validators_raise():
+    for bad in _HOSTILE:
+        for spec in (bad,
+                     {"blocks": bad},
+                     {"name": "c", "blocks": {"a": bad}, "long": {"all": ["a"]}},
+                     {"name": "c", "blocks": {"a": {"strategy": bad}},
+                      "long": {"all": ["a"]}},
+                     {"name": "c", "blocks": {"a": {"strategy": "rules",
+                                                    "params": bad}},
+                      "long": {"all": ["a"]}},
+                     {"name": "c", "blocks": {"a": {"config": bad}},
+                      "long": {"all": ["a"]}}):
+            assert isinstance(
+                validate_composite_spec(spec, _MEMBERS, allow_refs=False), list), spec
+            assert isinstance(validate_composite_blocks(spec, _MEMBERS), list), spec
+            resolved, errs = resolve_config_refs(spec, {"saved": bad})
+            assert isinstance(errs, list), spec
+
+    # And the case the loop above cannot reach: a ref that IS a name, pointing
+    # at a saved config whose VALUE is hostile. This is the one that gets
+    # inlined into a spec the engine runs, so its shape is checked before it is
+    # indexed rather than after it fails.
+    named = {"name": "c", "blocks": {"a": {"config": "saved"}},
+             "long": {"all": ["a"]}}
+    for bad in _HOSTILE:
+        resolved, errs = resolve_config_refs(named, {"saved": bad})
+        assert isinstance(errs, list), bad
+        assert errs and "no saved strategy config" in errs[0], (bad, errs)
+        # refused rather than half-inlined
+        assert resolved["blocks"]["a"] == {"config": "saved"}, bad
+    # a well-formed one still inlines
+    good = {"strategy": "bare_play", "params": {"n": 1}}
+    resolved, errs = resolve_config_refs(named, {"saved": good})
+    assert errs == [] and resolved["blocks"]["a"] == good
+    # and `configs` itself is a caller value: it was read with `.get` on the
+    # strength of the REF being a name, which says nothing about the mapping.
+    for bad in _HOSTILE:
+        resolved, errs = resolve_config_refs(named, bad)
+        assert isinstance(errs, list), bad
+
+
+def test_a_describer_answers_rather_than_raising_on_a_non_spec():
+    """A describer's contract is a spec that VALIDATED, and that is not a
+    weakening: every shipped path validates first and describes only on the
+    clean branch (`api/builder_routes.py::describe_endpoint` raises 422 before
+    describing, `describe_composite_endpoint` answers `readback: ""` on the
+    error branch, and `nlbuilder._check` returns the describer to a caller that
+    applies it only when the error list is empty).
+
+    So the guard here is the TOP-level shape, which is the one thing a caller
+    can get wrong without the validator having seen it at all, plus a name the
+    grammar does not define, which a valid-looking spec can still carry. Do not
+    widen this to arbitrary interior shapes: that would assert a totality the
+    describers do not claim, and a test asserting more than its subject
+    promises is the overclaim this branch has already corrected twice."""
+    from nakagai.strategies.rules import describe_spec
+    vocab = core_vocabulary()
+    for bad in _HOSTILE:
+        assert isinstance(describe_spec(bad, vocab), str), bad
+        assert isinstance(describe_composite_spec(bad), str), bad
+        assert isinstance(describe_composite_spec({"blocks": bad}), str), bad
+    # and every spec that VALIDATES describes, which is the real contract
+    good = {"version": 2, "name": "d", "timeframe": "1h",
+            "long": {"all": [{"lhs": {"ind": "rsi", "n": 14}, "op": ">",
+                              "rhs": 30}]},
+            "risk": {"stop": {"kind": "atr", "n": 14, "mult": 2.0},
+                     "target": {"kind": "rr", "rr": 2.0}}}
+    from nakagai.strategies.rules import validate_spec
+    assert validate_spec(good, vocab) == []
+    assert "RSI" in describe_spec(good, vocab).upper()
