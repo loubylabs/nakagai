@@ -551,3 +551,33 @@ def test_a_describer_answers_rather_than_raising_on_a_non_spec():
     from nakagai.strategies.rules import validate_spec
     assert validate_spec(good, vocab) == []
     assert "RSI" in describe_spec(good, vocab).upper()
+
+
+def test_the_numeric_boundary_is_exactly_what_the_canon_can_hold():
+    """The predicate and its stated reason have to be the same predicate.
+
+    An earlier version used `math.isfinite`, which refuses an infinity, while
+    `canonical_expr` returns one and `spec_hash` hashes it. That refused more
+    than the reason explained, which is how a guard drifts away from being
+    checkable."""
+    from nakagai.strategies.rules import validate_spec
+    from nakagai.strategies.rules.canon import canonical_expr, spec_hash
+    vocab = core_vocabulary()
+    risk = {"stop": {"kind": "atr", "n": 14, "mult": 2.0},
+            "target": {"kind": "rr", "rr": 2.0}}
+
+    def spec_with(rhs):
+        return {"version": 2, "name": "d", "timeframe": "1h",
+                "long": {"all": [{"lhs": {"src": "close"}, "op": ">",
+                                  "rhs": rhs}]}, "risk": risk}
+
+    for ok in (30, 30.5, -1, 0, 1e308, float("inf"), float("-inf")):
+        assert validate_spec(spec_with(ok), vocab) == [], ok
+        canonical_expr(ok, vocab)              # has a canonical form
+        spec_hash(spec_with(ok), vocab)        # and therefore an identity
+
+    for bad in (10 ** 1000, -(10 ** 1000)):
+        assert validate_spec(spec_with(bad), vocab) == [
+            "long.all[0].rhs: number is out of range"], bad
+        with pytest.raises(OverflowError):
+            canonical_expr(bad, vocab)         # no canonical form, which is why

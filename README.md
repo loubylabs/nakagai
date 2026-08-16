@@ -231,6 +231,34 @@ The hosted product at nakag.ai is built on top of this core.
 
 ## Release notes
 
+### 0.6.2
+
+Restores one check 0.6.1 dropped, and records why dropping it was wrong.
+
+A numeric operand outside the float range is refused again. 0.6.1 removed that
+check on the argument that it changed the verdict on a spec the grammar accepts,
+and fixed the readback instead. The argument was wrong, and the evidence it
+lacked is in this repo: `canon.canonical_expr` returns `float(node)` for every
+numeric scalar, deliberately, because that is what makes `20` and `20.0` one
+spec. A number outside the float range therefore has no canonical form, so no
+`spec_hash`, so it can be neither stored nor identified. It was never a usable
+spec, and accepting it only moved the failure.
+
+Downstream is where that showed: a spec compiled on attempt one, then took the
+hosted platform's save path to `OverflowError: int too large to convert to
+float`, which is a 500 on a request the compiler had just called good. The
+refusal belongs in the validator, which can say why.
+
+The test is exactly `float()` succeeding, not `math.isfinite`. JSON has no
+infinity literal but `1e309` parses to one, and an infinity HAS a canonical form
+and a hash, so it is accepted. Refusing it would be a different rule with a
+different reason, and smuggling that in under this one is how a guard comes to
+refuse more than it can explain.
+
+The readback's fallback from 0.6.1 stays. A describer is read by surfaces that
+must not raise whatever reaches them, and it is reachable with a spec this
+validator never saw, so the two are defense in depth rather than duplicates.
+
 ### 0.6.1
 
 A validator that raises is not a validator. `validate_composite_spec`,

@@ -607,22 +607,37 @@ def test_an_absurdly_nested_vote_tree_is_a_retry():
     assert "nest at most" in retry["content"]
 
 
-def test_a_number_too_large_for_the_readback_is_rendered_not_refused():
-    """It validated clean and then raised OverflowError in the DESCRIBER, one
-    step after the retry loop stopped watching: the spec was good and the
-    request died anyway.
+def test_a_number_the_canon_cannot_hold_is_a_retry():
+    """It validated clean and then raised OverflowError, and 0.6.1 moved that
+    raise from the readback into the platform's save path by fixing the
+    renderer and dropping the check.
 
-    Refusing it at validation was the first repair, and a lens was right that
-    it changed the verdict on a spec the grammar accepts. The renderer is what
-    could not cope, so the renderer is what was fixed: this spec compiles on
-    attempt ONE, and its readback carries the number exactly."""
+    The check is right, and the reason is `canon.canonical_expr`: it returns
+    `float(node)` for every numeric scalar, which is what makes 20 and 20.0 one
+    spec. A number outside the float range therefore has no canonical form, so
+    no `spec_hash`, so it can be neither stored nor identified. Refusing it here
+    is the one place that can say why."""
     huge = {**GOOD_SPEC,
             "long": {"all": [{"lhs": {"src": "close"}, "op": ">",
                               "rhs": 10 ** 1000}]}}
-    client = FakeClient([json.dumps({"spec": huge})])
+    client = FakeClient([json.dumps({"spec": huge}),
+                         json.dumps({"spec": GOOD_SPEC})])
     res = compile_strategy("buy dips", client=client)
-    assert res.spec == huge and res.attempts == 1
-    assert "1" + "0" * 1000 in res.readback
+    assert res.spec == GOOD_SPEC and res.attempts == 2
+    retry = [m for m in client.requests[1]["messages"] if m["role"] == "user"][-1]
+    assert "out of range" in retry["content"]
+
+
+def test_the_readback_still_renders_a_number_the_validator_would_refuse():
+    """Defense in depth, and not redundant with the check above. A describer is
+    read by surfaces that must not raise whatever reaches them, and it is
+    reachable with a spec this validator never saw."""
+    from nakagai.strategies.rules import describe_spec
+    huge = {**GOOD_SPEC,
+            "long": {"all": [{"lhs": {"src": "close"}, "op": ">",
+                              "rhs": 10 ** 1000}]}}
+    text = describe_spec(huge, core_vocabulary())
+    assert "1" + "0" * 1000 in text
 
 
 def test_an_injected_intraday_primitive_is_a_retry_not_a_keyerror():

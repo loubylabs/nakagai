@@ -175,6 +175,40 @@ def _check_condition_arg(name: str, arg: str, cond, given: dict, path: str,
                         f"inside {name}.{arg} with tf")
 
 
+def _canonicalizable(value: float) -> bool:
+    """Whether a numeric operand survives this grammar's own canonical form.
+
+    `canon.canonical_expr` returns `float(node)` for every numeric scalar, and
+    that is load-bearing rather than incidental: it is what makes `20` and
+    `20.0` one spec. So a number outside the float range has no canonical form,
+    which means no `spec_hash`, which means it can be neither stored nor
+    identified. Accepting it was never accepting a usable spec.
+
+    0.6.1 dropped this check, on the argument that refusing the number changed
+    the verdict on something the grammar accepts. That argument did not know
+    about the canonical form. Downstream it showed up as a spec that compiled
+    on attempt one and then took the platform's save path to `OverflowError:
+    int too large to convert to float`, so the refusal moved from the one place
+    that can explain it to the one place that cannot.
+
+    The readback's own fallback in `_expr_text` stays, because a describer is
+    read by surfaces that must not raise whatever reaches them.
+
+    The test is exactly `float()` succeeding, and NOT `math.isfinite`. JSON has
+    no infinity literal, but `1e309` parses to one, and `float(inf)` is `inf`,
+    which `canonical_expr` returns and `spec_hash` hashes. So an infinity HAS a
+    canonical form and is accepted here. Refusing it would be a different rule
+    with a different reason (a comparison against infinity is constant), and
+    smuggling that in under this one is how a guard comes to refuse more than
+    it can explain.
+    """
+    try:
+        float(value)
+    except (OverflowError, ValueError):
+        return False
+    return True
+
+
 def names(value: object, allowed) -> bool:
     """Whether an untrusted JSON value NAMES a member of `allowed`.
 
@@ -336,6 +370,8 @@ def _check_expr(node, path: str, errs: list[str], budget: _Budget,
     if isinstance(node, (int, float)):
         if series_required:
             errs.append(f"{path}: the left side of a cross must be a series, not a number")
+        elif not _canonicalizable(node):
+            errs.append(f"{path}: number is out of range")
         return
     if not isinstance(node, dict):
         errs.append(f"{path}: operand must be a number or an expression object")
