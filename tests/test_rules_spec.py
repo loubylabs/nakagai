@@ -1,6 +1,7 @@
 import inspect
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from nakagai.data.schema import DEFAULT_TIMEFRAMES
@@ -150,6 +151,61 @@ def test_numeric_injected_terms_reject_values_without_a_canonical_form(node):
     errs = validate_spec(spec, vocabulary=vocabulary)
     assert len(errs) == 1, errs
     assert "custom_numeric.n number is out of range" in errs[0]
+
+
+def test_a_required_numeric_argument_is_refused_before_evaluation():
+    vocabulary = core_vocabulary().with_terms(
+        Term("required_numeric", "primitive", {"n": (1, 10)}, {},
+             lambda *_args: None))
+    spec = {**ORB, "long": {"all": [
+        {"lhs": {"src": "close"}, "op": ">",
+         "rhs": {"prim": "required_numeric"}}]}}
+    errs = validate_spec(spec, vocabulary=vocabulary)
+    assert len(errs) == 1 and "required_numeric needs n" in errs[0], errs
+
+
+def test_an_invalid_injected_choice_default_is_refused_centrally():
+    vocabulary = core_vocabulary().with_terms(
+        Term("invalid_choice", "primitive", {"side": ("long", "short")},
+             {"side": "sideways"}, lambda *_args: None))
+    spec = {**ORB, "long": {"all": [
+        {"lhs": {"src": "close"}, "op": ">",
+         "rhs": {"prim": "invalid_choice"}}]}}
+    errs = validate_spec(spec, vocabulary=vocabulary)
+    assert len(errs) == 1 and "invalid_choice.side default" in errs[0], errs
+
+
+@pytest.mark.parametrize("rule", [
+    {"n": ("low", "high")},
+    {"n": "malformed"},
+], ids=["choice-is-valid-but-no-numeric", "malformed"])
+def test_a_non_numeric_argument_rule_is_reported_without_raising(rule):
+    vocabulary = core_vocabulary().with_terms(
+        Term("bad_rule", "primitive", rule, {}, lambda *_args: None))
+    spec = {**ORB, "long": {"all": [
+        {"lhs": {"src": "close"}, "op": ">",
+         "rhs": {"prim": "bad_rule", "n": 1}}]}}
+    errs = validate_spec(spec, vocabulary=vocabulary)
+    assert len(errs) == 1 and "bad_rule.n" in errs[0], errs
+
+
+def test_opening_range_numpy_bounds_still_refuse_a_wide_hourly_bar():
+    base = core_vocabulary()
+    replacement = Term(
+        "opening_range_high", "primitive",
+        {"minutes": (np.int64(5), np.int64(120))}, {"minutes": np.int64(30)},
+        lambda *_args: None,
+    )
+    vocabulary = Vocabulary(
+        base.indicators,
+        {**base.primitives, "opening_range_high": replacement},
+    )
+    spec = {**ORB, "timeframe": "1h", "long": {"all": [
+        {"lhs": {"src": "close"}, "op": ">",
+         "rhs": {"prim": "opening_range_high"}}]}}
+    errs = validate_spec(spec, vocabulary=vocabulary)
+    assert any("opening_range_high" in error and "30-minute" in error
+               and "60 minutes" in error for error in errs), errs
 
 
 def test_the_grammar_takes_its_timeframes_from_the_schema():

@@ -87,9 +87,8 @@ def test_helpers_that_call_each_other_in_a_cycle_stop_generation(monkeypatch):
 
 
 def test_a_choice_argument_whose_default_drifted_is_refused():
-    # validate_spec only ever checks the values a SPEC supplies, so a term
-    # whose own default is not one of its declared choices reaches the compiler
-    # intact and would otherwise bake an unknown literal into the artifact.
+    # The validator checks omitted choice defaults before the compiler can
+    # receive an unknown literal.
     def emit(ctx, call):
         return PineExpr(ctx.calc(call, f"nk_side_{ctx.choice(call, 'side')}"))
 
@@ -99,8 +98,8 @@ def test_a_choice_argument_whose_default_drifted_is_refused():
              pine=PineLowering(emit)))
     with pytest.raises(PineCompileError) as exc:
         lower_pine(_spec_using("tilted"), vocab)
-    assert exc.value.code == "pine_bad_input"
-    assert exc.value.term == "tilted"
+    assert exc.value.code == "invalid_spec"
+    assert "tilted.side" in str(exc.value)
     assert "sideways" in str(exc.value)
 
 

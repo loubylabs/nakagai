@@ -8,9 +8,12 @@ compiler's retry loop feeds on them); describe_spec renders the trust-step
 readback; canon.py owns identity hashing.
 """
 
+import numbers
+
 from nakagai.data.schema import DEFAULT_TIMEFRAMES
 from nakagai.strategies.rules.vocabulary import (
-    Vocabulary, is_choice_rule, is_condition_rule, resolve_vocabulary,
+    Vocabulary, is_choice_rule, is_condition_rule, is_range_rule,
+    resolve_vocabulary,
 )
 
 VERSION = 2
@@ -105,10 +108,6 @@ def _check_args(name: str, given: dict, term, path: str, errs: list[str],
     # A condition-typed arg may not declare a default (N3-D13), so its
     # ABSENCE is itself an error. Other args may fall back to term.defaults,
     # which are validated below before the evaluator can receive them.
-    for arg, rule in schema.items():
-        if is_condition_rule(rule) and arg not in given:
-            errs.append(f"{path}: {name} needs {arg} = {{lhs, op, rhs}}")
-
     def check_numeric(arg: str, value, rule) -> None:
         lo, hi = rule
         if _not_num(value, lo, hi):
@@ -118,9 +117,24 @@ def _check_args(name: str, given: dict, term, path: str, errs: list[str],
             errs.append(f"{path}: {name}.{arg} number is out of range")
 
     for arg, rule in schema.items():
-        if (arg not in given and arg in term_defaults
-                and not is_condition_rule(rule) and not is_choice_rule(rule)):
-            check_numeric(arg, term_defaults[arg], rule)
+        if arg in given:
+            continue
+        if is_condition_rule(rule):
+            errs.append(f"{path}: {name} needs {arg} = {{lhs, op, rhs}}")
+        elif is_choice_rule(rule):
+            if arg not in term_defaults:
+                errs.append(f"{path}: {name} needs {arg}")
+            elif term_defaults[arg] not in rule:
+                errs.append(f"{path}: {name}.{arg} default must be one of "
+                            f"{rule}, got {term_defaults[arg]!r}")
+        elif is_range_rule(rule):
+            if arg not in term_defaults:
+                errs.append(f"{path}: {name} needs {arg}")
+            else:
+                check_numeric(arg, term_defaults[arg], rule)
+        else:
+            errs.append(f"{path}: {name}.{arg} has invalid argument rule "
+                        f"{rule!r}")
     for arg, v in given.items():
         if arg in skip:
             continue
@@ -137,8 +151,11 @@ def _check_args(name: str, given: dict, term, path: str, errs: list[str],
         elif is_choice_rule(rule):
             if v not in rule:
                 errs.append(f"{path}: {name}.{arg} must be one of {rule}, got {v!r}")
-        else:
+        elif is_range_rule(rule):
             check_numeric(arg, v, rule)
+        else:
+            errs.append(f"{path}: {name}.{arg} has invalid argument rule "
+                        f"{rule!r}")
 
 
 def _check_condition_arg(name: str, arg: str, cond, given: dict, path: str,
@@ -300,12 +317,7 @@ def _check_opening_range_window(item: dict, prim: str, src_tf: str,
     delta = DEFAULT_TIMEFRAMES.deltas.get(src_tf)
     minutes = item.get("minutes", term.defaults.get("minutes"))
     bounds = term.args.get("minutes")
-    if (delta is None or bounds is None or is_choice_rule(bounds)
-            or is_condition_rule(bounds)
-            or not (isinstance(bounds, tuple) and len(bounds) == 2
-                    and all(isinstance(bound, (int, float))
-                            and not isinstance(bound, bool)
-                            for bound in bounds))):
+    if delta is None or not is_range_rule(bounds):
         return
     if _not_num(minutes, *bounds) or not _canonicalizable(minutes):
         return
@@ -576,10 +588,10 @@ def _check_group(group, path: str, errs: list[str], budget: _Budget,
 
 
 def _not_num(v, lo, hi) -> bool:
-    """True when v is not a plain int/float in [lo, hi]; bools are excluded.
+    """True when v is not a real number in [lo, hi]; bools are excluded.
     This never raises, so it is safe to call on any user-supplied value
     (a string, a list, None) before it ever reaches float()/int()."""
-    return isinstance(v, bool) or not isinstance(v, (int, float)) or not lo <= v <= hi
+    return isinstance(v, bool) or not isinstance(v, numbers.Real) or not lo <= v <= hi
 
 
 def _num_text(value) -> str:

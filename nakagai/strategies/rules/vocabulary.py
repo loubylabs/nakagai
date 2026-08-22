@@ -31,6 +31,7 @@ term carries the flags it carries; read them before moving a flag.
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from functools import cache
+from numbers import Real
 from types import MappingProxyType
 from typing import Literal, TypeAlias
 
@@ -46,7 +47,7 @@ from nakagai.strategies.rules.pine.model import PineLowering
 # third elif after them: spec.py's non-choice branch does `lo, hi = rule`, which
 # raises ValueError on any bare string.
 CONDITION_ARG: Literal["condition"] = "condition"
-ArgRule: TypeAlias = tuple[float, float] | tuple[str, ...] | Literal["condition"]
+ArgRule: TypeAlias = tuple[Real, Real] | tuple[str, ...] | Literal["condition"]
 KINDS = ("series", "frame", "bar", "primitive")
 
 
@@ -64,6 +65,13 @@ def is_choice_rule(rule: ArgRule) -> bool:
     the other would validate a spec the compiler then refuses.
     """
     return isinstance(rule, tuple) and all(isinstance(r, str) for r in rule)
+
+
+def is_range_rule(rule: ArgRule) -> bool:
+    """True for a two-item numeric range, including NumPy real scalars."""
+    return (isinstance(rule, tuple) and len(rule) == 2
+            and all(isinstance(value, Real) and not isinstance(value, bool)
+                    for value in rule))
 
 
 @dataclass(frozen=True)
