@@ -385,6 +385,25 @@ def test_the_same_primitives_are_untouched_on_an_intraday_driving_frame(node, tf
     assert validate_spec({**_daily(node), "timeframe": tf}) == []
 
 
+@pytest.mark.parametrize("node", [
+    {"prim": "minutes_into_session"},
+    {"prim": "rvol", "sessions": 20},
+], ids=lambda n: n["prim"])
+def test_unrelated_intraday_primitives_are_untouched_on_an_hourly_frame(node):
+    assert validate_spec({**_daily(node), "timeframe": "1h"}) == []
+
+
+def test_opening_range_width_follows_an_inherited_effective_timeframe():
+    spec = {**DAILY, "timeframe": "15m", "long": {"all": [
+        {"lhs": {"ind": "sma", "n": 5, "tf": "1h",
+                  "of": {"prim": "opening_range_high", "minutes": 30}},
+         "op": ">", "rhs": 1}]}}
+    errs = validate_spec(spec)
+    assert any("opening_range_high" in error and "30-minute" in error
+               and "'1h'" in error and "60 minutes" in error
+               for error in errs), errs
+
+
 def test_the_refusal_follows_a_tf_that_moves_the_frame_under_a_subtree():
     """The spec is 15m, but the indicator's `tf` puts its `of` subtree on daily
     bars. The primitive carries no tf of its own, so the own-`tf` check cannot
