@@ -10,6 +10,7 @@ from nakagai.strategies.rules import (
 from nakagai.strategies.rules import spec as rules_spec
 from nakagai.strategies.rules.spec import (
     MAX_DEPTH, TIMEFRAMES, _expr_text, group_text, validate_condition_group)
+from nakagai.strategies.rules.vocabulary import Term, Vocabulary, core_vocabulary
 
 ORB = {
     "version": 2, "name": "orb-volume", "timeframe": "15m",
@@ -69,7 +70,10 @@ def test_opening_range_accepts_a_window_equal_to_one_bar():
     assert validate_spec(spec) == []
 
 
-@pytest.mark.parametrize("minutes", [1, -(10 ** 400)])
+@pytest.mark.parametrize("minutes", [
+    1, 121, float("nan"), float("inf"), float("-inf"), True, "30", None,
+    10 ** 400, -(10 ** 400),
+])
 def test_opening_range_invalid_minutes_are_reported_only_by_argument_validation(minutes):
     spec = {**ORB, "timeframe": "1h", "long": {"all": [
         {"lhs": {"src": "close"}, "op": ">",
@@ -77,6 +81,24 @@ def test_opening_range_invalid_minutes_are_reported_only_by_argument_validation(
     errs = validate_spec(spec)
     assert len(errs) == 1, errs
     assert "opening_range_high.minutes must be a number in [5, 120]" in errs[0]
+
+
+@pytest.mark.parametrize("replacement", [
+    Term("opening_range_high", "primitive", {}, {}, lambda *_args: None),
+    Term("opening_range_high", "primitive", {"minutes": ("short", "wide")},
+         {"minutes": "wide"}, lambda *_args: None),
+], ids=["no-minutes-arg", "choice-minutes-arg"])
+def test_opening_range_width_guard_ignores_non_numeric_injected_terms(replacement):
+    base = core_vocabulary()
+    vocabulary = Vocabulary(
+        base.indicators,
+        {**base.primitives, "opening_range_high": replacement},
+    )
+    spec = {**ORB, "timeframe": "1h", "long": {"all": [
+        {"lhs": {"src": "close"}, "op": ">",
+         "rhs": {"prim": "opening_range_high", "minutes": 30}}]}}
+    errs = validate_spec(spec, vocabulary=vocabulary)
+    assert all("asks for" not in error for error in errs), errs
 
 
 def test_the_grammar_takes_its_timeframes_from_the_schema():

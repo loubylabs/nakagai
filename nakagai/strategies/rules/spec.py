@@ -287,7 +287,15 @@ def _check_opening_range_window(item: dict, prim: str, src_tf: str,
         return
     delta = DEFAULT_TIMEFRAMES.deltas.get(src_tf)
     minutes = item.get("minutes", term.defaults.get("minutes"))
-    if delta is None or _not_num(minutes, *term.args["minutes"]):
+    bounds = term.args.get("minutes")
+    if (delta is None or bounds is None or is_choice_rule(bounds)
+            or is_condition_rule(bounds)
+            or not (isinstance(bounds, tuple) and len(bounds) == 2
+                    and all(isinstance(bound, (int, float))
+                            and not isinstance(bound, bool)
+                            for bound in bounds))):
+        return
+    if _not_num(minutes, *bounds):
         return
     bar_minutes = delta.total_seconds() / 60
     if bar_minutes > minutes:
@@ -299,7 +307,7 @@ def _check_opening_range_window(item: dict, prim: str, src_tf: str,
 
 def _check_session_aligned_refs(node, eval_tf: str, path: str,
                                 errs: list[str], vocabulary: Vocabulary) -> None:
-    """Refuse what a session-aligned frame cannot answer. Two rules live here.
+    """Refuse what a session-aligned frame cannot answer. Three rules live here.
 
     The first: a cross-timeframe reference evaluated on a session-aligned
     frame. frame_eval carries a series from one timeframe onto another by
@@ -319,9 +327,13 @@ def _check_session_aligned_refs(node, eval_tf: str, path: str,
     then read NaN forever; nothing raised, because the only primitive rule was
     the foreign-`tf` one, which such a spec never trips.
 
-    The two rules run over two different sets, deliberately: see
+    The first two rules run over two different sets, deliberately: see
     Term.driving_frame_intraday in vocabulary.py on why day_of_week is refused
     a foreign `tf` and welcome on daily bars.
+
+    The third: an opening-range primitive whose requested window is narrower
+    than a fixed intraday bar. Its level cannot be formed from a partial bar,
+    so the width guard reports the mismatch before evaluation.
 
     `eval_tf` follows the evaluator: a node's own `tf` is the frame its
     children are computed on, which is how a bars_since with a tf, or an

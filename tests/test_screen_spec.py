@@ -1,5 +1,7 @@
 """ScreenSpec v1: the conditions-only IR reusing RuleSpec v2's grammar."""
 
+import pytest
+
 from nakagai.screen.prompt import render_screen_prompt
 from nakagai.strategies.rules.spec import group_text, validate_condition_group
 from nakagai.strategies.rules.vocabulary import Term, core_vocabulary
@@ -97,6 +99,19 @@ def test_screen_spec_refuses_an_opening_range_shorter_than_its_bar():
     assert any("opening_range_high" in error and "30-minute" in error
                and "'1h'" in error and "60 minutes" in error
                for error in errs), errs
+
+
+@pytest.mark.parametrize("minutes", [
+    1, 121, float("nan"), float("inf"), float("-inf"), True, "30", None,
+    10 ** 400, -(10 ** 400),
+])
+def test_screen_spec_reports_invalid_opening_range_minutes_only_once(minutes):
+    spec = {"version": 1, "tf": "1h", "conditions": {"all": [
+        {"lhs": {"src": "close"}, "op": ">",
+         "rhs": {"prim": "opening_range_high", "minutes": minutes}}]}}
+    errs = validate_screen_spec(spec)
+    assert len(errs) == 1, errs
+    assert "opening_range_high.minutes must be a number in [5, 120]" in errs[0]
 
 
 def test_validate_screen_spec_rejects_non_dict():
