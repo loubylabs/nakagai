@@ -182,7 +182,7 @@ def test_screen_spec_refuses_a_wide_hourly_bar_with_numpy_opening_bounds():
     base = core_vocabulary()
     replacement = Term(
         "opening_range_high", "primitive",
-        {"minutes": (np.int64(5), np.int64(120))}, {"minutes": np.int64(30)},
+        {"minutes": (np.int64(5), np.int64(120))}, {"minutes": 30},
         lambda *_args: None,
     )
     vocabulary = Vocabulary(
@@ -195,6 +195,27 @@ def test_screen_spec_refuses_a_wide_hourly_bar_with_numpy_opening_bounds():
     errs = validate_screen_spec(spec, vocabulary=vocabulary)
     assert any("opening_range_high" in error and "30-minute" in error
                and "60 minutes" in error for error in errs), errs
+
+
+@pytest.mark.parametrize("node", [
+    {"prim": "opening_range_high", "minutes": np.int64(30)},
+    {"prim": "opening_range_high"},
+], ids=["explicit", "default"])
+def test_screen_spec_rejects_numpy_opening_range_values(node):
+    base = core_vocabulary()
+    replacement = Term(
+        "opening_range_high", "primitive", {"minutes": (5, 120)},
+        {"minutes": np.int64(30)}, lambda *_args: None,
+    )
+    vocabulary = Vocabulary(
+        base.indicators,
+        {**base.primitives, "opening_range_high": replacement},
+    )
+    spec = {"version": 1, "tf": "15m", "conditions": {"all": [
+        {"lhs": {"src": "close"}, "op": ">", "rhs": node}]}}
+    errs = validate_screen_spec(spec, vocabulary=vocabulary)
+    assert len(errs) == 1, errs
+    assert "opening_range_high.minutes must be a number" in errs[0]
 
 
 def test_validate_screen_spec_rejects_non_dict():

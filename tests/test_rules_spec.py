@@ -193,7 +193,7 @@ def test_opening_range_numpy_bounds_still_refuse_a_wide_hourly_bar():
     base = core_vocabulary()
     replacement = Term(
         "opening_range_high", "primitive",
-        {"minutes": (np.int64(5), np.int64(120))}, {"minutes": np.int64(30)},
+        {"minutes": (np.int64(5), np.int64(120))}, {"minutes": 30},
         lambda *_args: None,
     )
     vocabulary = Vocabulary(
@@ -206,6 +206,27 @@ def test_opening_range_numpy_bounds_still_refuse_a_wide_hourly_bar():
     errs = validate_spec(spec, vocabulary=vocabulary)
     assert any("opening_range_high" in error and "30-minute" in error
                and "60 minutes" in error for error in errs), errs
+
+
+@pytest.mark.parametrize("node", [
+    {"prim": "opening_range_high", "minutes": np.int64(30)},
+    {"prim": "opening_range_high"},
+], ids=["explicit", "default"])
+def test_numpy_opening_range_values_are_refused_as_non_json_numbers(node):
+    base = core_vocabulary()
+    replacement = Term(
+        "opening_range_high", "primitive", {"minutes": (5, 120)},
+        {"minutes": np.int64(30)}, lambda *_args: None,
+    )
+    vocabulary = Vocabulary(
+        base.indicators,
+        {**base.primitives, "opening_range_high": replacement},
+    )
+    spec = {**ORB, "long": {"all": [
+        {"lhs": {"src": "close"}, "op": ">", "rhs": node}]}}
+    errs = validate_spec(spec, vocabulary=vocabulary)
+    assert len(errs) == 1, errs
+    assert "opening_range_high.minutes must be a number" in errs[0]
 
 
 def test_the_grammar_takes_its_timeframes_from_the_schema():
