@@ -156,6 +156,15 @@ def test_screen_spec_rejects_numeric_injected_values_without_a_canonical_form(no
     assert "custom_numeric.n has invalid argument rule" in errs[0]
 
 
+@pytest.mark.parametrize("value", [9007199254740993, -9007199254740993],
+                         ids=["positive", "negative"])
+def test_screen_spec_rejects_integers_that_round_during_canonicalization(value):
+    spec = {"version": 1, "tf": "15m", "conditions": {"all": [
+        {"lhs": {"src": "close"}, "op": ">", "rhs": value}]}}
+    errs = validate_screen_spec(spec)
+    assert len(errs) == 1 and "number is out of range" in errs[0], errs
+
+
 def test_screen_spec_refuses_a_required_injected_numeric_argument():
     vocabulary = core_vocabulary().with_terms(
         Term("required_numeric", "primitive", {"n": (1, 10)}, {},

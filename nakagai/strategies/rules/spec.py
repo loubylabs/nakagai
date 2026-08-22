@@ -222,7 +222,7 @@ def _canonicalizable(value: float) -> bool:
     The readback's own fallback in `_expr_text` stays, because a describer is
     read by surfaces that must not raise whatever reaches them.
 
-    The test is exactly `float()` succeeding, and NOT `math.isfinite`. JSON has
+    The test is `float()` succeeding, plus an exact integer round trip. JSON has
     no infinity literal, but `1e309` parses to one, and `float(inf)` is `inf`,
     which `canonical_expr` returns and `spec_hash` hashes. So an infinity HAS a
     canonical form and is accepted here. Refusing it would be a different rule
@@ -231,8 +231,10 @@ def _canonicalizable(value: float) -> bool:
     it can explain.
     """
     try:
-        float(value)
+        converted = float(value)
     except (OverflowError, ValueError):
+        return False
+    if type(value) is int and int(converted) != value:
         return False
     return True
 

@@ -153,6 +153,27 @@ def test_numeric_injected_terms_reject_values_without_a_canonical_form(node):
     assert "custom_numeric.n has invalid argument rule" in errs[0]
 
 
+@pytest.mark.parametrize("value", [
+    9007199254740993,
+    -9007199254740993,
+], ids=["positive", "negative"])
+def test_integers_that_float_canonicalization_rounds_are_rejected(value):
+    spec = {**ORB, "long": {"all": [
+        {"lhs": {"src": "close"}, "op": ">", "rhs": value}]}}
+    errs = validate_spec(spec)
+    assert len(errs) == 1 and "number is out of range" in errs[0], errs
+
+
+def test_adjacent_large_integers_cannot_collapse_to_one_hash():
+    exact = {**ORB, "long": {"all": [
+        {"lhs": {"src": "close"}, "op": ">", "rhs": 9007199254740992}]}}
+    rounded = {**ORB, "long": {"all": [
+        {"lhs": {"src": "close"}, "op": ">", "rhs": 9007199254740993}]}}
+    assert validate_spec(exact) == []
+    errs = validate_spec(rounded)
+    assert len(errs) == 1 and "number is out of range" in errs[0], errs
+
+
 def test_a_required_numeric_argument_is_refused_before_evaluation():
     vocabulary = core_vocabulary().with_terms(
         Term("required_numeric", "primitive", {"n": (1, 10)}, {},

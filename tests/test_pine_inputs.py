@@ -89,6 +89,19 @@ def test_invalid_numeric_bounds_stop_pine_as_invalid_spec(bounds):
     assert exc.value.code == "invalid_spec"
 
 
+@pytest.mark.parametrize("value", [9007199254740993, -9007199254740993],
+                         ids=["positive", "negative"])
+def test_unroundtrippable_integer_stops_pine_as_invalid_spec(value):
+    vocabulary = core_vocabulary().with_terms(
+        Term("large_numeric", "series", {"n": (-(10 ** 20), 10 ** 20)},
+             {"n": 30}, lambda series, _args: series,
+             pine=PineLowering(_emit_close_with_n)))
+    spec = _spec({"ind": "large_numeric", "n": value})
+    with pytest.raises(PineCompileError) as exc:
+        lower_pine(spec, vocabulary)
+    assert exc.value.code == "invalid_spec"
+
+
 def test_an_integral_float_lowers_exactly_like_the_integer_it_equals():
     # Both spell the same canonical spec, so both owe the same program.
     assert lower_pine(_spec({"ind": "sma", "n": 20.0})) == \
