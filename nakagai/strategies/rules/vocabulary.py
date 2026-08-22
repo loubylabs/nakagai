@@ -28,6 +28,7 @@ one set read twice. The per-term comments in core_vocabulary() say why each
 term carries the flags it carries; read them before moving a flag.
 """
 
+import math
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from functools import cache
@@ -56,6 +57,11 @@ def is_condition_rule(rule: ArgRule) -> bool:
     return rule == CONDITION_ARG
 
 
+def is_json_number(value) -> bool:
+    """True for exact built-in JSON numeric values, excluding booleans."""
+    return type(value) in (int, float)
+
+
 def is_choice_rule(rule: ArgRule) -> bool:
     """True for an arg that names one of a fixed set (field, direction, kind).
 
@@ -68,10 +74,16 @@ def is_choice_rule(rule: ArgRule) -> bool:
 
 
 def is_range_rule(rule: ArgRule) -> bool:
-    """True for a two-item numeric range, including NumPy real scalars."""
-    return (isinstance(rule, tuple) and len(rule) == 2
+    """True for a finite, ordered two-item range, including NumPy reals."""
+    if not (isinstance(rule, tuple) and len(rule) == 2
             and all(isinstance(value, Real) and not isinstance(value, bool)
-                    for value in rule))
+                    for value in rule)):
+        return False
+    try:
+        low, high = (float(value) for value in rule)
+    except (OverflowError, TypeError, ValueError):
+        return False
+    return math.isfinite(low) and math.isfinite(high) and low <= high
 
 
 @dataclass(frozen=True)

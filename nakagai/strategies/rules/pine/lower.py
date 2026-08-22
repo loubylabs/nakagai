@@ -72,7 +72,8 @@ from nakagai.strategies.rules.spec import (
     is_group_node,
 )
 from nakagai.strategies.rules.vocabulary import (
-    Vocabulary, is_choice_rule, is_condition_rule, is_range_rule)
+    Vocabulary, is_choice_rule, is_condition_rule, is_json_number,
+    is_range_rule)
 
 # The engine's timeframes in Pine's spelling. Every timeframe the grammar
 # admits needs an entry; one without would otherwise reach request.security as
@@ -179,7 +180,7 @@ def _typed(value, bounds, path: RulePath, term: str):
     canonical spec) give one program.
     """
     where = {"path": path.text, "term": term}
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    if not is_json_number(value):
         raise PineCompileError(
             "pine_bad_input", f"{path.text}: {value!r} is not a number, so it "
             "cannot become a Pine input", **where)

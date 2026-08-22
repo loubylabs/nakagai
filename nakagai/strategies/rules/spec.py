@@ -10,7 +10,8 @@ readback; canon.py owns identity hashing.
 
 from nakagai.data.schema import DEFAULT_TIMEFRAMES
 from nakagai.strategies.rules.vocabulary import (
-    Vocabulary, is_choice_rule, is_condition_rule, is_range_rule,
+    Vocabulary, is_choice_rule, is_condition_rule, is_json_number,
+    is_range_rule,
     resolve_vocabulary,
 )
 
@@ -420,7 +421,7 @@ def _check_expr(node, path: str, errs: list[str], budget: _Budget,
     if isinstance(node, bool):
         errs.append(f"{path}: booleans are not operands")
         return
-    if isinstance(node, (int, float)):
+    if is_json_number(node):
         if series_required:
             errs.append(f"{path}: the left side of a cross must be a series, not a number")
         elif not _canonicalizable(node):
@@ -589,7 +590,7 @@ def _not_num(v, lo, hi) -> bool:
     """True when v is not a plain JSON number in [lo, hi]; bools are excluded.
     This never raises, so it is safe to call on any user-supplied value
     (a string, a list, None) before it ever reaches float()/int()."""
-    return isinstance(v, bool) or not isinstance(v, (int, float)) or not lo <= v <= hi
+    return not is_json_number(v) or not lo <= v <= hi
 
 
 def _num_text(value) -> str:

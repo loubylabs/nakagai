@@ -127,7 +127,7 @@ def test_opening_range_huge_injected_default_is_rejected_by_canonical_validation
          "rhs": {"prim": "opening_range_high"}}]}}
     errs = validate_spec(spec, vocabulary=vocabulary)
     assert len(errs) == 1, errs
-    assert "opening_range_high.minutes number is out of range" in errs[0]
+    assert "opening_range_high.minutes has invalid argument rule" in errs[0]
 
 
 def _custom_numeric_vocabulary(*, default):
@@ -150,7 +150,7 @@ def test_numeric_injected_terms_reject_values_without_a_canonical_form(node):
         {"lhs": {"src": "close"}, "op": ">", "rhs": node}]}}
     errs = validate_spec(spec, vocabulary=vocabulary)
     assert len(errs) == 1, errs
-    assert "custom_numeric.n number is out of range" in errs[0]
+    assert "custom_numeric.n has invalid argument rule" in errs[0]
 
 
 def test_a_required_numeric_argument_is_refused_before_evaluation():
@@ -227,6 +227,45 @@ def test_numpy_opening_range_values_are_refused_as_non_json_numbers(node):
     errs = validate_spec(spec, vocabulary=vocabulary)
     assert len(errs) == 1, errs
     assert "opening_range_high.minutes must be a number" in errs[0]
+
+
+@pytest.mark.parametrize("node", [
+    {"prim": "opening_range_high", "minutes": np.float64(30.0)},
+    {"prim": "opening_range_high"},
+], ids=["explicit-float", "default-float"])
+def test_numpy_float_opening_range_values_are_refused(node):
+    base = core_vocabulary()
+    replacement = Term(
+        "opening_range_high", "primitive", {"minutes": (5, 120)},
+        {"minutes": np.float64(30.0)}, lambda *_args: None,
+    )
+    vocabulary = Vocabulary(
+        base.indicators,
+        {**base.primitives, "opening_range_high": replacement},
+    )
+    spec = {**ORB, "long": {"all": [
+        {"lhs": {"src": "close"}, "op": ">", "rhs": node}]}}
+    errs = validate_spec(spec, vocabulary=vocabulary)
+    assert len(errs) == 1, errs
+    assert "opening_range_high.minutes must be a number" in errs[0]
+
+
+@pytest.mark.parametrize("bounds", [
+    (-(10 ** 400), 10 ** 400),
+    (float("-inf"), float("inf")),
+], ids=["huge", "infinite"])
+def test_invalid_injected_numeric_bounds_are_rejected_before_hashing(bounds):
+    base = core_vocabulary()
+    replacement = Term(
+        "bad_bounds", "primitive", {"n": bounds}, {"n": 30},
+        lambda *_args: None,
+    )
+    vocabulary = base.with_terms(replacement)
+    spec = {**ORB, "long": {"all": [
+        {"lhs": {"src": "close"}, "op": ">",
+         "rhs": {"prim": "bad_bounds"}}]}}
+    errs = validate_spec(spec, vocabulary=vocabulary)
+    assert len(errs) == 1 and "invalid argument rule" in errs[0], errs
 
 
 def test_the_grammar_takes_its_timeframes_from_the_schema():

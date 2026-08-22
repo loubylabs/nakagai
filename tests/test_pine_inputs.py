@@ -10,7 +10,8 @@ import numpy as np
 import pytest
 
 from nakagai.strategies.rules import (
-    PineExpr, PineInput, PineLowering, lower_pine, validate_spec,
+    PineCompileError, PineExpr, PineInput, PineLowering, lower_pine,
+    validate_spec,
 )
 from nakagai.strategies.rules.vocabulary import Term, core_vocabulary, is_choice_rule
 
@@ -71,6 +72,21 @@ def test_numpy_real_bounds_lower_to_typed_inputs(bounds, default, kind, cast_bou
     assert input_.kind == kind
     assert input_.default == default
     assert input_.bounds == cast_bounds
+
+
+@pytest.mark.parametrize("bounds", [
+    (-(10 ** 400), 10 ** 400),
+    (float("-inf"), float("inf")),
+], ids=["huge", "infinite"])
+def test_invalid_numeric_bounds_stop_pine_as_invalid_spec(bounds):
+    vocabulary = core_vocabulary().with_terms(
+        Term("bad_bounds", "series", {"n": bounds}, {"n": 30},
+             lambda series, _args: series,
+             pine=PineLowering(_emit_close_with_n)))
+    spec = _spec({"ind": "bad_bounds"})
+    with pytest.raises(PineCompileError) as exc:
+        lower_pine(spec, vocabulary)
+    assert exc.value.code == "invalid_spec"
 
 
 def test_an_integral_float_lowers_exactly_like_the_integer_it_equals():

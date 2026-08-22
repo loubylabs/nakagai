@@ -134,7 +134,7 @@ def test_screen_spec_rejects_a_huge_injected_opening_range_default():
          "rhs": {"prim": "opening_range_high"}}]}}
     errs = validate_screen_spec(spec, vocabulary=vocabulary)
     assert len(errs) == 1, errs
-    assert "opening_range_high.minutes number is out of range" in errs[0]
+    assert "opening_range_high.minutes has invalid argument rule" in errs[0]
 
 
 @pytest.mark.parametrize("node", [
@@ -153,7 +153,7 @@ def test_screen_spec_rejects_numeric_injected_values_without_a_canonical_form(no
         {"lhs": {"src": "close"}, "op": ">", "rhs": node}]}}
     errs = validate_screen_spec(spec, vocabulary=vocabulary)
     assert len(errs) == 1, errs
-    assert "custom_numeric.n number is out of range" in errs[0]
+    assert "custom_numeric.n has invalid argument rule" in errs[0]
 
 
 def test_screen_spec_refuses_a_required_injected_numeric_argument():
@@ -216,6 +216,45 @@ def test_screen_spec_rejects_numpy_opening_range_values(node):
     errs = validate_screen_spec(spec, vocabulary=vocabulary)
     assert len(errs) == 1, errs
     assert "opening_range_high.minutes must be a number" in errs[0]
+
+
+@pytest.mark.parametrize("node", [
+    {"prim": "opening_range_high", "minutes": np.float64(30.0)},
+    {"prim": "opening_range_high"},
+], ids=["explicit-float", "default-float"])
+def test_screen_spec_rejects_numpy_float_opening_range_values(node):
+    base = core_vocabulary()
+    replacement = Term(
+        "opening_range_high", "primitive", {"minutes": (5, 120)},
+        {"minutes": np.float64(30.0)}, lambda *_args: None,
+    )
+    vocabulary = Vocabulary(
+        base.indicators,
+        {**base.primitives, "opening_range_high": replacement},
+    )
+    spec = {"version": 1, "tf": "15m", "conditions": {"all": [
+        {"lhs": {"src": "close"}, "op": ">", "rhs": node}]}}
+    errs = validate_screen_spec(spec, vocabulary=vocabulary)
+    assert len(errs) == 1, errs
+    assert "opening_range_high.minutes must be a number" in errs[0]
+
+
+@pytest.mark.parametrize("bounds", [
+    (-(10 ** 400), 10 ** 400),
+    (float("-inf"), float("inf")),
+], ids=["huge", "infinite"])
+def test_screen_spec_rejects_invalid_injected_numeric_bounds(bounds):
+    base = core_vocabulary()
+    replacement = Term(
+        "bad_bounds", "primitive", {"n": bounds}, {"n": 30},
+        lambda *_args: None,
+    )
+    vocabulary = base.with_terms(replacement)
+    spec = {"version": 1, "tf": "15m", "conditions": {"all": [
+        {"lhs": {"src": "close"}, "op": ">",
+         "rhs": {"prim": "bad_bounds"}}]}}
+    errs = validate_screen_spec(spec, vocabulary=vocabulary)
+    assert len(errs) == 1 and "invalid argument rule" in errs[0], errs
 
 
 def test_validate_screen_spec_rejects_non_dict():
