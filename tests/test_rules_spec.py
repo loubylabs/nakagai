@@ -116,17 +116,40 @@ def _huge_default_opening_range_vocabulary():
     return Vocabulary(
         base.indicators,
         {**base.primitives, "opening_range_high": replacement},
-    ), huge
+    )
 
 
-def test_opening_range_huge_injected_default_formats_in_rule_validation():
-    vocabulary, huge = _huge_default_opening_range_vocabulary()
+def test_opening_range_huge_injected_default_is_rejected_by_canonical_validation():
+    vocabulary = _huge_default_opening_range_vocabulary()
     spec = {**ORB, "timeframe": "1h", "long": {"all": [
         {"lhs": {"src": "close"}, "op": ">",
          "rhs": {"prim": "opening_range_high"}}]}}
     errs = validate_spec(spec, vocabulary=vocabulary)
-    assert any(f"{huge}-minute" in error and "60 minutes" in error
-               for error in errs), errs
+    assert len(errs) == 1, errs
+    assert "opening_range_high.minutes number is out of range" in errs[0]
+
+
+def _custom_numeric_vocabulary(*, default):
+    base = core_vocabulary()
+    replacement = Term(
+        "custom_numeric", "primitive",
+        {"n": (-(10 ** 401), 10 ** 401)},
+        {"n": default}, lambda *_args: None,
+    )
+    return base.with_terms(replacement)
+
+
+@pytest.mark.parametrize("node", [
+    {"prim": "custom_numeric", "n": 10 ** 400},
+    {"prim": "custom_numeric"},
+], ids=["explicit", "default"])
+def test_numeric_injected_terms_reject_values_without_a_canonical_form(node):
+    vocabulary = _custom_numeric_vocabulary(default=10 ** 400)
+    spec = {**ORB, "long": {"all": [
+        {"lhs": {"src": "close"}, "op": ">", "rhs": node}]}}
+    errs = validate_spec(spec, vocabulary=vocabulary)
+    assert len(errs) == 1, errs
+    assert "custom_numeric.n number is out of range" in errs[0]
 
 
 def test_the_grammar_takes_its_timeframes_from_the_schema():

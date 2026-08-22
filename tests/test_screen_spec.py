@@ -116,7 +116,7 @@ def test_screen_spec_reports_invalid_opening_range_minutes_only_once(minutes):
     assert "opening_range_high.minutes must be a number in [5, 120]" in errs[0]
 
 
-def test_screen_spec_formats_a_huge_injected_opening_range_default():
+def test_screen_spec_rejects_a_huge_injected_opening_range_default():
     base = core_vocabulary()
     huge = -(10 ** 400)
     replacement = Term(
@@ -132,8 +132,27 @@ def test_screen_spec_formats_a_huge_injected_opening_range_default():
         {"lhs": {"src": "close"}, "op": ">",
          "rhs": {"prim": "opening_range_high"}}]}}
     errs = validate_screen_spec(spec, vocabulary=vocabulary)
-    assert any(f"{huge}-minute" in error and "60 minutes" in error
-               for error in errs), errs
+    assert len(errs) == 1, errs
+    assert "opening_range_high.minutes number is out of range" in errs[0]
+
+
+@pytest.mark.parametrize("node", [
+    {"prim": "custom_numeric", "n": 10 ** 400},
+    {"prim": "custom_numeric"},
+], ids=["explicit", "default"])
+def test_screen_spec_rejects_numeric_injected_values_without_a_canonical_form(node):
+    base = core_vocabulary()
+    replacement = Term(
+        "custom_numeric", "primitive",
+        {"n": (-(10 ** 401), 10 ** 401)},
+        {"n": 10 ** 400}, lambda *_args: None,
+    )
+    vocabulary = base.with_terms(replacement)
+    spec = {"version": 1, "tf": "15m", "conditions": {"all": [
+        {"lhs": {"src": "close"}, "op": ">", "rhs": node}]}}
+    errs = validate_screen_spec(spec, vocabulary=vocabulary)
+    assert len(errs) == 1, errs
+    assert "custom_numeric.n number is out of range" in errs[0]
 
 
 def test_validate_screen_spec_rejects_non_dict():

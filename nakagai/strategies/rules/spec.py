@@ -97,16 +97,30 @@ class _Budget:
         self.nodes = 0
 
 
-def _check_args(name: str, given: dict, schema: dict, path: str, errs: list[str],
+def _check_args(name: str, given: dict, term, path: str, errs: list[str],
                 budget: _Budget, vocabulary: Vocabulary, depth: int,
                 skip: tuple[str, ...] = ()) -> None:
+    schema = term.args
+    term_defaults = term.defaults
     # A condition-typed arg may not declare a default (N3-D13), so its
-    # ABSENCE is itself an error, unlike every other arg here: those fall back
-    # to term.defaults at evaluation time, so the spec is free to omit them
-    # and the loop below only ever walks the keys the spec actually supplied.
+    # ABSENCE is itself an error. Other args may fall back to term.defaults,
+    # which are validated below before the evaluator can receive them.
     for arg, rule in schema.items():
         if is_condition_rule(rule) and arg not in given:
             errs.append(f"{path}: {name} needs {arg} = {{lhs, op, rhs}}")
+
+    def check_numeric(arg: str, value, rule) -> None:
+        lo, hi = rule
+        if _not_num(value, lo, hi):
+            errs.append(f"{path}: {name}.{arg} must be a number in "
+                        f"[{lo}, {hi}], got {value!r}")
+        elif not _canonicalizable(value):
+            errs.append(f"{path}: {name}.{arg} number is out of range")
+
+    for arg, rule in schema.items():
+        if (arg not in given and arg in term_defaults
+                and not is_condition_rule(rule) and not is_choice_rule(rule)):
+            check_numeric(arg, term_defaults[arg], rule)
     for arg, v in given.items():
         if arg in skip:
             continue
@@ -124,9 +138,7 @@ def _check_args(name: str, given: dict, schema: dict, path: str, errs: list[str]
             if v not in rule:
                 errs.append(f"{path}: {name}.{arg} must be one of {rule}, got {v!r}")
         else:
-            lo, hi = rule
-            if _not_num(v, lo, hi):
-                errs.append(f"{path}: {name}.{arg} must be a number in [{lo}, {hi}], got {v!r}")
+            check_numeric(arg, v, rule)
 
 
 def _check_condition_arg(name: str, arg: str, cond, given: dict, path: str,
@@ -295,7 +307,7 @@ def _check_opening_range_window(item: dict, prim: str, src_tf: str,
                             and not isinstance(bound, bool)
                             for bound in bounds))):
         return
-    if _not_num(minutes, *bounds):
+    if _not_num(minutes, *bounds) or not _canonicalizable(minutes):
         return
     bar_minutes = delta.total_seconds() / 60
     if bar_minutes > minutes:
@@ -442,7 +454,7 @@ def _check_expr(node, path: str, errs: list[str], budget: _Budget,
             else:
                 _check_expr(node["of"], f"{path}.of", errs, budget,
                             vocabulary, depth + 1)
-        _check_args(name, node, term.args, path, errs, budget, vocabulary,
+        _check_args(name, node, term, path, errs, budget, vocabulary,
                     depth, skip=("ind", "of", "tf"))
         _check_tf(node, path, errs)
         return
@@ -463,7 +475,7 @@ def _check_expr(node, path: str, errs: list[str], budget: _Budget,
             # _cross_prev is symmetric, so it would now fire.
             errs.append(f"{path}: the left side of a cross must be a series; "
                         f"{name} is a level read from the end of the frame")
-        _check_args(name, node, term.args, path, errs, budget, vocabulary,
+        _check_args(name, node, term, path, errs, budget, vocabulary,
                     depth, skip=("prim", "tf"))
         if "tf" in node and term.session_scoped:
             errs.append(f"{path}: {name} is session-scoped and takes no tf")

@@ -120,8 +120,8 @@ def test_two_arguments_that_sanitize_alike_collide_rather_than_merge():
 
 
 def test_a_default_outside_its_own_bounds_is_refused():
-    # validate_spec only ever checks the values a SPEC supplies, so a term whose
-    # own default sits outside its declared bounds reaches the compiler intact.
+    # The validator checks omitted defaults against the term's own bounds before
+    # the compiler can receive an unsavable call.
     vocab = core_vocabulary().with_terms(
         Term("drifted", "series", {"n": (2, 500)}, {"n": 1000},
              lambda series, _args: series,
@@ -129,8 +129,8 @@ def test_a_default_outside_its_own_bounds_is_refused():
                  ctx.calc(call, f"ta.sma(close, {ctx.arg(call, 'n')})")))))
     with pytest.raises(PineCompileError) as exc:
         lower_pine(_spec_using("drifted"), vocab)
-    assert exc.value.code == "pine_bad_input"
-    assert exc.value.path == "long.all[0].lhs.drifted.n"
+    assert exc.value.code == "invalid_spec"
+    assert "drifted.n" in str(exc.value)
 
 
 def test_an_argument_the_schema_never_declared_is_refused():
