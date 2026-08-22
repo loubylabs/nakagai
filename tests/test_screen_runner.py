@@ -172,6 +172,10 @@ def test_run_screen_fetches_the_source_and_derives_a_referenced_timeframe(tmp_pa
     cache = BarCache(tmp_path / "derived-cache")
     calls = []
 
+    class _TrappingDerivedProvider:
+        def fetch_bars(self, symbol, timeframe, start, end):
+            raise AssertionError("derived timeframe must not be fetched")
+
     class _HourlyProvider:
         def fetch_bars(self, symbol, timeframe, start, end):
             calls.append((symbol, timeframe))
@@ -179,7 +183,7 @@ def test_run_screen_fetches_the_source_and_derives_a_referenced_timeframe(tmp_pa
 
     result = run_screen(
         FOUR_HOUR_ABOVE_SMA20, ["ONLY"], cache, now=NOW,
-        providers={"1h": _HourlyProvider()})
+        providers={"4h": _TrappingDerivedProvider(), "1h": _HourlyProvider()})
 
     assert calls == [("ONLY", "1h")]
     assert len(cache.load("ONLY", "4h")) >= 20
@@ -220,3 +224,38 @@ def test_run_screen_uses_cached_derived_bars_when_derivation_fails(
     assert result["rows"][0]["matched"] is True
     assert "sync failed: derive failed" in result["rows"][0]["note"]
     assert any("derive failed" in error for error in result["errors"])
+
+
+def test_run_screen_isolates_a_derived_failure_by_symbol(tmp_path, monkeypatch):
+    import nakagai.screen.runner as runner_mod
+
+    cache = BarCache(tmp_path / "selective-derive-failure")
+    idx = pd.date_range(end="2026-07-16 20:00", periods=60,
+                        freq="4h", tz="UTC")
+    closes = pd.Series(np.linspace(1, 60, 60), index=idx, dtype=float)
+    cached_derived = pd.DataFrame(
+        {"open": closes, "high": closes + 1, "low": closes - 1,
+         "close": closes, "volume": 1_000_000.0}, index=idx)
+    for symbol in ("BAD", "GOOD"):
+        cache.upsert(symbol, "1h", _hourly_bars(np.linspace(1, 96, 96)))
+        cache.upsert(symbol, "4h", cached_derived)
+
+    real_derive = runner_mod.derive_incremental
+    calls = []
+
+    def selective_derive(cache_, symbol, timeframe):
+        calls.append(symbol)
+        if symbol == "BAD":
+            raise RuntimeError("derive failed")
+        return real_derive(cache_, symbol, timeframe)
+
+    monkeypatch.setattr(runner_mod, "derive_incremental", selective_derive)
+    result = run_screen(FOUR_HOUR_ABOVE_SMA20, ["BAD", "GOOD"], cache, now=NOW)
+
+    by_symbol = {row["symbol"]: row for row in result["rows"]}
+    assert calls == ["BAD", "GOOD"]
+    assert by_symbol["BAD"]["matched"] is True
+    assert "sync failed: derive failed" in by_symbol["BAD"]["note"]
+    assert by_symbol["GOOD"]["matched"] is True
+    assert by_symbol["GOOD"]["note"] == ""
+    assert result["errors"] == ["BAD: sync failed: derive failed"]

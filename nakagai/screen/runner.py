@@ -1,9 +1,10 @@
 """Deterministic one-shot screen evaluation. No LLM anywhere in this path.
 
-Providers, when given, sync each symbol incrementally before evaluating (only
-for the timeframes the spec references). A sync failure never aborts
-evaluation: it is noted on the row and cached bars still evaluate. Every row
-carries its own bar_time so staleness is visible, never hidden."""
+Providers, when given, sync each symbol's directly referenced timeframes and
+the source timeframes of referenced derived frames before evaluating. A sync
+failure never aborts evaluation: it is noted on the row and cached bars still
+evaluate. Every row carries its own bar_time so staleness is visible, never
+hidden."""
 
 import pandas as pd
 
