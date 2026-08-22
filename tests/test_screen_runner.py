@@ -38,6 +38,11 @@ ABOVE_SMA20 = {"version": 1, "tf": "1d", "conditions": {"all": [
     {"lhs": {"src": "close"}, "op": ">", "rhs": {"ind": "sma", "n": 20}}]}}
 
 
+FOUR_HOUR_ABOVE_SMA20 = {"version": 1, "tf": "4h", "conditions": {"all": [
+    {"lhs": {"src": "close"}, "op": ">",
+     "rhs": {"ind": "sma", "n": 20}}]}}
+
+
 DOUBLE_CLOSE = {"version": 1, "tf": "1d", "conditions": {"all": [
     {"lhs": {"ind": "double_close"}, "op": ">", "rhs": {"src": "close"}}]}}
 
@@ -161,3 +166,57 @@ def test_run_screen_evaluates_cached_bars_when_sync_fails(cache):
     assert row["matched"] is True  # cached bars still evaluate
     assert "sync failed" in row["note"]
     assert any("sync failed" in e for e in result["errors"])
+
+
+def test_run_screen_fetches_the_source_and_derives_a_referenced_timeframe(tmp_path):
+    cache = BarCache(tmp_path / "derived-cache")
+    calls = []
+
+    class _HourlyProvider:
+        def fetch_bars(self, symbol, timeframe, start, end):
+            calls.append((symbol, timeframe))
+            return _hourly_bars(np.linspace(1, 96, 96))
+
+    result = run_screen(
+        FOUR_HOUR_ABOVE_SMA20, ["ONLY"], cache, now=NOW,
+        providers={"1h": _HourlyProvider()})
+
+    assert calls == [("ONLY", "1h")]
+    assert len(cache.load("ONLY", "4h")) >= 20
+    assert result["errors"] == []
+    assert result["rows"][0]["matched"] is True
+
+
+def test_run_screen_derives_from_cached_source_without_providers(tmp_path):
+    cache = BarCache(tmp_path / "cached-source")
+    cache.upsert("CACHED", "1h", _hourly_bars(np.linspace(1, 96, 96)))
+
+    result = run_screen(FOUR_HOUR_ABOVE_SMA20, ["CACHED"], cache, now=NOW)
+
+    assert len(cache.load("CACHED", "4h")) >= 20
+    assert result["errors"] == []
+    assert result["rows"][0]["matched"] is True
+
+
+def test_run_screen_uses_cached_derived_bars_when_derivation_fails(
+        tmp_path, monkeypatch):
+    import nakagai.screen.runner as runner_mod
+
+    cache = BarCache(tmp_path / "derive-failure")
+    idx = pd.date_range(end="2026-07-16 20:00", periods=60,
+                        freq="4h", tz="UTC")
+    closes = pd.Series(np.linspace(1, 60, 60), index=idx, dtype=float)
+    bars = pd.DataFrame(
+        {"open": closes, "high": closes + 1, "low": closes - 1,
+         "close": closes, "volume": 1_000_000.0}, index=idx)
+    cache.upsert("CACHED", "4h", bars)
+
+    def fail_derive(*args, **kwargs):
+        raise RuntimeError("derive failed")
+
+    monkeypatch.setattr(runner_mod, "derive_incremental", fail_derive)
+    result = run_screen(FOUR_HOUR_ABOVE_SMA20, ["CACHED"], cache, now=NOW)
+
+    assert result["rows"][0]["matched"] is True
+    assert "sync failed: derive failed" in result["rows"][0]["note"]
+    assert any("derive failed" in error for error in result["errors"])
