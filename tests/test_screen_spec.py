@@ -4,7 +4,9 @@ import pytest
 
 from nakagai.screen.prompt import render_screen_prompt
 from nakagai.strategies.rules.spec import group_text, validate_condition_group
-from nakagai.strategies.rules.vocabulary import Term, core_vocabulary
+from nakagai.strategies.rules.vocabulary import (
+    Term, Vocabulary, core_vocabulary,
+)
 
 RSI_LT_30 = {"lhs": {"ind": "rsi", "n": 14}, "op": "<", "rhs": 30}
 
@@ -112,6 +114,26 @@ def test_screen_spec_reports_invalid_opening_range_minutes_only_once(minutes):
     errs = validate_screen_spec(spec)
     assert len(errs) == 1, errs
     assert "opening_range_high.minutes must be a number in [5, 120]" in errs[0]
+
+
+def test_screen_spec_formats_a_huge_injected_opening_range_default():
+    base = core_vocabulary()
+    huge = -(10 ** 400)
+    replacement = Term(
+        "opening_range_high", "primitive",
+        {"minutes": (-(10 ** 401), 10 ** 401)},
+        {"minutes": huge}, lambda *_args: None,
+    )
+    vocabulary = Vocabulary(
+        base.indicators,
+        {**base.primitives, "opening_range_high": replacement},
+    )
+    spec = {"version": 1, "tf": "1h", "conditions": {"all": [
+        {"lhs": {"src": "close"}, "op": ">",
+         "rhs": {"prim": "opening_range_high"}}]}}
+    errs = validate_screen_spec(spec, vocabulary=vocabulary)
+    assert any(f"{huge}-minute" in error and "60 minutes" in error
+               for error in errs), errs
 
 
 def test_validate_screen_spec_rejects_non_dict():

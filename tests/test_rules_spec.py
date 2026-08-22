@@ -10,7 +10,9 @@ from nakagai.strategies.rules import (
 from nakagai.strategies.rules import spec as rules_spec
 from nakagai.strategies.rules.spec import (
     MAX_DEPTH, TIMEFRAMES, _expr_text, group_text, validate_condition_group)
-from nakagai.strategies.rules.vocabulary import Term, Vocabulary, core_vocabulary
+from nakagai.strategies.rules.vocabulary import (
+    CONDITION_ARG, Term, Vocabulary, core_vocabulary,
+)
 
 ORB = {
     "version": 2, "name": "orb-volume", "timeframe": "15m",
@@ -87,7 +89,9 @@ def test_opening_range_invalid_minutes_are_reported_only_by_argument_validation(
     Term("opening_range_high", "primitive", {}, {}, lambda *_args: None),
     Term("opening_range_high", "primitive", {"minutes": ("short", "wide")},
          {"minutes": "wide"}, lambda *_args: None),
-], ids=["no-minutes-arg", "choice-minutes-arg"])
+    Term("opening_range_high", "primitive", {"minutes": CONDITION_ARG},
+         {}, lambda *_args: None),
+], ids=["no-minutes-arg", "choice-minutes-arg", "condition-minutes-arg"])
 def test_opening_range_width_guard_ignores_non_numeric_injected_terms(replacement):
     base = core_vocabulary()
     vocabulary = Vocabulary(
@@ -99,6 +103,30 @@ def test_opening_range_width_guard_ignores_non_numeric_injected_terms(replacemen
          "rhs": {"prim": "opening_range_high", "minutes": 30}}]}}
     errs = validate_spec(spec, vocabulary=vocabulary)
     assert all("asks for" not in error for error in errs), errs
+
+
+def _huge_default_opening_range_vocabulary():
+    base = core_vocabulary()
+    huge = -(10 ** 400)
+    replacement = Term(
+        "opening_range_high", "primitive",
+        {"minutes": (-(10 ** 401), 10 ** 401)},
+        {"minutes": huge}, lambda *_args: None,
+    )
+    return Vocabulary(
+        base.indicators,
+        {**base.primitives, "opening_range_high": replacement},
+    ), huge
+
+
+def test_opening_range_huge_injected_default_formats_in_rule_validation():
+    vocabulary, huge = _huge_default_opening_range_vocabulary()
+    spec = {**ORB, "timeframe": "1h", "long": {"all": [
+        {"lhs": {"src": "close"}, "op": ">",
+         "rhs": {"prim": "opening_range_high"}}]}}
+    errs = validate_spec(spec, vocabulary=vocabulary)
+    assert any(f"{huge}-minute" in error and "60 minutes" in error
+               for error in errs), errs
 
 
 def test_the_grammar_takes_its_timeframes_from_the_schema():

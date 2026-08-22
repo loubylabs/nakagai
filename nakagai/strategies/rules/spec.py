@@ -300,8 +300,8 @@ def _check_opening_range_window(item: dict, prim: str, src_tf: str,
     bar_minutes = delta.total_seconds() / 60
     if bar_minutes > minutes:
         errs.append(
-            f"{path}: {prim} asks for a {minutes:g}-minute opening range "
-            f"on {src_tf!r} bars, which are {bar_minutes:g} minutes wide; "
+            f"{path}: {prim} asks for a {_num_text(minutes)}-minute opening range "
+            f"on {src_tf!r} bars, which are {_num_text(bar_minutes)} minutes wide; "
             "use a finer timeframe or widen minutes")
 
 
@@ -570,6 +570,14 @@ def _not_num(v, lo, hi) -> bool:
     return isinstance(v, bool) or not isinstance(v, (int, float)) or not lo <= v <= hi
 
 
+def _num_text(value) -> str:
+    """Render numeric values compactly, including integers beyond float range."""
+    try:
+        return f"{value:g}"
+    except (OverflowError, ValueError):
+        return str(value)
+
+
 def _span(bounds) -> str:
     """A bounds pair as the error messages spell it: [0.1, 10], not [0.1, 10.0]."""
     return f"[{bounds[0]:g}, {bounds[1]:g}]"
@@ -726,15 +734,7 @@ def group_text(group: dict, vocabulary: Vocabulary | None = None) -> str:
 
 def _expr_text(node, vocabulary: Vocabulary) -> str:
     if isinstance(node, (int, float)):
-        try:
-            return f"{node:g}"
-        except (OverflowError, ValueError):
-            # `:g` goes through float, which overflows on an int past the float
-            # range. The grammar accepts any JSON number, so the readback
-            # renders any JSON number: exactly, here, rather than refusing a
-            # spec that is merely eccentric. Refusing it at validation was the
-            # first fix and it changed the verdict on an input that was legal.
-            return str(node)
+        return _num_text(node)
     if "src" in node:
         return node["src"] if "tf" not in node else f"{node['src']}[{node['tf']}]"
     if "op" in node:
