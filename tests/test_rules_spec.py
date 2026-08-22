@@ -34,10 +34,39 @@ def test_valid_v2_spec_passes():
 def test_a_four_hour_spec_validates():
     """4h is a real timeframe, derived from cached 1h bars (nakagai/data/
     resample.py), so the grammar accepts it on the spec and on a leaf."""
-    assert validate_spec({**ORB, "timeframe": "4h"}) == []
+    wide_orb = {**ORB, "timeframe": "4h", "long": {"all": [
+        {"lhs": {"src": "close"}, "op": ">", "rhs": 1}]}}
+    assert validate_spec(wide_orb) == []
     on_a_leaf = {**ORB, "long": {"all": [{"lhs": {"src": "close", "tf": "4h"},
                                           "op": ">", "rhs": {"ind": "sma", "n": 20}}]}}
     assert validate_spec(on_a_leaf) == []
+
+
+def test_opening_range_refuses_a_bar_longer_than_its_window():
+    spec = {**ORB, "timeframe": "1h", "long": {"all": [
+        {"lhs": {"src": "close"}, "op": ">",
+         "rhs": {"prim": "opening_range_high", "minutes": 30}}]}}
+    errs = validate_spec(spec)
+    assert any("opening_range_high" in error and "30-minute" in error
+               and "'1h'" in error and "60 minutes" in error
+               for error in errs), errs
+
+
+def test_opening_range_uses_its_declared_default_for_the_width_guard():
+    spec = {**ORB, "timeframe": "4h", "long": {"all": [
+        {"lhs": {"src": "close"}, "op": ">",
+         "rhs": {"prim": "opening_range_low"}}]}}
+    errs = validate_spec(spec)
+    assert any("opening_range_low" in error and "30-minute" in error
+               and "'4h'" in error and "240 minutes" in error
+               for error in errs), errs
+
+
+def test_opening_range_accepts_a_window_equal_to_one_bar():
+    spec = {**ORB, "timeframe": "15m", "long": {"all": [
+        {"lhs": {"src": "close"}, "op": ">",
+         "rhs": {"prim": "opening_range_high", "minutes": 15}}]}}
+    assert validate_spec(spec) == []
 
 
 def test_the_grammar_takes_its_timeframes_from_the_schema():
@@ -350,7 +379,7 @@ def test_day_of_week_is_still_fine_on_a_daily_driving_frame():
     assert validate_spec(_daily({"prim": "day_of_week"})) == []
 
 
-@pytest.mark.parametrize("tf", ["15m", "1h"])
+@pytest.mark.parametrize("tf", ["15m"])
 @pytest.mark.parametrize("node", INTRADAY_ONLY, ids=lambda n: n["prim"])
 def test_the_same_primitives_are_untouched_on_an_intraday_driving_frame(node, tf):
     assert validate_spec({**_daily(node), "timeframe": tf}) == []

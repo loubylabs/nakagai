@@ -249,6 +249,7 @@ def _prims_in(node, names_allowed) -> set[str]:
 # What a one-bar session does to each primitive that cannot survive it. Said
 # per primitive because the NL compiler retries against this text, and "needs
 # intraday bars" alone gives it nothing to reason with.
+_OPENING_RANGE_PRIMS = frozenset({"opening_range_high", "opening_range_low"})
 _ONE_BAR_SESSION = {
     "opening_range_high": "the opening-range window is the first few minutes "
                           "after the 09:30 bell and a whole-session bar cannot "
@@ -278,6 +279,23 @@ def _one_bar_session(prim: str) -> str:
     return _ONE_BAR_SESSION.get(
         prim, "it reads a position within the trading session, and a "
               "whole-session bar has only one such position")
+
+
+def _check_opening_range_window(item: dict, prim: str, src_tf: str,
+                                path: str, errs: list[str], term) -> None:
+    if prim not in _OPENING_RANGE_PRIMS:
+        return
+    delta = DEFAULT_TIMEFRAMES.deltas.get(src_tf)
+    minutes = item.get("minutes", term.defaults.get("minutes"))
+    if (delta is None or isinstance(minutes, bool)
+            or not isinstance(minutes, (int, float))):
+        return
+    bar_minutes = delta.total_seconds() / 60
+    if bar_minutes > minutes:
+        errs.append(
+            f"{path}: {prim} asks for a {minutes:g}-minute opening range "
+            f"on {src_tf!r} bars, which are {bar_minutes:g} minutes wide; "
+            "use a finer timeframe or widen minutes")
 
 
 def _check_session_aligned_refs(node, eval_tf: str, path: str,
@@ -337,6 +355,8 @@ def _check_session_aligned_refs(node, eval_tf: str, path: str,
         # `names` rather than a bare `.get`: an unhashable prim raises out of
         # the lookup, and this walk runs over the caller's whole condition tree.
         term = vocabulary.primitives[prim] if names(prim, vocabulary.primitives) else None
+        if term is not None:
+            _check_opening_range_window(item, prim, src_tf, at, errs, term)
         if term is not None and term.driving_frame_intraday and src_tf in SESSION_ALIGNED:
             errs.append(f"{at}: {prim} needs intraday bars and this one is "
                         f"evaluated on {src_tf!r}, where "

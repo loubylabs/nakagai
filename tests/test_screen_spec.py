@@ -89,6 +89,16 @@ def test_an_intraday_screen_may_reference_a_higher_timeframe():
     assert validate_screen_spec(spec) == []
 
 
+def test_screen_spec_refuses_an_opening_range_shorter_than_its_bar():
+    spec = {"version": 1, "tf": "1h", "conditions": {"all": [
+        {"lhs": {"src": "close"}, "op": ">",
+         "rhs": {"prim": "opening_range_high", "minutes": 30}}]}}
+    errs = validate_screen_spec(spec)
+    assert any("opening_range_high" in error and "30-minute" in error
+               and "'1h'" in error and "60 minutes" in error
+               for error in errs), errs
+
+
 def test_validate_screen_spec_rejects_non_dict():
     assert validate_screen_spec([1]) == ["spec must be a JSON object"]
 
