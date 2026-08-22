@@ -10,7 +10,9 @@ readback; canon.py owns identity hashing.
 
 from nakagai.data.schema import DEFAULT_TIMEFRAMES
 from nakagai.strategies.rules.vocabulary import (
-    Vocabulary, is_choice_rule, is_condition_rule, resolve_vocabulary,
+    Vocabulary, is_choice_rule, is_condition_rule, is_json_number,
+    is_range_rule,
+    resolve_vocabulary,
 )
 
 VERSION = 2
@@ -97,16 +99,41 @@ class _Budget:
         self.nodes = 0
 
 
-def _check_args(name: str, given: dict, schema: dict, path: str, errs: list[str],
+def _check_args(name: str, given: dict, term, path: str, errs: list[str],
                 budget: _Budget, vocabulary: Vocabulary, depth: int,
                 skip: tuple[str, ...] = ()) -> None:
+    schema = term.args
+    term_defaults = term.defaults
     # A condition-typed arg may not declare a default (N3-D13), so its
-    # ABSENCE is itself an error, unlike every other arg here: those fall back
-    # to term.defaults at evaluation time, so the spec is free to omit them
-    # and the loop below only ever walks the keys the spec actually supplied.
+    # ABSENCE is itself an error. Other args may fall back to term.defaults,
+    # which are validated below before the evaluator can receive them.
+    def check_numeric(arg: str, value, rule) -> None:
+        lo, hi = rule
+        if _not_num(value, lo, hi):
+            errs.append(f"{path}: {name}.{arg} must be a number in "
+                        f"[{lo}, {hi}], got {value!r}")
+        elif not _canonicalizable(value):
+            errs.append(f"{path}: {name}.{arg} number is out of range")
+
     for arg, rule in schema.items():
-        if is_condition_rule(rule) and arg not in given:
+        if arg in given:
+            continue
+        if is_condition_rule(rule):
             errs.append(f"{path}: {name} needs {arg} = {{lhs, op, rhs}}")
+        elif is_choice_rule(rule):
+            if arg not in term_defaults:
+                errs.append(f"{path}: {name} needs {arg}")
+            elif term_defaults[arg] not in rule:
+                errs.append(f"{path}: {name}.{arg} default must be one of "
+                            f"{rule}, got {term_defaults[arg]!r}")
+        elif is_range_rule(rule):
+            if arg not in term_defaults:
+                errs.append(f"{path}: {name} needs {arg}")
+            else:
+                check_numeric(arg, term_defaults[arg], rule)
+        else:
+            errs.append(f"{path}: {name}.{arg} has invalid argument rule "
+                        f"{rule!r}")
     for arg, v in given.items():
         if arg in skip:
             continue
@@ -123,10 +150,11 @@ def _check_args(name: str, given: dict, schema: dict, path: str, errs: list[str]
         elif is_choice_rule(rule):
             if v not in rule:
                 errs.append(f"{path}: {name}.{arg} must be one of {rule}, got {v!r}")
+        elif is_range_rule(rule):
+            check_numeric(arg, v, rule)
         else:
-            lo, hi = rule
-            if isinstance(v, bool) or not isinstance(v, (int, float)) or not lo <= v <= hi:
-                errs.append(f"{path}: {name}.{arg} must be a number in [{lo}, {hi}], got {v!r}")
+            errs.append(f"{path}: {name}.{arg} has invalid argument rule "
+                        f"{rule!r}")
 
 
 def _check_condition_arg(name: str, arg: str, cond, given: dict, path: str,
@@ -194,7 +222,7 @@ def _canonicalizable(value: float) -> bool:
     The readback's own fallback in `_expr_text` stays, because a describer is
     read by surfaces that must not raise whatever reaches them.
 
-    The test is exactly `float()` succeeding, and NOT `math.isfinite`. JSON has
+    The test is `float()` succeeding, plus an exact integer round trip. JSON has
     no infinity literal, but `1e309` parses to one, and `float(inf)` is `inf`,
     which `canonical_expr` returns and `spec_hash` hashes. So an infinity HAS a
     canonical form and is accepted here. Refusing it would be a different rule
@@ -203,8 +231,10 @@ def _canonicalizable(value: float) -> bool:
     it can explain.
     """
     try:
-        float(value)
+        converted = float(value)
     except (OverflowError, ValueError):
+        return False
+    if type(value) is int and int(converted) != value:
         return False
     return True
 
@@ -249,6 +279,7 @@ def _prims_in(node, names_allowed) -> set[str]:
 # What a one-bar session does to each primitive that cannot survive it. Said
 # per primitive because the NL compiler retries against this text, and "needs
 # intraday bars" alone gives it nothing to reason with.
+_OPENING_RANGE_PRIMS = frozenset({"opening_range_high", "opening_range_low"})
 _ONE_BAR_SESSION = {
     "opening_range_high": "the opening-range window is the first few minutes "
                           "after the 09:30 bell and a whole-session bar cannot "
@@ -280,9 +311,28 @@ def _one_bar_session(prim: str) -> str:
               "whole-session bar has only one such position")
 
 
+def _check_opening_range_window(item: dict, prim: str, src_tf: str,
+                                path: str, errs: list[str], term) -> None:
+    if prim not in _OPENING_RANGE_PRIMS:
+        return
+    delta = DEFAULT_TIMEFRAMES.deltas.get(src_tf)
+    minutes = item.get("minutes", term.defaults.get("minutes"))
+    bounds = term.args.get("minutes")
+    if delta is None or not is_range_rule(bounds):
+        return
+    if _not_num(minutes, *bounds) or not _canonicalizable(minutes):
+        return
+    bar_minutes = delta.total_seconds() / 60
+    if bar_minutes > minutes:
+        errs.append(
+            f"{path}: {prim} asks for a {_num_text(minutes)}-minute opening range "
+            f"on {src_tf!r} bars, which are {_num_text(bar_minutes)} minutes wide; "
+            "use a finer timeframe or widen minutes")
+
+
 def _check_session_aligned_refs(node, eval_tf: str, path: str,
                                 errs: list[str], vocabulary: Vocabulary) -> None:
-    """Refuse what a session-aligned frame cannot answer. Two rules live here.
+    """Refuse what a session-aligned frame cannot answer. Three rules live here.
 
     The first: a cross-timeframe reference evaluated on a session-aligned
     frame. frame_eval carries a series from one timeframe onto another by
@@ -302,9 +352,13 @@ def _check_session_aligned_refs(node, eval_tf: str, path: str,
     then read NaN forever; nothing raised, because the only primitive rule was
     the foreign-`tf` one, which such a spec never trips.
 
-    The two rules run over two different sets, deliberately: see
+    The first two rules run over two different sets, deliberately: see
     Term.driving_frame_intraday in vocabulary.py on why day_of_week is refused
     a foreign `tf` and welcome on daily bars.
+
+    The third: an opening-range primitive whose requested window is narrower
+    than a fixed intraday bar. Its level cannot be formed from a partial bar,
+    so the width guard reports the mismatch before evaluation.
 
     `eval_tf` follows the evaluator: a node's own `tf` is the frame its
     children are computed on, which is how a bars_since with a tf, or an
@@ -337,6 +391,8 @@ def _check_session_aligned_refs(node, eval_tf: str, path: str,
         # `names` rather than a bare `.get`: an unhashable prim raises out of
         # the lookup, and this walk runs over the caller's whole condition tree.
         term = vocabulary.primitives[prim] if names(prim, vocabulary.primitives) else None
+        if term is not None:
+            _check_opening_range_window(item, prim, src_tf, at, errs, term)
         if term is not None and term.driving_frame_intraday and src_tf in SESSION_ALIGNED:
             errs.append(f"{at}: {prim} needs intraday bars and this one is "
                         f"evaluated on {src_tf!r}, where "
@@ -367,7 +423,7 @@ def _check_expr(node, path: str, errs: list[str], budget: _Budget,
     if isinstance(node, bool):
         errs.append(f"{path}: booleans are not operands")
         return
-    if isinstance(node, (int, float)):
+    if is_json_number(node):
         if series_required:
             errs.append(f"{path}: the left side of a cross must be a series, not a number")
         elif not _canonicalizable(node):
@@ -411,7 +467,7 @@ def _check_expr(node, path: str, errs: list[str], budget: _Budget,
             else:
                 _check_expr(node["of"], f"{path}.of", errs, budget,
                             vocabulary, depth + 1)
-        _check_args(name, node, term.args, path, errs, budget, vocabulary,
+        _check_args(name, node, term, path, errs, budget, vocabulary,
                     depth, skip=("ind", "of", "tf"))
         _check_tf(node, path, errs)
         return
@@ -432,7 +488,7 @@ def _check_expr(node, path: str, errs: list[str], budget: _Budget,
             # _cross_prev is symmetric, so it would now fire.
             errs.append(f"{path}: the left side of a cross must be a series; "
                         f"{name} is a level read from the end of the frame")
-        _check_args(name, node, term.args, path, errs, budget, vocabulary,
+        _check_args(name, node, term, path, errs, budget, vocabulary,
                     depth, skip=("prim", "tf"))
         if "tf" in node and term.session_scoped:
             errs.append(f"{path}: {name} is session-scoped and takes no tf")
@@ -533,10 +589,18 @@ def _check_group(group, path: str, errs: list[str], budget: _Budget,
 
 
 def _not_num(v, lo, hi) -> bool:
-    """True when v is not a plain int/float in [lo, hi]; bools are excluded.
+    """True when v is not a plain JSON number in [lo, hi]; bools are excluded.
     This never raises, so it is safe to call on any user-supplied value
     (a string, a list, None) before it ever reaches float()/int()."""
-    return isinstance(v, bool) or not isinstance(v, (int, float)) or not lo <= v <= hi
+    return not is_json_number(v) or not lo <= v <= hi
+
+
+def _num_text(value) -> str:
+    """Render numeric values compactly, including integers beyond float range."""
+    try:
+        return f"{value:g}"
+    except (OverflowError, ValueError):
+        return str(value)
 
 
 def _span(bounds) -> str:
@@ -695,15 +759,7 @@ def group_text(group: dict, vocabulary: Vocabulary | None = None) -> str:
 
 def _expr_text(node, vocabulary: Vocabulary) -> str:
     if isinstance(node, (int, float)):
-        try:
-            return f"{node:g}"
-        except (OverflowError, ValueError):
-            # `:g` goes through float, which overflows on an int past the float
-            # range. The grammar accepts any JSON number, so the readback
-            # renders any JSON number: exactly, here, rather than refusing a
-            # spec that is merely eccentric. Refusing it at validation was the
-            # first fix and it changed the verdict on an input that was legal.
-            return str(node)
+        return _num_text(node)
     if "src" in node:
         return node["src"] if "tf" not in node else f"{node['src']}[{node['tf']}]"
     if "op" in node:

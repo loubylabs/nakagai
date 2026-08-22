@@ -357,13 +357,10 @@ def test_arg_sets_refuses_a_list_of_choices_rather_than_testing_two_of_three(bar
 
 
 def test_a_range_rule_with_numpy_bounds_is_read_as_a_range_whichever_shape(bars):
-    """isinstance(value, (int, float)) split the numpy scalars arbitrarily.
+    """The shared range predicate accepts NumPy real scalars consistently.
 
-    Measured: np.float64 subclasses float and passed, np.int64 does not subclass
-    int and failed, so the same schema enumerated with float bounds and came back
-    FAILED as unenumerable with integer bounds. The refusal is loud, and no core
-    term is affected, but node 02 generates schemas from another library's
-    signatures, which is exactly where numpy scalars arrive.
+    Node 02 generates schemas from another library's signatures, which is exactly
+    where NumPy scalars arrive.
     """
     ints = Term("numpy_int_bounds", "series",
                 {"n": (np.int64(2), np.int64(100))}, {"n": np.int64(20)},

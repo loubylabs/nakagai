@@ -6,10 +6,14 @@ that declared the argument, so no input can be set to a value the engine would
 refuse.
 """
 
+import numpy as np
 import pytest
 
-from nakagai.strategies.rules import PineInput, lower_pine
-from nakagai.strategies.rules.vocabulary import core_vocabulary, is_choice_rule
+from nakagai.strategies.rules import (
+    PineCompileError, PineExpr, PineInput, PineLowering, lower_pine,
+    validate_spec,
+)
+from nakagai.strategies.rules.vocabulary import Term, core_vocabulary, is_choice_rule
 
 
 def _spec(lhs, op=">", rhs=0, **extra):
@@ -19,6 +23,10 @@ def _spec(lhs, op=">", rhs=0, **extra):
 
 def _by_name(program):
     return {item.name: item for item in program.inputs}
+
+
+def _emit_close_with_n(ctx, call):
+    return PineExpr(ctx.calc(call, f"close + {ctx.arg(call, 'n')} * 0"))
 
 
 def test_numeric_rule_values_become_stable_typed_inputs(load_spec):
@@ -48,6 +56,50 @@ def test_the_declared_bounds_decide_int_against_float():
     assert k.kind == "float"
     assert isinstance(k.default, float) and k.bounds == (0.5, 5.0)
     assert all(isinstance(bound, float) for bound in k.bounds)
+
+
+@pytest.mark.parametrize("bounds,default,kind,cast_bounds", [
+    ((np.int64(2), np.int64(100)), 30, "int", (2, 100)),
+    ((np.float64(0.5), np.float64(5.0)), 2.0, "float", (0.5, 5.0)),
+], ids=["numpy-int-bounds", "numpy-float-bounds"])
+def test_numpy_real_bounds_lower_to_typed_inputs(bounds, default, kind, cast_bounds):
+    vocabulary = core_vocabulary().with_terms(
+        Term("numpy_bounds", "series", {"n": bounds}, {"n": default},
+             lambda series, _args: series, pine=PineLowering(_emit_close_with_n)))
+    spec = _spec({"ind": "numpy_bounds"})
+    assert validate_spec(spec, vocabulary) == []
+    input_ = _by_name(lower_pine(spec, vocabulary))["nk_long_all_0_lhs_numpy_bounds_n"]
+    assert input_.kind == kind
+    assert input_.default == default
+    assert input_.bounds == cast_bounds
+
+
+@pytest.mark.parametrize("bounds", [
+    (-(10 ** 400), 10 ** 400),
+    (float("-inf"), float("inf")),
+], ids=["huge", "infinite"])
+def test_invalid_numeric_bounds_stop_pine_as_invalid_spec(bounds):
+    vocabulary = core_vocabulary().with_terms(
+        Term("bad_bounds", "series", {"n": bounds}, {"n": 30},
+             lambda series, _args: series,
+             pine=PineLowering(_emit_close_with_n)))
+    spec = _spec({"ind": "bad_bounds"})
+    with pytest.raises(PineCompileError) as exc:
+        lower_pine(spec, vocabulary)
+    assert exc.value.code == "invalid_spec"
+
+
+@pytest.mark.parametrize("value", [9007199254740993, -9007199254740993],
+                         ids=["positive", "negative"])
+def test_unroundtrippable_integer_stops_pine_as_invalid_spec(value):
+    vocabulary = core_vocabulary().with_terms(
+        Term("large_numeric", "series", {"n": (-(10 ** 20), 10 ** 20)},
+             {"n": 30}, lambda series, _args: series,
+             pine=PineLowering(_emit_close_with_n)))
+    spec = _spec({"ind": "large_numeric", "n": value})
+    with pytest.raises(PineCompileError) as exc:
+        lower_pine(spec, vocabulary)
+    assert exc.value.code == "invalid_spec"
 
 
 def test_an_integral_float_lowers_exactly_like_the_integer_it_equals():

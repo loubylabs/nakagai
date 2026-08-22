@@ -28,9 +28,11 @@ one set read twice. The per-term comments in core_vocabulary() say why each
 term carries the flags it carries; read them before moving a flag.
 """
 
+import math
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from functools import cache
+from numbers import Real
 from types import MappingProxyType
 from typing import Literal, TypeAlias
 
@@ -46,13 +48,18 @@ from nakagai.strategies.rules.pine.model import PineLowering
 # third elif after them: spec.py's non-choice branch does `lo, hi = rule`, which
 # raises ValueError on any bare string.
 CONDITION_ARG: Literal["condition"] = "condition"
-ArgRule: TypeAlias = tuple[float, float] | tuple[str, ...] | Literal["condition"]
+ArgRule: TypeAlias = tuple[Real, Real] | tuple[str, ...] | Literal["condition"]
 KINDS = ("series", "frame", "bar", "primitive")
 
 
 def is_condition_rule(rule: ArgRule) -> bool:
     """True for an arg whose value is a condition node, never a bare value."""
     return rule == CONDITION_ARG
+
+
+def is_json_number(value) -> bool:
+    """True for exact built-in JSON numeric values, excluding booleans."""
+    return type(value) in (int, float)
 
 
 def is_choice_rule(rule: ArgRule) -> bool:
@@ -64,6 +71,19 @@ def is_choice_rule(rule: ArgRule) -> bool:
     the other would validate a spec the compiler then refuses.
     """
     return isinstance(rule, tuple) and all(isinstance(r, str) for r in rule)
+
+
+def is_range_rule(rule: ArgRule) -> bool:
+    """True for a finite, ordered two-item range, including NumPy reals."""
+    if not (isinstance(rule, tuple) and len(rule) == 2
+            and all(isinstance(value, Real) and not isinstance(value, bool)
+                    for value in rule)):
+        return False
+    try:
+        low, high = (float(value) for value in rule)
+    except (OverflowError, TypeError, ValueError):
+        return False
+    return math.isfinite(low) and math.isfinite(high) and low <= high
 
 
 @dataclass(frozen=True)

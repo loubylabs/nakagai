@@ -9,7 +9,7 @@ import json
 
 from nakagai.strategies.rules.spec import DEFAULT_RISK, VERSION, is_group_node
 from nakagai.strategies.rules.vocabulary import (
-    Vocabulary, is_condition_rule, resolve_vocabulary,
+    Vocabulary, is_condition_rule, is_json_number, resolve_vocabulary,
 )
 
 _TRAILING_DEFAULTS = {"atr": {"n": 14, "mult": 2.0}, "percent": {"pct": 2.0}}
@@ -18,7 +18,7 @@ _TRAILING_DEFAULTS = {"atr": {"n": 14, "mult": 2.0}, "percent": {"pct": 2.0}}
 def _num(v):
     """Numeric scalars normalize to float so 20 and 20.0 hash identically;
     strings (field/direction/kind/tf) and nested objects pass through."""
-    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else v
+    return float(v) if is_json_number(v) else v
 
 
 def canonical_expr(node, vocabulary: Vocabulary):
@@ -26,7 +26,7 @@ def canonical_expr(node, vocabulary: Vocabulary):
     scalars normalized to float. Public because the Pine compiler keys its
     node memo and its shared inputs on exactly this form, and a second
     canonicalizer beside it would be a second definition of "the same node"."""
-    if isinstance(node, (int, float)):
+    if is_json_number(node):
         return float(node)
     if "src" in node:
         return {"src": node["src"], **({"tf": node["tf"]} if "tf" in node else {})}

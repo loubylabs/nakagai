@@ -3,6 +3,7 @@ import json
 from functools import cache
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -18,7 +19,8 @@ from nakagai.strategies.rules.canon import canonical_expr, canonical_spec
 from nakagai.strategies.rules.frame_eval import FrameEval
 from nakagai.strategies.rules.spec import validate_condition_group
 from nakagai.strategies.rules.vocabulary import (
-    CONDITION_ARG, Term, core_vocabulary, is_condition_rule)
+    CONDITION_ARG, Term, core_vocabulary, is_condition_rule, is_json_number,
+    is_range_rule)
 
 
 SPECS = (Path(__file__).resolve().parents[1]
@@ -156,6 +158,25 @@ def test_condition_arg_is_recognized_and_is_not_a_choice_rule():
     assert is_condition_rule(core_vocabulary().primitives["bars_since"].args["cond"])
     assert not is_condition_rule(("safe", "fast"))
     assert not is_condition_rule((2.0, 500.0))
+
+
+def test_range_rule_accepts_real_numpy_bounds_but_not_choices_or_booleans():
+    assert is_range_rule((np.int64(5), np.float64(120.0)))
+    assert is_range_rule((2, 500))
+    assert not is_range_rule(("low", "high"))
+    assert not is_range_rule((True, False))
+    assert not is_range_rule((1,))
+    assert not is_range_rule((10 ** 400, 10 ** 401))
+    assert not is_range_rule((float("nan"), 1.0))
+    assert not is_range_rule((float("-inf"), float("inf")))
+    assert not is_range_rule((2, 1))
+
+
+def test_json_number_accepts_only_builtin_numeric_values():
+    assert is_json_number(1) and is_json_number(1.0)
+    assert not is_json_number(True)
+    assert not is_json_number(np.int64(1))
+    assert not is_json_number(np.float64(1.0))
 
 
 def test_a_condition_typed_arg_may_not_declare_a_default():

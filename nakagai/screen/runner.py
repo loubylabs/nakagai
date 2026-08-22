@@ -1,13 +1,15 @@
 """Deterministic one-shot screen evaluation. No LLM anywhere in this path.
 
-Providers, when given, sync each symbol incrementally before evaluating (only
-for the timeframes the spec references). A sync failure never aborts
-evaluation: it is noted on the row and cached bars still evaluate. Every row
-carries its own bar_time so staleness is visible, never hidden."""
+Providers, when given, sync each symbol's directly referenced timeframes and
+the source timeframes of referenced derived frames before evaluating. A sync
+failure never aborts evaluation: it is noted on the row and cached bars still
+evaluate. Every row carries its own bar_time so staleness is visible, never
+hidden."""
 
 import pandas as pd
 
-from nakagai.data.sync import fetch_incremental
+from nakagai.data.resample import DERIVED
+from nakagai.data.sync import derive_incremental, fetch_incremental
 from nakagai.engine.context import build_context
 from nakagai.screen.spec import max_lookback, referenced_timeframes
 from nakagai.strategies.rules.vocabulary import Vocabulary, resolve_vocabulary
@@ -30,6 +32,8 @@ def run_screen(spec: dict, symbols: list[str], cache, now=None,
     vocabulary = resolve_vocabulary(vocabulary)
     tf = spec.get("tf", "1d")
     needed = referenced_timeframes(spec)
+    fetched_needed = {tf for tf in needed if tf not in DERIVED}
+    fetched_needed.update(DERIVED[tf] for tf in needed if tf in DERIVED)
     lookback = max_lookback(spec)
     rows: list[dict] = []
     errors: list[str] = []
@@ -38,7 +42,7 @@ def run_screen(spec: dict, symbols: list[str], cache, now=None,
         sync_note = ""
         if providers:
             for sync_tf, provider in providers.items():
-                if sync_tf not in needed:
+                if sync_tf not in fetched_needed:
                     continue
                 # A run-time sync only has sync_days of headroom by default,
                 # which a long lookback (e.g. sma200 on 1d) can't fit in.
@@ -54,6 +58,13 @@ def run_screen(spec: dict, symbols: list[str], cache, now=None,
                     note = f"sync failed: {e}"
                     errors.append(f"{sym}: {note}")
                     sync_note = note
+        for derived_tf in sorted(tf for tf in needed if tf in DERIVED):
+            try:
+                derive_incremental(cache, sym, derived_tf)
+            except Exception as e:
+                note = f"sync failed: {e}"
+                errors.append(f"{sym}: {note}")
+                sync_note = note
         try:
             ctx = build_context(cache, sym, now, vocabulary=vocabulary)
             bars = ctx.bars[tf]

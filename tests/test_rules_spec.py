@@ -1,6 +1,7 @@
 import inspect
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from nakagai.data.schema import DEFAULT_TIMEFRAMES
@@ -10,6 +11,9 @@ from nakagai.strategies.rules import (
 from nakagai.strategies.rules import spec as rules_spec
 from nakagai.strategies.rules.spec import (
     MAX_DEPTH, TIMEFRAMES, _expr_text, group_text, validate_condition_group)
+from nakagai.strategies.rules.vocabulary import (
+    CONDITION_ARG, Term, Vocabulary, core_vocabulary,
+)
 
 ORB = {
     "version": 2, "name": "orb-volume", "timeframe": "15m",
@@ -34,10 +38,255 @@ def test_valid_v2_spec_passes():
 def test_a_four_hour_spec_validates():
     """4h is a real timeframe, derived from cached 1h bars (nakagai/data/
     resample.py), so the grammar accepts it on the spec and on a leaf."""
-    assert validate_spec({**ORB, "timeframe": "4h"}) == []
+    wide_orb = {**ORB, "timeframe": "4h", "long": {"all": [
+        {"lhs": {"src": "close"}, "op": ">", "rhs": 1}]}}
+    assert validate_spec(wide_orb) == []
     on_a_leaf = {**ORB, "long": {"all": [{"lhs": {"src": "close", "tf": "4h"},
                                           "op": ">", "rhs": {"ind": "sma", "n": 20}}]}}
     assert validate_spec(on_a_leaf) == []
+
+
+def test_opening_range_refuses_a_bar_longer_than_its_window():
+    spec = {**ORB, "timeframe": "1h", "long": {"all": [
+        {"lhs": {"src": "close"}, "op": ">",
+         "rhs": {"prim": "opening_range_high", "minutes": 30}}]}}
+    errs = validate_spec(spec)
+    assert any("opening_range_high" in error and "30-minute" in error
+               and "'1h'" in error and "60 minutes" in error
+               for error in errs), errs
+
+
+def test_opening_range_uses_its_declared_default_for_the_width_guard():
+    spec = {**ORB, "timeframe": "4h", "long": {"all": [
+        {"lhs": {"src": "close"}, "op": ">",
+         "rhs": {"prim": "opening_range_low"}}]}}
+    errs = validate_spec(spec)
+    assert any("opening_range_low" in error and "30-minute" in error
+               and "'4h'" in error and "240 minutes" in error
+               for error in errs), errs
+
+
+def test_opening_range_accepts_a_window_equal_to_one_bar():
+    spec = {**ORB, "timeframe": "15m", "long": {"all": [
+        {"lhs": {"src": "close"}, "op": ">",
+         "rhs": {"prim": "opening_range_high", "minutes": 15}}]}}
+    assert validate_spec(spec) == []
+
+
+@pytest.mark.parametrize("minutes", [
+    1, 121, float("nan"), float("inf"), float("-inf"), True, "30", None,
+    10 ** 400, -(10 ** 400),
+])
+def test_opening_range_invalid_minutes_are_reported_only_by_argument_validation(minutes):
+    spec = {**ORB, "timeframe": "1h", "long": {"all": [
+        {"lhs": {"src": "close"}, "op": ">",
+         "rhs": {"prim": "opening_range_high", "minutes": minutes}}]}}
+    errs = validate_spec(spec)
+    assert len(errs) == 1, errs
+    assert "opening_range_high.minutes must be a number in [5, 120]" in errs[0]
+
+
+@pytest.mark.parametrize("replacement", [
+    Term("opening_range_high", "primitive", {}, {}, lambda *_args: None),
+    Term("opening_range_high", "primitive", {"minutes": ("short", "wide")},
+         {"minutes": "wide"}, lambda *_args: None),
+    Term("opening_range_high", "primitive", {"minutes": CONDITION_ARG},
+         {}, lambda *_args: None),
+], ids=["no-minutes-arg", "choice-minutes-arg", "condition-minutes-arg"])
+def test_opening_range_width_guard_ignores_non_numeric_injected_terms(replacement):
+    base = core_vocabulary()
+    vocabulary = Vocabulary(
+        base.indicators,
+        {**base.primitives, "opening_range_high": replacement},
+    )
+    spec = {**ORB, "timeframe": "1h", "long": {"all": [
+        {"lhs": {"src": "close"}, "op": ">",
+         "rhs": {"prim": "opening_range_high", "minutes": 30}}]}}
+    errs = validate_spec(spec, vocabulary=vocabulary)
+    assert all("asks for" not in error for error in errs), errs
+
+
+def _huge_default_opening_range_vocabulary():
+    base = core_vocabulary()
+    huge = -(10 ** 400)
+    replacement = Term(
+        "opening_range_high", "primitive",
+        {"minutes": (-(10 ** 401), 10 ** 401)},
+        {"minutes": huge}, lambda *_args: None,
+    )
+    return Vocabulary(
+        base.indicators,
+        {**base.primitives, "opening_range_high": replacement},
+    )
+
+
+def test_opening_range_huge_injected_default_is_rejected_by_canonical_validation():
+    vocabulary = _huge_default_opening_range_vocabulary()
+    spec = {**ORB, "timeframe": "1h", "long": {"all": [
+        {"lhs": {"src": "close"}, "op": ">",
+         "rhs": {"prim": "opening_range_high"}}]}}
+    errs = validate_spec(spec, vocabulary=vocabulary)
+    assert len(errs) == 1, errs
+    assert "opening_range_high.minutes has invalid argument rule" in errs[0]
+
+
+def _custom_numeric_vocabulary(*, default):
+    base = core_vocabulary()
+    replacement = Term(
+        "custom_numeric", "primitive",
+        {"n": (-(10 ** 401), 10 ** 401)},
+        {"n": default}, lambda *_args: None,
+    )
+    return base.with_terms(replacement)
+
+
+@pytest.mark.parametrize("node", [
+    {"prim": "custom_numeric", "n": 10 ** 400},
+    {"prim": "custom_numeric"},
+], ids=["explicit", "default"])
+def test_numeric_injected_terms_reject_values_without_a_canonical_form(node):
+    vocabulary = _custom_numeric_vocabulary(default=10 ** 400)
+    spec = {**ORB, "long": {"all": [
+        {"lhs": {"src": "close"}, "op": ">", "rhs": node}]}}
+    errs = validate_spec(spec, vocabulary=vocabulary)
+    assert len(errs) == 1, errs
+    assert "custom_numeric.n has invalid argument rule" in errs[0]
+
+
+@pytest.mark.parametrize("value", [
+    9007199254740993,
+    -9007199254740993,
+], ids=["positive", "negative"])
+def test_integers_that_float_canonicalization_rounds_are_rejected(value):
+    spec = {**ORB, "long": {"all": [
+        {"lhs": {"src": "close"}, "op": ">", "rhs": value}]}}
+    errs = validate_spec(spec)
+    assert len(errs) == 1 and "number is out of range" in errs[0], errs
+
+
+def test_adjacent_large_integers_cannot_collapse_to_one_hash():
+    exact = {**ORB, "long": {"all": [
+        {"lhs": {"src": "close"}, "op": ">", "rhs": 9007199254740992}]}}
+    rounded = {**ORB, "long": {"all": [
+        {"lhs": {"src": "close"}, "op": ">", "rhs": 9007199254740993}]}}
+    assert validate_spec(exact) == []
+    errs = validate_spec(rounded)
+    assert len(errs) == 1 and "number is out of range" in errs[0], errs
+
+
+def test_a_required_numeric_argument_is_refused_before_evaluation():
+    vocabulary = core_vocabulary().with_terms(
+        Term("required_numeric", "primitive", {"n": (1, 10)}, {},
+             lambda *_args: None))
+    spec = {**ORB, "long": {"all": [
+        {"lhs": {"src": "close"}, "op": ">",
+         "rhs": {"prim": "required_numeric"}}]}}
+    errs = validate_spec(spec, vocabulary=vocabulary)
+    assert len(errs) == 1 and "required_numeric needs n" in errs[0], errs
+
+
+def test_an_invalid_injected_choice_default_is_refused_centrally():
+    vocabulary = core_vocabulary().with_terms(
+        Term("invalid_choice", "primitive", {"side": ("long", "short")},
+             {"side": "sideways"}, lambda *_args: None))
+    spec = {**ORB, "long": {"all": [
+        {"lhs": {"src": "close"}, "op": ">",
+         "rhs": {"prim": "invalid_choice"}}]}}
+    errs = validate_spec(spec, vocabulary=vocabulary)
+    assert len(errs) == 1 and "invalid_choice.side default" in errs[0], errs
+
+
+@pytest.mark.parametrize("rule", [
+    {"n": ("low", "high")},
+    {"n": "malformed"},
+], ids=["choice-is-valid-but-no-numeric", "malformed"])
+def test_a_non_numeric_argument_rule_is_reported_without_raising(rule):
+    vocabulary = core_vocabulary().with_terms(
+        Term("bad_rule", "primitive", rule, {}, lambda *_args: None))
+    spec = {**ORB, "long": {"all": [
+        {"lhs": {"src": "close"}, "op": ">",
+         "rhs": {"prim": "bad_rule", "n": 1}}]}}
+    errs = validate_spec(spec, vocabulary=vocabulary)
+    assert len(errs) == 1 and "bad_rule.n" in errs[0], errs
+
+
+def test_opening_range_numpy_bounds_still_refuse_a_wide_hourly_bar():
+    base = core_vocabulary()
+    replacement = Term(
+        "opening_range_high", "primitive",
+        {"minutes": (np.int64(5), np.int64(120))}, {"minutes": 30},
+        lambda *_args: None,
+    )
+    vocabulary = Vocabulary(
+        base.indicators,
+        {**base.primitives, "opening_range_high": replacement},
+    )
+    spec = {**ORB, "timeframe": "1h", "long": {"all": [
+        {"lhs": {"src": "close"}, "op": ">",
+         "rhs": {"prim": "opening_range_high"}}]}}
+    errs = validate_spec(spec, vocabulary=vocabulary)
+    assert any("opening_range_high" in error and "30-minute" in error
+               and "60 minutes" in error for error in errs), errs
+
+
+@pytest.mark.parametrize("node", [
+    {"prim": "opening_range_high", "minutes": np.int64(30)},
+    {"prim": "opening_range_high"},
+], ids=["explicit", "default"])
+def test_numpy_opening_range_values_are_refused_as_non_json_numbers(node):
+    base = core_vocabulary()
+    replacement = Term(
+        "opening_range_high", "primitive", {"minutes": (5, 120)},
+        {"minutes": np.int64(30)}, lambda *_args: None,
+    )
+    vocabulary = Vocabulary(
+        base.indicators,
+        {**base.primitives, "opening_range_high": replacement},
+    )
+    spec = {**ORB, "long": {"all": [
+        {"lhs": {"src": "close"}, "op": ">", "rhs": node}]}}
+    errs = validate_spec(spec, vocabulary=vocabulary)
+    assert len(errs) == 1, errs
+    assert "opening_range_high.minutes must be a number" in errs[0]
+
+
+@pytest.mark.parametrize("node", [
+    {"prim": "opening_range_high", "minutes": np.float64(30.0)},
+    {"prim": "opening_range_high"},
+], ids=["explicit-float", "default-float"])
+def test_numpy_float_opening_range_values_are_refused(node):
+    base = core_vocabulary()
+    replacement = Term(
+        "opening_range_high", "primitive", {"minutes": (5, 120)},
+        {"minutes": np.float64(30.0)}, lambda *_args: None,
+    )
+    vocabulary = Vocabulary(
+        base.indicators,
+        {**base.primitives, "opening_range_high": replacement},
+    )
+    spec = {**ORB, "long": {"all": [
+        {"lhs": {"src": "close"}, "op": ">", "rhs": node}]}}
+    errs = validate_spec(spec, vocabulary=vocabulary)
+    assert len(errs) == 1, errs
+    assert "opening_range_high.minutes must be a number" in errs[0]
+
+
+@pytest.mark.parametrize("bounds", [
+    (-(10 ** 400), 10 ** 400),
+    (float("-inf"), float("inf")),
+], ids=["huge", "infinite"])
+def test_invalid_injected_numeric_bounds_are_rejected_before_hashing(bounds):
+    base = core_vocabulary()
+    replacement = Term(
+        "bad_bounds", "primitive", {"n": bounds}, {"n": 30},
+        lambda *_args: None,
+    )
+    vocabulary = base.with_terms(replacement)
+    spec = {**ORB, "long": {"all": [
+        {"lhs": {"src": "close"}, "op": ">",
+         "rhs": {"prim": "bad_bounds"}}]}}
+    errs = validate_spec(spec, vocabulary=vocabulary)
+    assert len(errs) == 1 and "invalid argument rule" in errs[0], errs
 
 
 def test_the_grammar_takes_its_timeframes_from_the_schema():
@@ -350,10 +599,29 @@ def test_day_of_week_is_still_fine_on_a_daily_driving_frame():
     assert validate_spec(_daily({"prim": "day_of_week"})) == []
 
 
-@pytest.mark.parametrize("tf", ["15m", "1h"])
+@pytest.mark.parametrize("tf", ["15m"])
 @pytest.mark.parametrize("node", INTRADAY_ONLY, ids=lambda n: n["prim"])
 def test_the_same_primitives_are_untouched_on_an_intraday_driving_frame(node, tf):
     assert validate_spec({**_daily(node), "timeframe": tf}) == []
+
+
+@pytest.mark.parametrize("node", [
+    {"prim": "minutes_into_session"},
+    {"prim": "rvol", "sessions": 20},
+], ids=lambda n: n["prim"])
+def test_unrelated_intraday_primitives_are_untouched_on_an_hourly_frame(node):
+    assert validate_spec({**_daily(node), "timeframe": "1h"}) == []
+
+
+def test_opening_range_width_follows_an_inherited_effective_timeframe():
+    spec = {**DAILY, "timeframe": "15m", "long": {"all": [
+        {"lhs": {"ind": "sma", "n": 5, "tf": "1h",
+                  "of": {"prim": "opening_range_high", "minutes": 30}},
+         "op": ">", "rhs": 1}]}}
+    errs = validate_spec(spec)
+    assert any("opening_range_high" in error and "30-minute" in error
+               and "'1h'" in error and "60 minutes" in error
+               for error in errs), errs
 
 
 def test_the_refusal_follows_a_tf_that_moves_the_frame_under_a_subtree():

@@ -38,7 +38,6 @@ TermVerdict carrying a status and a reason.
 
 import itertools
 import json
-import numbers
 import operator
 from dataclasses import dataclass
 
@@ -46,7 +45,7 @@ import numpy as np
 import pandas as pd
 
 from nakagai.strategies.rules.vocabulary import (
-    Term, Vocabulary, is_choice_rule, is_condition_rule)
+    Term, Vocabulary, is_choice_rule, is_condition_rule, is_range_rule)
 
 # The cross-repo contract, which is a different and much smaller thing than the
 # module's public surface. Node 02 lives in another repository and reaches this
@@ -297,28 +296,6 @@ def _frame_fingerprint(bars: pd.DataFrame) -> tuple:
     return (tuple(bars.columns), values.shape, values.dtype.str, summary)
 
 
-def _is_range_rule(rule) -> bool:
-    """The other half of the ArgRule union: a low and a high, both numbers.
-
-    `numbers.Real` rather than `(int, float)`, because that pair splits the numpy
-    scalars arbitrarily: np.float64 subclasses float and passed, np.int64
-    subclasses nothing in that pair and failed, so the same schema enumerated
-    with float bounds and was refused as unenumerable with integer ones. Node 02
-    generates schemas from another library's signatures, which is exactly where
-    numpy scalars arrive.
-
-    Booleans are excluded even though bool subclasses int, so a rule of
-    (True, False) is refused rather than read as the range 1 to 0. The same
-    exclusion guards the vocabulary's own search for the widest sessions bound.
-    np.bool_ needs no clause of its own: it registers as neither bool nor
-    numbers.Real, so it is refused by the predicate rather than by the exclusion.
-    """
-    return (isinstance(rule, tuple) and len(rule) == 2
-            and all(isinstance(value, numbers.Real)
-                    and not isinstance(value, bool)
-                    for value in rule))
-
-
 def arg_sets(term: Term) -> tuple[dict, ...]:
     """Every argument set D11 mandates for this term.
 
@@ -349,7 +326,7 @@ def arg_sets(term: Term) -> tuple[dict, ...]:
             continue
         if is_choice_rule(rule):
             choices[name] = rule
-        elif _is_range_rule(rule):
+        elif is_range_rule(rule):
             ranges[name] = rule
         else:
             raise ValueError(
