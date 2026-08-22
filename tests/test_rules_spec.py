@@ -69,6 +69,16 @@ def test_opening_range_accepts_a_window_equal_to_one_bar():
     assert validate_spec(spec) == []
 
 
+@pytest.mark.parametrize("minutes", [1, -(10 ** 400)])
+def test_opening_range_invalid_minutes_are_reported_only_by_argument_validation(minutes):
+    spec = {**ORB, "timeframe": "1h", "long": {"all": [
+        {"lhs": {"src": "close"}, "op": ">",
+         "rhs": {"prim": "opening_range_high", "minutes": minutes}}]}}
+    errs = validate_spec(spec)
+    assert len(errs) == 1, errs
+    assert "opening_range_high.minutes must be a number in [5, 120]" in errs[0]
+
+
 def test_the_grammar_takes_its_timeframes_from_the_schema():
     """One source of truth: spec.TIMEFRAMES is the engine's axis, not a second
     hardcoded copy that has to be edited alongside it."""

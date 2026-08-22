@@ -125,7 +125,7 @@ def _check_args(name: str, given: dict, schema: dict, path: str, errs: list[str]
                 errs.append(f"{path}: {name}.{arg} must be one of {rule}, got {v!r}")
         else:
             lo, hi = rule
-            if isinstance(v, bool) or not isinstance(v, (int, float)) or not lo <= v <= hi:
+            if _not_num(v, lo, hi):
                 errs.append(f"{path}: {name}.{arg} must be a number in [{lo}, {hi}], got {v!r}")
 
 
@@ -287,8 +287,7 @@ def _check_opening_range_window(item: dict, prim: str, src_tf: str,
         return
     delta = DEFAULT_TIMEFRAMES.deltas.get(src_tf)
     minutes = item.get("minutes", term.defaults.get("minutes"))
-    if (delta is None or isinstance(minutes, bool)
-            or not isinstance(minutes, (int, float))):
+    if delta is None or _not_num(minutes, *term.args["minutes"]):
         return
     bar_minutes = delta.total_seconds() / 60
     if bar_minutes > minutes:
