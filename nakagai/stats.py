@@ -1,6 +1,6 @@
-"""Statistical math for backtest results: pooled moments and the
-deflated-Sharpe family (PSR, DSR, minimum track record length, effective
-trial count).
+"""Statistical math for backtest results: pooled moments, the
+deflated-Sharpe family (PSR, DSR, minimum track record length), and the
+Benjamini-Hochberg false-discovery control a search is judged by.
 
 No evidence store, no workspace, no config: everything is parameterized.
 """
@@ -213,9 +213,10 @@ def deflated_sharpe_ratio(m: PooledMoments | None, n_trials: int,
     single backtest that was never searched over passes n_trials=1, where the
     deflation is zero and this reduces exactly to PSR against zero.
 
-    Feed `effective_n_trials`, not a raw candidate count, whenever the
-    candidates came from a grammar: specs differing in one threshold are
-    nearly the same strategy, and a raw count over-deflates.
+    Feed the RAW candidate count. An unordered candidate set supports no
+    dependence estimate, and the raw count is the conservative end of the
+    range: shrinking it lowers the deflation benchmark and makes the result
+    more permissive, which is the flattering direction of error.
     """
     if m is None:
         return None
@@ -268,48 +269,40 @@ def min_track_record_length(sharpe: float, target: float, alpha: float,
     return 1.0 + math.ceil(n_minus_1)
 
 
-def effective_n_trials(trial_sharpes) -> int:
-    """Independent-equivalent trial count, from the autocorrelation of the
-    trial Sharpes.
+def benjamini_hochberg(p_values: list[float], alpha: float) -> list[bool]:
+    """Which of `m` hypotheses survive a false-discovery correction.
 
-    The house answer to "how many things did we really try". Grammar-generated
-    candidates are correlated by construction, so the raw count is an
-    overstatement and feeding it to `deflated_sharpe_ratio` would reject real
-    edges. n / (1 + 2 * sum of positive autocorrelations), truncated at the
-    first non-positive lag.
+    The standard step-up procedure (Benjamini & Hochberg, 1995): sort
+    ascending, find the LARGEST rank `k` whose p-value clears `(k/m) * alpha`,
+    and reject every p-value at or below that rank. Controls the expected
+    proportion of false discoveries among the rejections at `alpha`.
 
-    Raises ValueError on a non-finite trial Sharpe rather than dropping it.
-    This is the one function here where the error direction flatters the
-    strategy: dropping a trial shrinks the search this function exists to
-    count, which lowers the deflation benchmark and makes the deflated
-    Sharpe reported downstream MORE permissive, not less. Refusing beats
-    filtering for that reason alone; the caller decides what a non-finite
-    trial Sharpe means, this function does not get to decide it does not
-    count.
+    Step-UP, and the direction matters. Scanning from the smallest p-value and
+    stopping at the first that fails its own threshold is a different, stricter
+    procedure that does not control the same quantity, and it is the natural
+    thing to write by accident.
 
-    Never above n, the count of trial Sharpes the caller actually passed,
-    and never below 1: both are guarded rather than assumed, because either
-    violation would silently corrupt a deflation.
+    Order-invariant by construction: the input is sorted before anything is
+    decided and the decisions are indexed back onto the caller's positions, so
+    a permutation of the input permutes the output identically. That is what
+    makes this usable on a candidate set, which has no order.
+
+    Returns a list of the same length, positionally aligned with the input.
+    An empty input returns an empty list rather than raising: this is total on
+    purpose, so an upstream defect that produces no candidates surfaces as an
+    empty answer rather than as a failed read.
     """
-    values = [float(x) for x in trial_sharpes]
-    if not all(math.isfinite(v) for v in values):
-        raise ValueError(
-            "trial_sharpes contains non-finite values; filter deliberately "
-            "if that is intended, since dropping them here would silently "
-            "shrink the search and inflate the deflated Sharpe.")
-    n = len(values)
-    if n < 2:
-        return 1
-    mean = sum(values) / n
-    dev = [v - mean for v in values]
-    var = sum(d * d for d in dev) / n
-    if var <= 0:
-        return 1
-    total = 0.0
-    for lag in range(1, n):
-        rho = sum(dev[i] * dev[i + lag] for i in range(n - lag)) / (n * var)
-        if rho <= 0:
+    m = len(p_values)
+    if m == 0:
+        return []
+    order = sorted(range(m), key=lambda i: p_values[i])
+    cut = 0
+    for rank in range(m, 0, -1):
+        if p_values[order[rank - 1]] <= (rank / m) * alpha:
+            cut = rank
             break
-        total += rho
-    n_eff = n / (1.0 + 2.0 * total)
-    return max(1, min(n, round(n_eff)))
+    rejected = [False] * m
+    for rank in range(cut):
+        rejected[order[rank]] = True
+    return rejected
+
