@@ -2,12 +2,15 @@
 
 ## purgedcv
 
-`nakagai/stats.py` vendors four statistics (`probabilistic_sharpe_ratio`,
-`deflated_sharpe_ratio`, `min_track_record_length`, `effective_n_trials`)
+`nakagai/stats.py` vendors three statistics (`probabilistic_sharpe_ratio`,
+`deflated_sharpe_ratio`, `min_track_record_length`)
 from [purged-cross-validation](https://github.com/eslazarev/purged-cross-validation)
 (purgedcv), version 0.1.3. The maths is unchanged from the original; the
 entry points were adapted to take a `PooledMoments` derived from pooled sums
-instead of a raw returns array.
+instead of a raw returns array. `effective_n_trials` was a fourth and was
+retired in 0.7.0. `benjamini_hochberg` is NOT vendored and claims no
+attribution here: it is a sort and two comparisons against the textbook
+definition, with no numerically delicate special function behind it.
 
 ```
 MIT License

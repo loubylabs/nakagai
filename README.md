@@ -26,9 +26,10 @@ screener compiler.
   `nlbuilder` extra with `nlbuilder/`, which installs `anthropic`.
 - `nlbuilder/`: English-to-RuleSpec compilation via the Claude API, behind the
   optional `nlbuilder` extra (installs `anthropic`).
-- `stats.py`: poolable return moments and the deflated-Sharpe family (PSR, DSR,
-  minimum track record length, effective trial count), which is how a candidate
-  is priced for how many candidates were tried.
+- `stats.py`: poolable return moments, the deflated-Sharpe family (PSR, DSR,
+  minimum track record length), and the Benjamini-Hochberg false-discovery
+  control, which together are how a candidate is priced for how many candidates
+  were tried.
 - `filelock.py`: cross-process advisory file locking for concurrent read-modify-write
   on shared result files.
 
@@ -230,6 +231,26 @@ the hosted platform: API, web UI, and the mandate and approvals judgment layer.
 The hosted product at nakag.ai is built on top of this core.
 
 ## Release notes
+
+### 0.7.0
+
+`benjamini_hochberg` is now the false-discovery control for an unordered
+search. `effective_n_trials` is removed because it derived a result from the
+sequential lags of a list and changed when the same candidate set was
+reordered.
+
+Migrate search callers by passing the raw candidate count to
+`deflated_sharpe_ratio` and using `benjamini_hochberg` to decide the search
+verdict. There is no compatibility path for `effective_n_trials`.
+
+The Benjamini-Hochberg false-discovery guarantee is conditional. It controls
+the expected proportion of false discoveries under independent p-values and
+the supported positive regression dependence on a subset (PRDS) conditions.
+It does not guarantee control under arbitrary dependence. The search
+calibration covers independent null candidates and a deterministic one-factor
+positively correlated null representative of shared market data. Those
+calibrations do not certify arbitrary production dependence, so callers must
+establish a valid dependence condition or calibrate their own procedure.
 
 ### 0.6.2
 

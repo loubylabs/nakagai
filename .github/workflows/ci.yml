@@ -39,7 +39,12 @@ jobs:
           # --isolated --no-project resolves the wheel and its declared
           # dependencies alone, which is what a consumer's machine looks like.
           uv build --wheel -o dist/
-          uv run --isolated --no-project --with dist/nakagai-*.whl python - <<'PY'
+          # `python -I` is load-bearing, not tidiness. A heredoc script puts the
+          # CWD on sys.path, the CWD here is the repo root, and the repo root
+          # contains `nakagai/`, so without it every import below resolves to
+          # the CHECKOUT and this job proves nothing about the built wheel.
+          # Measured: `nakagai.stats.__file__` pointed inside the worktree.
+          uv run --isolated --no-project --with dist/nakagai-*.whl python -I - <<'PY'
           # The four arguments of the one public replay. Importing them off
           # `nakagai.engine` rather than their defining modules is the point:
           # the package promises this is the whole door, and `run_portfolio`
@@ -53,23 +58,35 @@ jobs:
               run_portfolio,
           )
 
-          # A retired module that still imports means the wheel shipped a file
-          # this release says it deleted, or a stale tree was packaged. Either
-          # way the published artifact contradicts its own release notes, so
-          # say which module survived instead of failing on a bare assert.
-          survivors = []
-          for retired in ("nakagai.engine.engine", "nakagai.engine.runner",
-                          "nakagai.icir"):
-              try:
-                  __import__(retired)
-              except ModuleNotFoundError:
-                  continue
-              survivors.append(retired)
+          # A retired module that survives in the wheel is a packaging failure,
+          # even if importing it raises ModuleNotFoundError for a missing child.
+          # find_spec detects the module's installed presence without executing
+          # it, so a nested import cannot make a survivor look absent.
+          import importlib.util
+          survivors = [retired
+                       for retired in ("nakagai.engine.engine",
+                                       "nakagai.engine.runner", "nakagai.icir")
+                       if importlib.util.find_spec(retired) is not None]
           if survivors:
               raise SystemExit(
-                  "retired modules are importable from the built wheel: "
+                "retired modules are present in the built wheel: "
                   + ", ".join(survivors)
                   + ". 0.5.0 removes them with no alias and no shim, so this "
+                    "wheel must not be published.")
+
+          # A retired SYMBOL needs its own check. The loop above catches a
+          # module that still exists; a symbol lives inside a module that
+          # survives, so no amount of module-level checking reaches it. 0.7.0
+          # removes effective_n_trials because it derived its answer from the
+          # order of the list it was handed, and a candidate set has no order.
+          import nakagai.stats
+          zombies = [name for name in ("effective_n_trials",)
+                     if hasattr(nakagai.stats, name)]
+          if zombies:
+              raise SystemExit(
+                  "retired symbols are reachable in the built wheel: "
+                  + ", ".join("nakagai.stats." + z for z in zombies)
+                  + ". 0.7.0 removes them with no alias and no shim, so this "
                     "wheel must not be published.")
 
           print("ok:", run_portfolio.__name__, PortfolioBars.__name__,

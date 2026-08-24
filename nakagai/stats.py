@@ -1,8 +1,14 @@
-"""Statistical math for backtest results: pooled moments and the
-deflated-Sharpe family (PSR, DSR, minimum track record length, effective
-trial count).
+"""Statistical math for backtest results: pooled moments, the
+deflated-Sharpe family (PSR, DSR, minimum track record length), and the
+Benjamini-Hochberg false-discovery procedure a search is judged by.
 
-No evidence store, no workspace, no config: everything is parameterized.
+The Benjamini-Hochberg false-discovery guarantee is conditional on independent
+p-values or the supported positive regression dependence on a subset (PRDS)
+conditions. It is not a guarantee under arbitrary dependence.
+
+Core replay metrics derive each statistic once through this module. Downstream
+consumers store or serve the settled result. There is no evidence store,
+workspace, or config here: everything is parameterized.
 """
 
 import math
@@ -110,14 +116,9 @@ def pooled_moments(n: int, total: float, total_sq: float,
                    total_cube: float, total_fourth: float) -> PooledMoments | None:
     """Recover the first four moments from raw power sums, or None.
 
-    Sums add across windows where ratios cannot, which is why
-    engine/metrics.py emits them per window instead of emitting the moments.
-    Thirteen one-month windows pooled here is a statistic; each one alone is
-    not.
-
-    ONE derivation with two repos calling it. The platform's pooled_risk
-    imports this rather than repeating the algebra, because a second copy is
-    how the bias correction drifts in exactly one of them.
+    Sums add across observations where ratios cannot, so replay metrics
+    accumulate raw power sums before one derivation here. This is the one
+    implementation of the bias corrections and moment algebra.
 
     None rather than a number when n < 4 (the kurtosis bias correction has
     (n-2)(n-3) in a denominator) or the variance is not positive. Zero
@@ -151,8 +152,8 @@ def pooled_moments(n: int, total: float, total_sq: float,
 # Vendored from github.com/eslazarev/purged-cross-validation (purgedcv 0.1.3),
 # MIT, Copyright (c) 2026 Evgenii Lazarev. Full licence text in
 # docs/third-party-licenses.md. The maths is unchanged; the entry points take
-# PooledMoments instead of a returns array, because the platform holds
-# thirteen windows of sums and never the whole series at once.
+# PooledMoments instead of a returns array, so callers can accumulate raw
+# power sums without retaining every observation.
 #
 # Formulae: Bailey & Lopez de Prado, "The Sharpe Ratio Efficient Frontier"
 # (2012) for PSR and the minimum track record length, and "The Deflated Sharpe
@@ -171,8 +172,8 @@ def probabilistic_sharpe_ratio(m: PooledMoments | None,
     below sixty. This reports a PROBABILITY rather than a point estimate, and
     the formula degrades more gracefully as n shrinks than a raw ratio does.
     That is a property of the statistic, not a claim about when it gets
-    shown: the platform surface that consumes this still gates display
-    behind its own sixty-observation floor.
+    shown: a downstream consumer may still gate display behind its own
+    sixty-observation floor.
     """
     if m is None:
         return None
@@ -213,9 +214,10 @@ def deflated_sharpe_ratio(m: PooledMoments | None, n_trials: int,
     single backtest that was never searched over passes n_trials=1, where the
     deflation is zero and this reduces exactly to PSR against zero.
 
-    Feed `effective_n_trials`, not a raw candidate count, whenever the
-    candidates came from a grammar: specs differing in one threshold are
-    nearly the same strategy, and a raw count over-deflates.
+    Feed the RAW candidate count. An unordered candidate set supports no
+    dependence estimate, and the raw count is the conservative end of the
+    range: shrinking it lowers the deflation benchmark and makes the result
+    more permissive, which is the flattering direction of error.
     """
     if m is None:
         return None
@@ -268,48 +270,59 @@ def min_track_record_length(sharpe: float, target: float, alpha: float,
     return 1.0 + math.ceil(n_minus_1)
 
 
-def effective_n_trials(trial_sharpes) -> int:
-    """Independent-equivalent trial count, from the autocorrelation of the
-    trial Sharpes.
+def benjamini_hochberg(p_values: list[float], alpha: float) -> list[bool]:
+    """Which of `m` hypotheses survive a false-discovery correction.
 
-    The house answer to "how many things did we really try". Grammar-generated
-    candidates are correlated by construction, so the raw count is an
-    overstatement and feeding it to `deflated_sharpe_ratio` would reject real
-    edges. n / (1 + 2 * sum of positive autocorrelations), truncated at the
-    first non-positive lag.
+    The standard step-up procedure (Benjamini & Hochberg, 1995): sort
+    ascending, find the LARGEST rank `k` whose p-value clears `(k/m) * alpha`,
+    and reject every p-value at or below that rank. Controls the expected
+    proportion of false discoveries among the rejections at `alpha` under
+    independent p-values or the supported positive regression dependence on a
+    subset (PRDS) conditions. It does not guarantee control under
+    arbitrary dependence, so callers whose candidates share market data must
+    establish a valid dependence condition or calibrate their own procedure.
 
-    Raises ValueError on a non-finite trial Sharpe rather than dropping it.
-    This is the one function here where the error direction flatters the
-    strategy: dropping a trial shrinks the search this function exists to
-    count, which lowers the deflation benchmark and makes the deflated
-    Sharpe reported downstream MORE permissive, not less. Refusing beats
-    filtering for that reason alone; the caller decides what a non-finite
-    trial Sharpe means, this function does not get to decide it does not
-    count.
+    Step-UP, and the direction matters. Scanning from the smallest p-value and
+    stopping at the first that fails its own threshold is a different, stricter
+    procedure that does not control the same quantity, and it is the natural
+    thing to write by accident.
 
-    Never above n, the count of trial Sharpes the caller actually passed,
-    and never below 1: both are guarded rather than assumed, because either
-    violation would silently corrupt a deflation.
+    Order-invariant by construction: the input is sorted before anything is
+    decided and the decisions are indexed back onto the caller's positions, so
+    a permutation of the input permutes the output identically. That is what
+    makes this usable on a candidate set, which has no order.
+
+    Returns a list of the same length, positionally aligned with the input.
+    An empty input returns an empty list rather than raising: this is total on
+    purpose, so an upstream defect that produces no candidates surfaces as an
+    empty answer rather than as a failed read.
     """
-    values = [float(x) for x in trial_sharpes]
-    if not all(math.isfinite(v) for v in values):
+    if not 0.0 < alpha < 1.0:
         raise ValueError(
-            "trial_sharpes contains non-finite values; filter deliberately "
-            "if that is intended, since dropping them here would silently "
-            "shrink the search and inflate the deflated Sharpe.")
-    n = len(values)
-    if n < 2:
-        return 1
-    mean = sum(values) / n
-    dev = [v - mean for v in values]
-    var = sum(d * d for d in dev) / n
-    if var <= 0:
-        return 1
-    total = 0.0
-    for lag in range(1, n):
-        rho = sum(dev[i] * dev[i + lag] for i in range(n - lag)) / (n * var)
-        if rho <= 0:
+            f"alpha must be in the open interval (0, 1), got {alpha!r}")
+    m = len(p_values)
+    if m == 0:
+        return []
+    # A non-finite or out-of-range p-value is refused rather than coerced.
+    # NaN compares False against everything, so it never clears its own
+    # threshold, but it also sorts unpredictably and drags the rank cut with
+    # it: measured, [0.01, nan, 0.02] returned [True, True, True], which is
+    # this procedure certifying the meaningless value as a discovery. That is
+    # the worst failure mode a false-discovery control has, so it raises.
+    # Contrast the empty case above, which has an obvious correct answer.
+    for value in p_values:
+        if not (0.0 <= value <= 1.0):
+            raise ValueError(
+                f"p-value out of range or not a number: {value!r}. A "
+                "false-discovery correction over a meaningless p-value would "
+                "report a discovery rather than refuse one.")
+    order = sorted(range(m), key=lambda i: p_values[i])
+    cut = 0
+    for rank in range(m, 0, -1):
+        if p_values[order[rank - 1]] <= (rank / m) * alpha:
+            cut = rank
             break
-        total += rho
-    n_eff = n / (1.0 + 2.0 * total)
-    return max(1, min(n, round(n_eff)))
+    rejected = [False] * m
+    for rank in range(cut):
+        rejected[order[rank]] = True
+    return rejected

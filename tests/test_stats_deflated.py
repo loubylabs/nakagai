@@ -1,4 +1,4 @@
-"""PSR, DSR, MTRL and effective_n_trials against the reference implementation.
+"""PSR, DSR and MTRL against the reference implementation.
 
 Goldens were produced by purgedcv 0.1.3 (MIT) from a returns ARRAY; we feed
 the same series' pooled SUMS. Agreement is therefore evidence for both the
@@ -11,8 +11,8 @@ import numpy as np
 import pytest
 
 from nakagai.stats import (PooledMoments, deflated_sharpe_ratio,
-                           effective_n_trials, min_track_record_length,
-                           pooled_moments, probabilistic_sharpe_ratio)
+                           min_track_record_length, pooled_moments,
+                           probabilistic_sharpe_ratio)
 
 GOLDENS = json.loads(
     (pathlib.Path(__file__).parent / "fixtures" / "dsr_goldens.json").read_text())
@@ -62,18 +62,6 @@ def test_mtrl_matches_reference(moments):
     ) == pytest.approx(GOLDENS["mtrl_ddof0_alpha05"], rel=1e-9)
 
 
-def test_effective_n_trials_matches_reference():
-    assert effective_n_trials(GOLDENS["effective_n_trials_input"]) == \
-        GOLDENS["effective_n_trials_autocorr"]
-
-
-def test_effective_n_trials_is_bounded():
-    n = len(GOLDENS["effective_n_trials_input"])
-    assert 1 <= effective_n_trials(GOLDENS["effective_n_trials_input"]) <= n
-    assert effective_n_trials([0.5]) == 1
-    assert effective_n_trials([]) == 1
-
-
 def test_refuses_rather_than_returning_a_number(moments):
     assert probabilistic_sharpe_ratio(None) is None
     assert deflated_sharpe_ratio(None, 10, 0.5) is None
@@ -92,13 +80,6 @@ def test_mtrl_floors_at_two_for_non_positive_quantile(moments):
     assert min_track_record_length(
         moments.sharpe, 0.0, 0.7, moments.skew, moments.kurtosis
     ) == pytest.approx(GOLDENS["mtrl_alpha_0p7_floor"], rel=1e-9)
-
-
-def test_effective_n_trials_rounds_rather_than_ceils():
-    """The prior golden could not tell round from ceil; this input can."""
-    result = effective_n_trials(GOLDENS["eff_discriminating_input"])
-    assert result == GOLDENS["eff_discriminating_expected_round"]
-    assert result != GOLDENS["eff_discriminating_wrong_if_ceil"]
 
 
 def test_psr_refuses_outside_the_gaussian_approximations_domain():
