@@ -232,6 +232,17 @@ The hosted product at nakag.ai is built on top of this core.
 
 ## Release notes
 
+### 0.7.0
+
+`benjamini_hochberg` is now the false-discovery control for an unordered
+search. `effective_n_trials` is removed because it derived a result from the
+sequential lags of a list and changed when the same candidate set was
+reordered.
+
+Migrate search callers by passing the raw candidate count to
+`deflated_sharpe_ratio` and using `benjamini_hochberg` to decide the search
+verdict. There is no compatibility path for `effective_n_trials`.
+
 ### 0.6.2
 
 Restores one check 0.6.1 dropped, and records why dropping it was wrong.

@@ -58,27 +58,24 @@ jobs:
               run_portfolio,
           )
 
-          # A retired module that still imports means the wheel shipped a file
-          # this release says it deleted, or a stale tree was packaged. Either
-          # way the published artifact contradicts its own release notes, so
-          # say which module survived instead of failing on a bare assert.
-          survivors = []
-          for retired in ("nakagai.engine.engine", "nakagai.engine.runner",
-                          "nakagai.icir"):
-              try:
-                  __import__(retired)
-              except ModuleNotFoundError:
-                  continue
-              survivors.append(retired)
+          # A retired module that survives in the wheel is a packaging failure,
+          # even if importing it raises ModuleNotFoundError for a missing child.
+          # find_spec detects the module's installed presence without executing
+          # it, so a nested import cannot make a survivor look absent.
+          import importlib.util
+          survivors = [retired
+                       for retired in ("nakagai.engine.engine",
+                                       "nakagai.engine.runner", "nakagai.icir")
+                       if importlib.util.find_spec(retired) is not None]
           if survivors:
               raise SystemExit(
-                  "retired modules are importable from the built wheel: "
+                "retired modules are present in the built wheel: "
                   + ", ".join(survivors)
                   + ". 0.5.0 removes them with no alias and no shim, so this "
                     "wheel must not be published.")
 
           # A retired SYMBOL needs its own check. The loop above catches a
-          # module that still imports; a symbol lives inside a module that
+          # module that still exists; a symbol lives inside a module that
           # survives, so no amount of module-level checking reaches it. 0.7.0
           # removes effective_n_trials because it derived its answer from the
           # order of the list it was handed, and a candidate set has no order.

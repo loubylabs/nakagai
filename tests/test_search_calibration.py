@@ -164,7 +164,9 @@ def test_tied_leaders_use_the_smallest_stable_variant_id():
 
 def test_all_insufficient_candidates_have_no_leader():
     """A batch with no evidence has no variant whose figures can be reported."""
-    result = _verdict([("alpha", None), ("beta", None)])
+    alpha = _variant(-1.1, 200, 1)
+    beta = _variant(-0.2, 10000, 2)
+    result = _verdict([("alpha", alpha), ("beta", beta)])
 
     assert result["significant"] is False
     assert result["leader"] is None
