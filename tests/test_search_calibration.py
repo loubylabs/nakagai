@@ -12,8 +12,9 @@ THE VERDICT, FROZEN. Given a batch's variants:
              for it)
   m        = the raw candidate count, INCLUDING the p = 1 ones
   verdict  = any(benjamini_hochberg(p, ALPHA))
-  leader   = argmin(p), never argmax(sharpe); see the unequal-n test below
-  deflated = deflated_sharpe_ratio(moments[leader], m, var_sharpe), where
+  leader   = the smallest (p, variant_id) pair, or None if every p is 1.0;
+             never argmax(sharpe); see the unequal-n test below
+  deflated = deflated_sharpe_ratio(leader's moments, m, var_sharpe), where
              var_sharpe is the population variance of the PER-OBSERVATION
              Sharpes of the variants that have moments
 
@@ -67,26 +68,32 @@ def _moments(series):
                           float((series ** 3).sum()), float((series ** 4).sum()))
 
 
-def _verdict(moments_list):
+def _verdict(candidates):
     """The frozen verdict over one batch. See the module docstring."""
-    m = len(moments_list)
+    m = len(candidates)
     p_values = []
-    for mom in moments_list:
+    for _, mom in candidates:
         psr = probabilistic_sharpe_ratio(mom, 0.0)
         p_values.append(1.0 if psr is None else 1.0 - psr)
     significant = any(benjamini_hochberg(p_values, ALPHA))
-    leader = min(range(m), key=lambda i: p_values[i])
-    sharpes = [mom.sharpe for mom in moments_list if mom is not None]
+    if all(p_value == 1.0 for p_value in p_values):
+        return {"significant": significant, "leader": None,
+                "p_values": p_values, "deflated": None,
+                "psr": None, "n_candidates": m}
+    leader_index = min(range(m), key=lambda i: (p_values[i], candidates[i][0]))
+    leader, leader_moments = candidates[leader_index]
+    sharpes = [mom.sharpe for _, mom in candidates if mom is not None]
     var_sharpe = float(np.var(np.asarray(sharpes), ddof=0)) if sharpes else 0.0
-    deflated = deflated_sharpe_ratio(moments_list[leader], m, var_sharpe)
+    deflated = deflated_sharpe_ratio(leader_moments, m, var_sharpe)
     return {"significant": significant, "leader": leader,
             "p_values": p_values, "deflated": deflated,
-            "psr": 1.0 - p_values[leader], "n_candidates": m}
+            "psr": 1.0 - p_values[leader_index], "n_candidates": m}
 
 
 def _noise_batch(seed, count=CANDIDATES, n_obs=N_OBS):
     rng = np.random.default_rng(seed)
-    return [_moments(row) for row in _draw(rng, count, n_obs)]
+    return [(f"noise-{index}", _moments(row))
+            for index, row in enumerate(_draw(rng, count, n_obs))]
 
 
 def test_the_verdict_controls_its_false_positive_rate_over_pure_noise():
@@ -105,8 +112,9 @@ def test_the_verdict_controls_its_false_positive_rate_over_pure_noise():
     hits = 0
     per_strategy_hits = 0
     for _ in range(REPS):
-        moments_list = [_moments(row) for row in _draw(rng, CANDIDATES, N_OBS)]
-        result = _verdict(moments_list)
+        candidates = [(f"noise-{index}", _moments(row))
+                      for index, row in enumerate(_draw(rng, CANDIDATES, N_OBS))]
+        result = _verdict(candidates)
         hits += result["significant"]
         # The per-strategy lens: read the best candidate through the
         # undeflated PSR the product already ships, with its "usual bar".
@@ -138,6 +146,34 @@ def test_the_deflation_is_pinned_to_a_golden_not_to_an_inequality():
     assert result["deflated"] == pytest.approx(0.6936677052012623, rel=1e-9)
 
 
+def test_tied_leaders_use_the_smallest_stable_variant_id():
+    """An equal-p tie must not let input position choose the leader."""
+    beta = _variant(1.1, 200, 1)
+    alpha = _variant(0.2, 10000, 2)
+    forward = [("beta", beta), ("alpha", alpha)]
+    reverse = list(reversed(forward))
+
+    forward_result = _verdict(forward)
+    reverse_result = _verdict(reverse)
+
+    assert forward_result["leader"] == "alpha"
+    assert reverse_result["leader"] == "alpha"
+    assert forward_result["psr"] == reverse_result["psr"]
+    assert forward_result["deflated"] == reverse_result["deflated"]
+
+
+def test_all_insufficient_candidates_have_no_leader():
+    """A batch with no evidence has no variant whose figures can be reported."""
+    result = _verdict([("alpha", None), ("beta", None)])
+
+    assert result["significant"] is False
+    assert result["leader"] is None
+    assert result["psr"] is None
+    assert result["deflated"] is None
+    assert result["p_values"] == [1.0, 1.0]
+    assert result["n_candidates"] == 2
+
+
 def test_the_verdict_is_invariant_under_permutation_of_the_candidate_set():
     """A candidate set has no order, so the verdict must not have one either.
 
@@ -150,11 +186,11 @@ def test_the_verdict_is_invariant_under_permutation_of_the_candidate_set():
     """
     rng = np.random.default_rng(4242)
     for offset in range(100):
-        moments_list = _noise_batch(1000 + offset, count=10)
-        base = _verdict(moments_list)
+        candidates = _noise_batch(1000 + offset, count=10)
+        base = _verdict(candidates)
         for _ in range(25):
-            order = rng.permutation(len(moments_list))
-            permuted = [moments_list[i] for i in order]
+            order = rng.permutation(len(candidates))
+            permuted = [candidates[i] for i in order]
             shuffled = _verdict(permuted)
             assert shuffled["significant"] == base["significant"], (
                 f"set {offset} verdict flipped under permutation {list(order)}")
@@ -198,12 +234,13 @@ def test_the_leader_is_the_minimum_p_variant_not_the_maximum_sharpe_one():
     b = _variant(0.19017, 520, 12)   # a smaller Sharpe, many observations
     assert a.sharpe > b.sharpe
 
-    batch = [a, b] + [None] * 98     # padded to m = 100
+    batch = ([("a", a), ("b", b)]
+             + [(f"null-{index}", None) for index in range(98)])
     result = _verdict(batch)
 
     assert result["n_candidates"] == 100
     assert result["significant"] is True
-    assert result["leader"] == 1, "the leader must be B, the minimum-p variant"
+    assert result["leader"] == "b", "the leader must be B, the minimum-p variant"
 
     # And the rule the previous draft specified reads the opposite verdict on
     # the identical fixture, which is what makes this test discriminate.
