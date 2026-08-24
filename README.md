@@ -26,9 +26,10 @@ screener compiler.
   `nlbuilder` extra with `nlbuilder/`, which installs `anthropic`.
 - `nlbuilder/`: English-to-RuleSpec compilation via the Claude API, behind the
   optional `nlbuilder` extra (installs `anthropic`).
-- `stats.py`: poolable return moments and the deflated-Sharpe family (PSR, DSR,
-  minimum track record length, effective trial count), which is how a candidate
-  is priced for how many candidates were tried.
+- `stats.py`: poolable return moments, the deflated-Sharpe family (PSR, DSR,
+  minimum track record length), and the Benjamini-Hochberg false-discovery
+  control, which together are how a candidate is priced for how many candidates
+  were tried.
 - `filelock.py`: cross-process advisory file locking for concurrent read-modify-write
   on shared result files.
 
