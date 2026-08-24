@@ -176,6 +176,18 @@ def test_all_insufficient_candidates_have_no_leader():
     assert result["n_candidates"] == 2
 
 
+def test_none_moments_contribute_a_one_p_value():
+    """A missing moments record carries no evidence against the null."""
+    result = _verdict([("alpha", None), ("beta", None)])
+
+    assert result["significant"] is False
+    assert result["leader"] is None
+    assert result["psr"] is None
+    assert result["deflated"] is None
+    assert result["p_values"] == [1.0, 1.0]
+    assert result["n_candidates"] == 2
+
+
 def test_the_verdict_is_invariant_under_permutation_of_the_candidate_set():
     """A candidate set has no order, so the verdict must not have one either.
 
@@ -243,6 +255,7 @@ def test_the_leader_is_the_minimum_p_variant_not_the_maximum_sharpe_one():
     assert result["n_candidates"] == 100
     assert result["significant"] is True
     assert result["leader"] == "b", "the leader must be B, the minimum-p variant"
+    assert result["deflated"] == pytest.approx(0.9666696522438584, rel=1e-12)
 
     # And the rule the previous draft specified reads the opposite verdict on
     # the identical fixture, which is what makes this test discriminate.
