@@ -141,21 +141,30 @@ def test_the_deflation_is_pinned_to_a_golden_not_to_an_inequality():
 def test_the_verdict_is_invariant_under_permutation_of_the_candidate_set():
     """A candidate set has no order, so the verdict must not have one either.
 
-    This is the property that decided the trial count. The retired
-    `effective_n_trials` derived its answer from the SEQUENTIAL LAGS of the
-    list it was handed, so the same Sharpes in a different arrangement gave a
-    different count and, measured, flipped the verdict on 2.6% of pure-noise
-    candidate sets. Benjamini-Hochberg sorts before deciding, so it cannot.
+    This is the property that decided the trial count. The autocorrelation
+    based count retired in this same change derived its answer from the
+    SEQUENTIAL LAGS of the list it was handed, so the same Sharpes in a
+    different arrangement gave a different count and, measured, flipped the
+    verdict on 2.6% of pure-noise candidate sets. Benjamini-Hochberg sorts
+    before deciding, so it cannot.
     """
     rng = np.random.default_rng(4242)
     for offset in range(100):
         moments_list = _noise_batch(1000 + offset, count=10)
-        base = _verdict(moments_list)["significant"]
+        base = _verdict(moments_list)
         for _ in range(25):
             order = rng.permutation(len(moments_list))
             permuted = [moments_list[i] for i in order]
-            assert _verdict(permuted)["significant"] == base, (
-                f"set {offset} flipped under permutation {list(order)}")
+            shuffled = _verdict(permuted)
+            assert shuffled["significant"] == base["significant"], (
+                f"set {offset} verdict flipped under permutation {list(order)}")
+            # The DEFLATION is asserted too, and that is not belt-and-braces.
+            # An order-dependent count reintroduced into the deflation alone
+            # moves this number while leaving the verdict untouched, so a
+            # guard that watched only `significant` would not see it, which is
+            # exactly the reintroduction Acceptance 3 exists to catch.
+            assert shuffled["deflated"] == pytest.approx(base["deflated"], rel=1e-12), (
+                f"set {offset} deflation moved under permutation {list(order)}")
 
 
 def _variant(target_sharpe, n, seed):

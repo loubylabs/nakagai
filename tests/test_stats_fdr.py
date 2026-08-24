@@ -7,9 +7,8 @@ p-value and stop at the first that fails its threshold.
 
 Order invariance is asserted rather than assumed, because it is what makes
 this procedure usable on a candidate set at all. A candidate set has no order,
-and the function this one replaces (`effective_n_trials`, retired in the same
-change) returned a different answer for the same Sharpes in a different
-arrangement.
+and the autocorrelation-based trial count retired in this same change returned
+a different answer for the same Sharpes in a different arrangement.
 """
 
 from nakagai.stats import benjamini_hochberg
@@ -77,3 +76,30 @@ def test_is_order_invariant():
         permuted = [p[i] for i in order]
         assert benjamini_hochberg(permuted, 0.05) == [base[i] for i in order], \
             f"order {order} changed the decision"
+
+
+def test_the_rank_threshold_is_inclusive():
+    """`<=`, not `<`, and the boundary is the only case that can tell.
+
+    With m=4 and alpha=0.05 the rank-1 threshold is exactly 0.0125. A p-value
+    sitting exactly on it must be rejected. Measured: mutating `<=` to `<` left
+    all ten of this node's other tests green, because none of them put a
+    p-value on a threshold.
+    """
+    assert benjamini_hochberg([0.0125, 0.9, 0.9, 0.9], 0.05) == \
+        [True, False, False, False]
+
+
+def test_refuses_a_p_value_that_is_not_a_probability():
+    """A meaningless p-value is refused, never coerced.
+
+    NaN compares False against every threshold, so it looks safe, but it also
+    sorts unpredictably and drags the rank cut with it. Measured before this
+    guard existed, [0.01, nan, 0.02] returned [True, True, True]: the
+    procedure certified the NaN as a discovery.
+    """
+    import pytest
+
+    for bad in (float("nan"), float("inf"), -0.1, 1.5):
+        with pytest.raises(ValueError, match="p-value out of range"):
+            benjamini_hochberg([0.01, bad, 0.02], 0.05)

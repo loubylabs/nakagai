@@ -295,6 +295,19 @@ def benjamini_hochberg(p_values: list[float], alpha: float) -> list[bool]:
     m = len(p_values)
     if m == 0:
         return []
+    # A non-finite or out-of-range p-value is refused rather than coerced.
+    # NaN compares False against everything, so it never clears its own
+    # threshold, but it also sorts unpredictably and drags the rank cut with
+    # it: measured, [0.01, nan, 0.02] returned [True, True, True], which is
+    # this procedure certifying the meaningless value as a discovery. That is
+    # the worst failure mode a false-discovery control has, so it raises.
+    # Contrast the empty case above, which has an obvious correct answer.
+    for value in p_values:
+        if not (0.0 <= value <= 1.0):
+            raise ValueError(
+                f"p-value out of range or not a number: {value!r}. A "
+                "false-discovery correction over a meaningless p-value would "
+                "report a discovery rather than refuse one.")
     order = sorted(range(m), key=lambda i: p_values[i])
     cut = 0
     for rank in range(m, 0, -1):
