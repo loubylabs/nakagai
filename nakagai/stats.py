@@ -2,7 +2,9 @@
 deflated-Sharpe family (PSR, DSR, minimum track record length), and the
 Benjamini-Hochberg false-discovery control a search is judged by.
 
-No evidence store, no workspace, no config: everything is parameterized.
+Core replay metrics derive each statistic once through this module. Downstream
+consumers store or serve the settled result. There is no evidence store,
+workspace, or config here: everything is parameterized.
 """
 
 import math
@@ -110,14 +112,9 @@ def pooled_moments(n: int, total: float, total_sq: float,
                    total_cube: float, total_fourth: float) -> PooledMoments | None:
     """Recover the first four moments from raw power sums, or None.
 
-    Sums add across windows where ratios cannot, which is why
-    engine/metrics.py emits them per window instead of emitting the moments.
-    Thirteen one-month windows pooled here is a statistic; each one alone is
-    not.
-
-    ONE derivation with two repos calling it. The platform's pooled_risk
-    imports this rather than repeating the algebra, because a second copy is
-    how the bias correction drifts in exactly one of them.
+    Sums add across observations where ratios cannot, so replay metrics
+    accumulate raw power sums before one derivation here. This is the one
+    implementation of the bias corrections and moment algebra.
 
     None rather than a number when n < 4 (the kurtosis bias correction has
     (n-2)(n-3) in a denominator) or the variance is not positive. Zero
@@ -151,8 +148,8 @@ def pooled_moments(n: int, total: float, total_sq: float,
 # Vendored from github.com/eslazarev/purged-cross-validation (purgedcv 0.1.3),
 # MIT, Copyright (c) 2026 Evgenii Lazarev. Full licence text in
 # docs/third-party-licenses.md. The maths is unchanged; the entry points take
-# PooledMoments instead of a returns array, because the platform holds
-# thirteen windows of sums and never the whole series at once.
+# PooledMoments instead of a returns array, so callers can accumulate raw
+# power sums without retaining every observation.
 #
 # Formulae: Bailey & Lopez de Prado, "The Sharpe Ratio Efficient Frontier"
 # (2012) for PSR and the minimum track record length, and "The Deflated Sharpe
@@ -171,8 +168,8 @@ def probabilistic_sharpe_ratio(m: PooledMoments | None,
     below sixty. This reports a PROBABILITY rather than a point estimate, and
     the formula degrades more gracefully as n shrinks than a raw ratio does.
     That is a property of the statistic, not a claim about when it gets
-    shown: the platform surface that consumes this still gates display
-    behind its own sixty-observation floor.
+    shown: a downstream consumer may still gate display behind its own
+    sixty-observation floor.
     """
     if m is None:
         return None

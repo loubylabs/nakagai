@@ -110,5 +110,7 @@ def test_refuses_alpha_outside_the_open_unit_interval():
 
     for bad in (0.0, 1.0, -1.0, 2.0, float("nan"),
                 float("inf"), float("-inf")):
-        with pytest.raises(ValueError, match="alpha.*open interval"):
-            benjamini_hochberg([0.01, 0.02], bad)
+        for p_values in ([0.01, 0.02], []):
+            with pytest.raises(ValueError, match="alpha.*open interval") as caught:
+                benjamini_hochberg(p_values, bad)
+            assert repr(bad) in str(caught.value)

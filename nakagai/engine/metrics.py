@@ -34,9 +34,9 @@ arithmetic alone would need.
 
 The pooled higher moments come from `nakagai.stats.pooled_moments` and
 `probabilistic_sharpe_ratio`, which own the bias corrections and the PSR
-formula for this repository and for the platform. Re-deriving them here would
-be the second copy that module's own docstring warns about, and the copies
-would drift in exactly one of the two places.
+formula. Replay metrics derive these statistics once through `nakagai.stats`;
+downstream consumers store or serve the settled result. Re-deriving them here
+would create a second copy that could drift from the authority.
 
 Nothing here rounds. The approved IC correlation is the one value in a replay
 that rounds to four decimals, and it belongs to the IC lens.
@@ -522,11 +522,11 @@ def _daily_returns(points: Sequence[EquityPoint], schedule: ValidatedSchedule,
 
 @dataclass(frozen=True)
 class _DailyPool:
-    """The six values that add across windows where a ratio cannot.
+    """The six values that add across observations where a ratio cannot.
 
-    Every pooled statistic below is recovered from these, which is why they
-    are stored on the result rather than the moments: thirteen windows of sums
-    pool into one sample, and thirteen Sharpes do not.
+    Every pooled statistic below is recovered from these raw sums. The replay
+    metric authority derives its statistics once from this accumulator, and
+    downstream consumers store or serve the settled result.
     """
 
     n: int
@@ -596,12 +596,9 @@ def _pooled_statistics(
     Both pairs are the same expression associated differently, and both can
     round differently in the last place.
 
-    The shared functions are still the right ones to call. The platform pools
-    windows through exactly these, so a per-window statistic reported here and
-    a pooled one reported there agree bit for bit, which a private copy of the
-    algebra could not promise. Reassociating them to the spec's parenthesization
-    is one owner decision made once for both repositories, in `nakagai/stats.py`,
-    rather than a divergence introduced here.
+    This is the one replay-level assembly point. It calls the shared functions
+    in `nakagai.stats` once and returns their settled values, so downstream
+    consumers store or serve them rather than re-deriving the algebra.
     """
     if pool.n < POOLED_MIN_DAILY:
         return (None, None, None, None, None)
