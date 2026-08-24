@@ -72,6 +72,21 @@ jobs:
                   + ". 0.5.0 removes them with no alias and no shim, so this "
                     "wheel must not be published.")
 
+          # A retired SYMBOL needs its own check. The loop above catches a
+          # module that still imports; a symbol lives inside a module that
+          # survives, so no amount of module-level checking reaches it. 0.7.0
+          # removes effective_n_trials because it derived its answer from the
+          # order of the list it was handed, and a candidate set has no order.
+          import nakagai.stats
+          zombies = [name for name in ("effective_n_trials",)
+                     if hasattr(nakagai.stats, name)]
+          if zombies:
+              raise SystemExit(
+                  "retired symbols are reachable in the built wheel: "
+                  + ", ".join("nakagai.stats." + z for z in zombies)
+                  + ". 0.7.0 removes them with no alias and no shim, so this "
+                    "wheel must not be published.")
+
           print("ok:", run_portfolio.__name__, PortfolioBars.__name__,
                 StrategyRegistry.__name__, ReplaySchedule.__name__)
           PY
