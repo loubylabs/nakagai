@@ -243,6 +243,15 @@ Migrate search callers by passing the raw candidate count to
 `deflated_sharpe_ratio` and using `benjamini_hochberg` to decide the search
 verdict. There is no compatibility path for `effective_n_trials`.
 
+The Benjamini-Hochberg false-discovery guarantee is conditional. It controls
+the expected proportion of false discoveries under independent p-values and
+the supported positive regression dependence on a subset (PRDS) conditions.
+It does not guarantee control under arbitrary dependence. The search
+calibration covers independent null candidates and a deterministic one-factor
+positively correlated null representative of shared market data. Those
+calibrations do not certify arbitrary production dependence, so callers must
+establish a valid dependence condition or calibrate their own procedure.
+
 ### 0.6.2
 
 Restores one check 0.6.1 dropped, and records why dropping it was wrong.

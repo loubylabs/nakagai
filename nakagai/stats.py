@@ -1,6 +1,10 @@
 """Statistical math for backtest results: pooled moments, the
 deflated-Sharpe family (PSR, DSR, minimum track record length), and the
-Benjamini-Hochberg false-discovery control a search is judged by.
+Benjamini-Hochberg false-discovery procedure a search is judged by.
+
+The Benjamini-Hochberg false-discovery guarantee is conditional on independent
+p-values or the supported positive regression dependence on a subset (PRDS)
+conditions. It is not a guarantee under arbitrary dependence.
 
 Core replay metrics derive each statistic once through this module. Downstream
 consumers store or serve the settled result. There is no evidence store,
@@ -272,7 +276,11 @@ def benjamini_hochberg(p_values: list[float], alpha: float) -> list[bool]:
     The standard step-up procedure (Benjamini & Hochberg, 1995): sort
     ascending, find the LARGEST rank `k` whose p-value clears `(k/m) * alpha`,
     and reject every p-value at or below that rank. Controls the expected
-    proportion of false discoveries among the rejections at `alpha`.
+    proportion of false discoveries among the rejections at `alpha` under
+    independent p-values or the supported positive regression dependence on a
+    subset (PRDS) conditions. It does not guarantee control under
+    arbitrary dependence, so callers whose candidates share market data must
+    establish a valid dependence condition or calibrate their own procedure.
 
     Step-UP, and the direction matters. Scanning from the smallest p-value and
     stopping at the first that fails its own threshold is a different, stricter

@@ -114,3 +114,11 @@ def test_refuses_alpha_outside_the_open_unit_interval():
             with pytest.raises(ValueError, match="alpha.*open interval") as caught:
                 benjamini_hochberg(p_values, bad)
             assert repr(bad) in str(caught.value)
+
+
+def test_public_guarantee_names_supported_dependence_conditions():
+    """The FDR guarantee must not read as unconditional under dependence."""
+    doc = " ".join(benjamini_hochberg.__doc__.split())
+    assert "independent p-values" in doc
+    assert "positive regression dependence on a subset" in doc
+    assert "arbitrary dependence" in doc

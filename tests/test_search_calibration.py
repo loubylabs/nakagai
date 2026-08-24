@@ -30,6 +30,8 @@ owes an assertion that its verdict agrees with `_verdict` here on the same
 fixture.
 """
 
+import math
+
 import numpy as np
 import pytest
 
@@ -129,6 +131,31 @@ def test_the_verdict_controls_its_false_positive_rate_over_pure_noise():
     assert rate < per_strategy_rate
     assert per_strategy_rate > 0.9, (
         "the comparator collapsed, so the conservatism claim proves nothing")
+
+
+def test_the_verdict_calibrates_under_representative_positive_dependence():
+    """A correlated global-null calibration covers the supported PRDS case.
+
+    A one-factor Gaussian copula with nonnegative equicorrelation produces
+    uniform null p-values with positive dependence. This is a representative
+    shared-market-data shape, not evidence for arbitrary dependence. Under the
+    global null, the FDR is the probability that BH rejects at least one
+    candidate, so this directly calibrates the shipped decision rule.
+    """
+    rng = np.random.default_rng(20260823)
+    rho = 0.25
+    reps = 20_000
+    hits = 0
+    for _ in range(reps):
+        common = rng.normal()
+        z = (math.sqrt(rho) * common
+             + math.sqrt(1.0 - rho) * rng.normal(size=CANDIDATES))
+        p_values = [0.5 * math.erfc(value / math.sqrt(2.0)) for value in z]
+        hits += any(benjamini_hochberg(p_values, ALPHA))
+
+    rate = hits / reps
+    assert 0.035 <= rate <= 0.055, (
+        f"positive-dependence null rate {rate:.5f} outside [0.035, 0.055]")
 
 
 def test_the_deflation_is_pinned_to_a_golden_not_to_an_inequality():
