@@ -292,6 +292,9 @@ def benjamini_hochberg(p_values: list[float], alpha: float) -> list[bool]:
     purpose, so an upstream defect that produces no candidates surfaces as an
     empty answer rather than as a failed read.
     """
+    if not 0.0 < alpha < 1.0:
+        raise ValueError(
+            f"alpha must be in the open interval (0, 1), got {alpha!r}")
     m = len(p_values)
     if m == 0:
         return []
@@ -318,4 +321,3 @@ def benjamini_hochberg(p_values: list[float], alpha: float) -> list[bool]:
     for rank in range(cut):
         rejected[order[rank]] = True
     return rejected
-

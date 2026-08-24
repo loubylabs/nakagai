@@ -103,3 +103,12 @@ def test_refuses_a_p_value_that_is_not_a_probability():
     for bad in (float("nan"), float("inf"), -0.1, 1.5):
         with pytest.raises(ValueError, match="p-value out of range"):
             benjamini_hochberg([0.01, bad, 0.02], 0.05)
+
+
+def test_refuses_alpha_outside_the_open_unit_interval():
+    import pytest
+
+    for bad in (0.0, 1.0, -1.0, 2.0, float("nan"),
+                float("inf"), float("-inf")):
+        with pytest.raises(ValueError, match="alpha.*open interval"):
+            benjamini_hochberg([0.01, 0.02], bad)
