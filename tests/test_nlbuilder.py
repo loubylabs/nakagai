@@ -4,11 +4,12 @@ from datetime import time
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from nakagai.nlbuilder.compiler import _check, compile_strategy
 from nakagai.nlbuilder.prompt import render_system_prompt
 from nakagai.strategies.catalog import catalog_definitions, load_entries
-from nakagai.strategies.rules import core_vocabulary
+from nakagai.strategies.rules import core_vocabulary, validate_spec
 from nakagai.strategies.rules.vocabulary import Term
 from nakagai.strategies.rules.windows import WindowSpec
 
@@ -91,6 +92,37 @@ def test_rule_prompt_teaches_opening_range_through_the_window_axis():
     assert ('"rhs": {"ind": "highest", "of": {"src": "high"}, '
             '"window": "ny_open_30"}' in examples)
     assert "opening_range_high" not in examples
+
+
+def _advertised_replies(prompt: str) -> list[dict]:
+    """Decode each complete JSON reply in the advertised examples section."""
+    examples = prompt.split("# Examples", 1)[1]
+    decoder = json.JSONDecoder()
+    replies = []
+    cursor = 0
+    while True:
+        start = examples.find("\n{", cursor)
+        if start < 0:
+            return replies
+        reply, consumed = decoder.raw_decode(examples, start + 1)
+        replies.append(reply)
+        cursor = start + 1 + consumed
+
+
+@pytest.mark.parametrize("vocabulary,has_opening_range", [
+    (core_vocabulary(), False),
+    (PROMPT_VOCABULARY, True),
+], ids=["core", "ny-open-30"])
+def test_every_advertised_rule_example_validates_with_its_supplied_vocabulary(
+        vocabulary, has_opening_range):
+    prompt = render_system_prompt(vocabulary=vocabulary)
+    replies = _advertised_replies(prompt)
+    specs = [reply["spec"] for reply in replies if "spec" in reply]
+
+    assert specs
+    assert all(validate_spec(spec, vocabulary) == [] for spec in specs)
+    assert any("ny_open_30" in json.dumps(spec) for spec in specs) is has_opening_range
+    assert ("ny_open_30" in prompt) is has_opening_range
 
 
 _CAT_SPEC = {"version": 2, "name": "donch", "timeframe": "1d",
