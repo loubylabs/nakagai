@@ -326,7 +326,7 @@ def _window_value(ctx, call, *, source: str, reducer: str,
             ]
             observed = f"not na({observed_session})"
             fresh_guard = f" and {clock} >= {start}"
-            active_owner = ""
+            active_owner = f" and {calendar_key} == {observed_session}"
             closes_when = (
                 f"not na({occurrence}) and "
                 f"({occurrence} != {calendar_key} or {after})")

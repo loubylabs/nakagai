@@ -110,7 +110,7 @@ if nk_highest_1_window_fresh
     nk_highest_1_window_current := na
     nk_highest_1_window_completed := na
     nk_highest_1_window_closed := false
-bool nk_highest_1_window_active = nk_highest_1_window_reached and nk_highest_1_window_occurrence == nk_highest_1_window_key and nk_highest_1_window_clock >= 570 and nk_highest_1_window_clock < 600
+bool nk_highest_1_window_active = nk_highest_1_window_reached and nk_highest_1_window_calendar_key == nk_highest_1_window_observed_session and nk_highest_1_window_occurrence == nk_highest_1_window_key and nk_highest_1_window_clock >= 570 and nk_highest_1_window_clock < 600
 if nk_highest_1_window_active
     if not na(high)
         nk_highest_1_window_current := na(nk_highest_1_window_current) ? high : math.max(nk_highest_1_window_current, high)
@@ -141,7 +141,7 @@ if nk_lowest_1_window_fresh
     nk_lowest_1_window_current := na
     nk_lowest_1_window_completed := na
     nk_lowest_1_window_closed := false
-bool nk_lowest_1_window_active = nk_lowest_1_window_reached and nk_lowest_1_window_occurrence == nk_lowest_1_window_key and nk_lowest_1_window_clock >= 570 and nk_lowest_1_window_clock < 600
+bool nk_lowest_1_window_active = nk_lowest_1_window_reached and nk_lowest_1_window_calendar_key == nk_lowest_1_window_observed_session and nk_lowest_1_window_occurrence == nk_lowest_1_window_key and nk_lowest_1_window_clock >= 570 and nk_lowest_1_window_clock < 600
 if nk_lowest_1_window_active
     if not na(low)
         nk_lowest_1_window_current := na(nk_lowest_1_window_current) ? low : math.min(nk_lowest_1_window_current, low)

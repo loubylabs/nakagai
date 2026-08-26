@@ -136,6 +136,49 @@ def test_an_early_close_partial_does_not_leak_after_the_next_ny_pm_opens():
     assert pine[next_active].isna().all()
 
 
+def test_saturday_regular_clock_rows_do_not_reopen_friday_s_xnys_window():
+    bars = _local_spans("America/New_York", [
+        ("2026-02-06", "08:00", "17:00"),
+        ("2026-02-07", "09:00", "12:30"),
+    ])
+    vocabulary = core_vocabulary().with_windows(NY_AM)
+    node = {"ind": "highest", "of": {"src": "high"}, "window": "ny_am"}
+    engine = FrameEval(
+        {"15m": bars}, vocabulary=vocabulary).series(node, "15m")
+    pine = _pine(node, bars, vocabulary)
+    np.testing.assert_allclose(
+        pine.to_numpy(), engine.to_numpy(dtype="float64"),
+        rtol=0.0, atol=0.0, equal_nan=True)
+    local = bars.index.tz_convert("America/New_York")
+    saturday = local.date == pd.Timestamp("2026-02-07").date()
+    assert engine[saturday].notna().all()
+    assert pine[saturday].notna().all()
+
+
+def test_an_absent_xnys_holiday_does_not_reopen_at_the_same_wall_clock():
+    postmarket = WindowSpec(
+        "postmarket", "America/New_York", time(16), time(17),
+        "xnys_session", "standard")
+    bars = _local_spans("America/New_York", [
+        ("2026-07-02", "08:00", "17:00"),
+        ("2026-07-03", "16:00", "17:00"),
+    ])
+    vocabulary = core_vocabulary().with_windows(postmarket)
+    node = {
+        "ind": "last", "of": {"src": "close"}, "window": "postmarket",
+    }
+    engine = FrameEval(
+        {"15m": bars}, vocabulary=vocabulary).series(node, "15m")
+    pine = _pine(node, bars, vocabulary)
+    np.testing.assert_allclose(
+        pine.to_numpy(), engine.to_numpy(dtype="float64"),
+        rtol=0.0, atol=0.0, equal_nan=True)
+    local = bars.index.tz_convert("America/New_York")
+    holiday = local.date == pd.Timestamp("2026-07-03").date()
+    assert engine[holiday].notna().all()
+    assert pine[holiday].notna().all()
+
+
 def test_an_overnight_occurrence_belongs_to_the_date_it_opens():
     asia = WindowSpec(
         "asia", "America/New_York", time(20), time(4),
