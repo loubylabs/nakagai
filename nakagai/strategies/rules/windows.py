@@ -55,6 +55,19 @@ class WindowSpec:
             raise ValueError(
                 f"window {self.name!r} has unknown recurrence "
                 f"{self.recurrence!r} (valid: {RECURRENCES})")
+        if self.recurrence == "xnys_session":
+            if self.tz != "America/New_York":
+                raise ValueError(
+                    f"window {self.name!r} with xnys_session recurrence must "
+                    "use America/New_York")
+            if self.start < time(*SESSION_OPEN):
+                raise ValueError(
+                    f"window {self.name!r} with xnys_session recurrence must "
+                    "start at or after 09:30 America/New_York")
+            if self.end < self.start:
+                raise ValueError(
+                    f"window {self.name!r} with xnys_session recurrence must "
+                    "end after its start on the same America/New_York date")
         if self.confidence not in CONFIDENCE_LEVELS:
             raise ValueError(
                 f"window {self.name!r} has unknown confidence "

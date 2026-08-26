@@ -282,6 +282,15 @@ The hosted product at nakag.ai is built on top of this core.
 
 ## Release notes
 
+### 0.8.2 (2026-08-26)
+
+`xnys_session` rows now require `America/New_York`, an opening at or after
+09:30, and an ending later on the same local date. Use `weekday` for
+arbitrary-timezone, premarket, or overnight rows. This causal contract keeps
+engine and generated Pine behavior aligned without asking a premarket bar to
+predict whether a regular session will occur later that day. Post-bell
+same-day windows remain valid and preserve exchange-holiday behavior.
+
 ### 0.8.1 (2026-08-26)
 
 The window-axis parity gate now executes generated Pine through data gaps that

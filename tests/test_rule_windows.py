@@ -81,6 +81,86 @@ PRIOR_MONTH = WindowSpec(
 )
 
 
+def test_xnys_window_refuses_a_non_new_york_timezone():
+    with pytest.raises(
+        ValueError,
+        match=(
+            "window 'utc_midday' with xnys_session recurrence must use "
+            "America/New_York"
+        ),
+    ):
+        WindowSpec(
+            "utc_midday",
+            "UTC",
+            time(18),
+            time(20),
+            "xnys_session",
+            "standard",
+        )
+
+
+def test_xnys_window_refuses_an_open_before_the_new_york_bell():
+    with pytest.raises(
+        ValueError,
+        match=(
+            "window 'preopen' with xnys_session recurrence must start at or "
+            "after 09:30 America/New_York"
+        ),
+    ):
+        WindowSpec(
+            "preopen",
+            "America/New_York",
+            time(9),
+            time(10),
+            "xnys_session",
+            "standard",
+        )
+
+
+def test_xnys_window_refuses_an_overnight_span():
+    with pytest.raises(
+        ValueError,
+        match=(
+            "window 'overnight_xnys' with xnys_session recurrence must end "
+            "after its start on the same America/New_York date"
+        ),
+    ):
+        WindowSpec(
+            "overnight_xnys",
+            "America/New_York",
+            time(20),
+            time(4),
+            "xnys_session",
+            "standard",
+        )
+
+
+def test_weekday_premarket_window_remains_valid():
+    premarket = WindowSpec(
+        "premarket",
+        "America/New_York",
+        time(4),
+        time(9, 30),
+        "weekday",
+        "low_iex",
+    )
+
+    assert window_duration(premarket) == pd.Timedelta(hours=5, minutes=30)
+
+
+def test_weekday_window_can_still_cross_midnight():
+    overnight = WindowSpec(
+        "overnight_weekday",
+        "America/New_York",
+        time(20),
+        time(4),
+        "weekday",
+        "standard",
+    )
+
+    assert window_duration(overnight) == pd.Timedelta(hours=8)
+
+
 def test_window_duration_uses_wall_clock_time_and_wraps_overnight():
     assert window_duration(NY_OPEN_30) == pd.Timedelta(minutes=30)
     assert window_duration(ASIA) == pd.Timedelta(hours=8)
