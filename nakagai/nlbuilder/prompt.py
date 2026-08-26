@@ -22,7 +22,7 @@ Description: "buy the dip when rsi 14 recovers above 30"
 Description: "opening range breakout, 30 minute range, confirmed by volume 50% above its 20 bar average, only when the daily close is above the 50 day sma"
 {"spec": {"version": 2, "name": "orb-volume-confirm", "timeframe": "15m",
 "long": {"all": [
-{"lhs": {"src": "close"}, "op": "crosses_above", "rhs": {"prim": "opening_range_high", "minutes": 30}},
+{"lhs": {"src": "close"}, "op": "crosses_above", "rhs": {"ind": "highest", "of": {"src": "high"}, "window": "ny_open_30"}},
 {"lhs": {"src": "volume"}, "op": ">", "rhs": {"op": "*", "args": [1.5, {"ind": "sma", "n": 20, "of": {"src": "volume"}}]}},
 {"lhs": {"src": "close", "tf": "1d"}, "op": ">", "rhs": {"ind": "sma", "n": 50}}
 ]},
@@ -179,6 +179,8 @@ def render_system_prompt(plays: Mapping[str, Mapping] | None = None, *,
     ind_lines = "\n".join(
         f"- {name}({_bounds(term.args)})"
         + (" [takes of=<expr>]" if term.kind != "bar" else "")
+        + (f" [window {'required; ' if term.window_required else ''}"
+           f"reducer={term.window_reduce}]" if term.window_reduce else "")
         for name, term in sorted(vocabulary.indicators.items()))
     prim_lines = "\n".join(
         f"- {name}({_bounds(term.args)})"
@@ -191,6 +193,7 @@ def render_system_prompt(plays: Mapping[str, Mapping] | None = None, *,
         for name, term in sorted(vocabulary.primitives.items()))
     composite = _composite_section(plays) if plays else ""
     example = _worked_example(plays) if plays else ""
+    window_lines = g.window_prompt_text(vocabulary)
     return f"""You compile plain-English trading strategy descriptions into
 nakagai strategy JSON. Reply with EXACTLY ONE JSON object and nothing else
 (no prose, no code fences): either
@@ -209,12 +212,16 @@ number.
 
 Expressions are numbers or objects:
 - series leaf: {{"src": one of {g.SOURCES}, "tf"?: one of {g.TIMEFRAMES}}}
-- indicator: {{"ind": <name>, <args>, "of"?: <expr>, "tf"?: <tf>}}
+- indicator: {{"ind": <name>, <args>, "of"?: <expr>, "tf"?: <tf>,
+  "window"?: <registered window>}}
 - math: {{"op": one of {sorted(g.MATH_OPS)}, "args": [<expr>, ...]}}
 - primitive: {{"prim": <name>, <args>, "tf"?: <tf>}}
 
 # Indicators (name(arg=bounds or choices))
 {ind_lines}
+
+# Windows (named scopes for window-capable indicators)
+{window_lines}
 
 # Primitives (session/state aware; an arg shown as {{lhs,op,rhs}} is a nested
 condition and takes comparison ops only, never a cross)

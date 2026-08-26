@@ -1,5 +1,6 @@
 import json
 import re
+from datetime import time
 from pathlib import Path
 
 import pandas as pd
@@ -9,6 +10,7 @@ from nakagai.nlbuilder.prompt import render_system_prompt
 from nakagai.strategies.catalog import catalog_definitions, load_entries
 from nakagai.strategies.rules import core_vocabulary
 from nakagai.strategies.rules.vocabulary import Term
+from nakagai.strategies.rules.windows import WindowSpec
 
 SPECS = Path(__file__).resolve().parents[1] / "nakagai" / "strategies" / "catalog" / "specs"
 
@@ -16,6 +18,16 @@ GOOD_SPEC = {"version": 2, "name": "dip", "timeframe": "1h",
              "long": {"all": [{"lhs": {"ind": "rsi", "n": 14}, "op": "crosses_above", "rhs": 30}]},
              "risk": {"stop": {"kind": "atr", "n": 14, "mult": 2.0},
                       "target": {"kind": "rr", "rr": 2.0}}}
+
+LOW_IEX_DISCLOSURE = "US-equity extended-hours IEX data can be sparse."
+PROMPT_VOCABULARY = core_vocabulary().with_windows(
+    WindowSpec("london", "Europe/London", time(8), time(16, 30),
+               "weekday", "low_iex"),
+    WindowSpec("ny_am", "America/New_York", time(9, 30), time(12),
+               "xnys_session", "standard"),
+    WindowSpec("ny_open_30", "America/New_York", time(9, 30), time(10),
+               "xnys_session", "standard"),
+)
 
 
 class _Block:
@@ -55,6 +67,30 @@ def test_prompt_renders_registries_and_is_deterministic():
     for needle in ("crosses_above", "opening_range_high", "bars_since", "supertrend",
                    "time_stop", "not_expressible", '"version": 2'):
         assert needle in p1, needle
+
+
+def test_rule_prompt_renders_window_rows_from_the_supplied_vocabulary():
+    prompt = render_system_prompt(vocabulary=PROMPT_VOCABULARY)
+    lines = prompt.splitlines()
+    london = next(line for line in lines if line.startswith("- london:"))
+    assert london == (
+        "- london: timezone=Europe/London; span=[08:00, 16:30); "
+        "recurrence=weekday; confidence=low_iex. " + LOW_IEX_DISCLOSURE)
+    ny_am = next(line for line in lines if line.startswith("- ny_am:"))
+    assert ny_am == (
+        "- ny_am: timezone=America/New_York; span=[09:30, 12:00); "
+        "recurrence=xnys_session; confidence=standard")
+    assert LOW_IEX_DISCLOSURE not in ny_am
+    assert '"window"?: <registered window>' in prompt
+    assert "- first(no args) [takes of=<expr>] [window required; reducer=first]" in lines
+
+
+def test_rule_prompt_teaches_opening_range_through_the_window_axis():
+    examples = render_system_prompt(
+        vocabulary=PROMPT_VOCABULARY).split("# Examples", 1)[1]
+    assert ('"rhs": {"ind": "highest", "of": {"src": "high"}, '
+            '"window": "ny_open_30"}' in examples)
+    assert "opening_range_high" not in examples
 
 
 _CAT_SPEC = {"version": 2, "name": "donch", "timeframe": "1d",

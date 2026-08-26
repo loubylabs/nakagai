@@ -40,9 +40,12 @@ def render_screen_prompt(vocabulary: Vocabulary | None = None) -> str:
     ind_lines = "\n".join(
         f"- {name}({_bounds(term.args)})"
         + (" [takes of=<expr>]" if term.kind != "bar" else "")
+        + (f" [window {'required; ' if term.window_required else ''}"
+           f"reducer={term.window_reduce}]" if term.window_reduce else "")
         for name, term in sorted(vocabulary.indicators.items()))
     prim_lines = "\n".join(f"- {name}({_bounds(term.args)})"
                            for name, term in sorted(vocabulary.primitives.items()))
+    window_lines = g.window_prompt_text(vocabulary)
     return f"""You compile plain-English market screens into nakagai ScreenSpec v1
 JSON. A screen is a filter: it answers "which symbols match this condition
 right now." Reply with EXACTLY ONE JSON object and nothing else (no prose, no
@@ -65,12 +68,16 @@ number. Cross ops fire on the latest completed bar transition.
 
 Expressions are numbers or objects:
 - series leaf: {{"src": one of {g.SOURCES}, "tf"?: one of {g.TIMEFRAMES}}}
-- indicator: {{"ind": <name>, <args>, "of"?: <expr>, "tf"?: <tf>}}
+- indicator: {{"ind": <name>, <args>, "of"?: <expr>, "tf"?: <tf>,
+  "window"?: <registered window>}}
 - math: {{"op": one of {sorted(g.MATH_OPS)}, "args": [<expr>, ...]}}
 - primitive: {{"prim": <name>, <args>}}
 
 # Indicators (name(arg=bounds or choices))
 {ind_lines}
+
+# Windows (named scopes for window-capable indicators)
+{window_lines}
 
 # Primitives (session/state aware; an arg shown as {{lhs,op,rhs}} is a nested
 condition and takes comparison ops only, never a cross)
