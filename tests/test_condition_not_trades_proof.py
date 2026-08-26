@@ -556,12 +556,24 @@ def _float_mismatches(got, want):
     out = []
     for i, (grow, wrow) in enumerate(zip(got, want)):
         for name, g, w in zip(names, grow, wrow):
-            if math.isclose(g, w, rel_tol=_FLOAT_TOLERANCE,
-                            abs_tol=_FLOAT_TOLERANCE):
+            if math.isclose(
+                    g, w, rel_tol=_FLOAT_TOLERANCE, abs_tol=0.0):
                 continue
             rel = abs(g - w) / max(abs(g), abs(w), 1e-300)
             out.append(f"trade {i} {name}: {g!r} vs {w!r} (rel {rel:.2e})")
     return out
+
+
+def test_float_comparison_rejects_near_zero_absolute_drift():
+    names = _float_fields()
+    got = [[0.0] * len(names)]
+    want = [[0.0] * len(names)]
+    got[0][0] = 5e-12
+
+    moved = _float_mismatches(got, want)
+
+    assert len(moved) == 1
+    assert moved[0].startswith(f"trade 0 {names[0]}: 5e-12 vs 0.0")
 
 
 def _perturb(v):
