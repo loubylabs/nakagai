@@ -1212,7 +1212,7 @@ EXPECTED_EXEMPT = {
 
 
 def test_every_core_term_is_checked_or_declared_exempt(verdicts):
-    assert len(verdicts) == len(core_vocabulary().all_terms()) == 39
+    assert len(verdicts) == len(core_vocabulary().all_terms()) == 34
 
     failed = [v for v in verdicts if v.status == FAILED]
     assert not failed, "\n".join(f"{v.name}: {v.reason}" for v in failed)

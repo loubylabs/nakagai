@@ -67,7 +67,7 @@ def test_scalar_rhs_broadcasts():
     assert m.iloc[-1] == pytest.approx(30 - expected_rsi.iloc[-1])
 
 
-def test_primitive_margin_is_a_series():
+def test_windowed_aggregate_margin_is_a_series():
     b = _bars(np.linspace(100, 110, 30))
     vocabulary = core_vocabulary().with_windows(WindowSpec(
         "ny_open_30", "America/New_York", time(9, 30), time(10),

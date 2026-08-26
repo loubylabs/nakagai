@@ -84,8 +84,10 @@ def test_the_shared_half_is_one_text_rather_than_two_agreeing_ones(
     assert "nk_fvg_nearest(" in _shared(bundle.indicator)
 
 
-def test_each_artifact_holds_only_its_own_half(load_rule_spec):
-    bundle = compile_pine(load_rule_spec("orb"))
+def test_each_artifact_holds_only_its_own_half(
+        load_rule_spec, rule_fixture_vocabulary):
+    bundle = compile_pine(
+        load_rule_spec("orb"), vocabulary=rule_fixture_vocabulary)
     assert "strategy." not in bundle.indicator
     assert "alert(" not in bundle.strategy
     assert "plotshape(" in bundle.indicator
@@ -134,8 +136,9 @@ def test_both_artifacts_open_with_the_version_and_their_identity(
 
 
 def test_the_header_says_a_tradingview_input_edit_leaves_the_hash_behind(
-        load_rule_spec):
-    bundle = compile_pine(load_rule_spec("orb"))
+        load_rule_spec, rule_fixture_vocabulary):
+    bundle = compile_pine(
+        load_rule_spec("orb"), vocabulary=rule_fixture_vocabulary)
     for source in (bundle.indicator, bundle.strategy):
         assert ("Editing any input below creates a TradingView-local "
                 "variation: its results no longer represent the spec hash "
@@ -236,12 +239,13 @@ def test_the_bundle_always_carries_every_fidelity_warning():
 
 
 def test_a_conditional_exit_says_it_closes_one_bar_later_than_the_engine(
-        load_rule_spec):
+        load_rule_spec, rule_fixture_vocabulary):
     # The engine closes a manage() exit at the signal bar's own close;
     # TradingView fills the market order it becomes at the next bar's open.
     # Unstated, that reads as a bug in one of the two engines.
     plain = compile_pine(_spec())
-    timed = compile_pine(load_rule_spec("orb"))
+    timed = compile_pine(
+        load_rule_spec("orb"), vocabulary=rule_fixture_vocabulary)
     assert render.NEXT_BAR_CLOSE not in plain.warnings
     assert render.NEXT_BAR_CLOSE in timed.warnings
     assert render.NEXT_BAR_CLOSE in _header(timed.strategy)
@@ -291,8 +295,10 @@ def test_an_unbounded_threshold_declares_no_bounds():
     assert 'nk_long_all_0_rhs = input.int(70, "Long · rhs")' in source
 
 
-def test_helpers_render_once_each_in_dependency_order(load_rule_spec):
-    source = compile_pine(load_rule_spec("orb")).indicator
+def test_helpers_render_once_each_in_dependency_order(
+        load_rule_spec, rule_fixture_vocabulary):
+    source = compile_pine(
+        load_rule_spec("orb"), vocabulary=rule_fixture_vocabulary).indicator
     assert source.count("nk_new_session() =>") == 1
     assert source.index("nk_session_key() =>") < source.index("nk_new_session() =>")
     assert source.index("nk_new_session() =>") < \
@@ -389,8 +395,10 @@ def test_exactly_one_alert_fires_and_the_long_side_wins_a_both_sides_bar():
         body.index('nk_signal_json("short"')
 
 
-def test_the_alert_body_is_the_nakagai_signal_schema(load_rule_spec):
-    bundle = compile_pine(load_rule_spec("orb"))
+def test_the_alert_body_is_the_nakagai_signal_schema(
+        load_rule_spec, rule_fixture_vocabulary):
+    bundle = compile_pine(
+        load_rule_spec("orb"), vocabulary=rule_fixture_vocabulary)
     source = bundle.indicator
     assert '\\"schema\\":\\"nakagai.pine.signal.v1\\"' in source
     assert f'\\"spec_hash\\":\\"{bundle.spec_hash}\\"' in source
@@ -407,8 +415,10 @@ def test_the_alert_body_is_the_nakagai_signal_schema(load_rule_spec):
 # -- the strategy ---------------------------------------------------------
 
 
-def test_strategy_contract_is_explicit(load_rule_spec):
-    source = compile_pine(load_rule_spec("orb")).strategy
+def test_strategy_contract_is_explicit(
+        load_rule_spec, rule_fixture_vocabulary):
+    source = compile_pine(
+        load_rule_spec("orb"), vocabulary=rule_fixture_vocabulary).strategy
     assert "calc_on_order_fills=false" in source
     assert "calc_on_every_tick=false" in source
     assert "process_orders_on_close=false" in source
@@ -454,8 +464,10 @@ def test_the_strategy_brackets_the_position_with_the_frozen_levels():
     assert "else if strategy.position_size < 0" in source
 
 
-def test_a_conditional_exit_closes_the_matching_position(load_rule_spec):
-    source = compile_pine(load_rule_spec("orb")).strategy
+def test_a_conditional_exit_closes_the_matching_position(
+        load_rule_spec, rule_fixture_vocabulary):
+    source = compile_pine(
+        load_rule_spec("orb"), vocabulary=rule_fixture_vocabulary).strategy
     assert ('    if nk_exit_signal\n'
             '        strategy.close("Nakagai long", '
             'comment="Nakagai exit rule")') in source
@@ -464,9 +476,11 @@ def test_a_conditional_exit_closes_the_matching_position(load_rule_spec):
             'comment="Nakagai exit rule")') in source
 
 
-def test_a_time_stop_counts_the_fill_bar_as_held_bar_one(load_rule_spec):
+def test_a_time_stop_counts_the_fill_bar_as_held_bar_one(
+        load_rule_spec, rule_fixture_vocabulary):
     # manage() runs in the same loop pass as the fill, so held == 1 there.
-    source = compile_pine(load_rule_spec("orb")).strategy
+    source = compile_pine(
+        load_rule_spec("orb"), vocabulary=rule_fixture_vocabulary).strategy
     assert ("bar_index - strategy.opentrades.entry_bar_index(0) + 1 >= "
             "nk_exits_time_stop_bars") in source
     assert 'strategy.close("Nakagai long", comment="Nakagai time stop")' in source
@@ -526,10 +540,12 @@ def test_an_exit_rule_and_a_time_stop_pre_empt_the_ratchets():
 
 
 @pytest.mark.parametrize("name", GOLDEN_PLAYS)
-def test_no_dash_lookalike_reaches_an_artifact(name, load_rule_spec):
+def test_no_dash_lookalike_reaches_an_artifact(
+        name, load_rule_spec, rule_fixture_vocabulary):
     # The middle dot in a label is a separator and stays; an em dash or an en
     # dash is house style, and a golden is the one place it would ship.
-    bundle = compile_pine(load_rule_spec(name))
+    bundle = compile_pine(
+        load_rule_spec(name), vocabulary=rule_fixture_vocabulary)
     for source in (bundle.indicator, bundle.strategy):
         assert "—" not in source
         assert "–" not in source

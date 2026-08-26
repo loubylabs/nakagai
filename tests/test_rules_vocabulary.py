@@ -326,7 +326,7 @@ def test_every_core_term_satisfies_the_term_checks():
     # the checks above are satisfied by the shipped declarations rather than
     # only by the hand-written ones in this file.
     vocab = core_vocabulary()
-    assert len(vocab.indicators) == 24 and len(vocab.primitives) == 15
+    assert len(vocab.indicators) == 24 and len(vocab.primitives) == 10
     for term in vocab.all_terms():
         assert set(term.defaults) <= set(term.args)
 
