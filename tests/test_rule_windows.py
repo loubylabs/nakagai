@@ -190,6 +190,21 @@ def test_weekday_value_carries_over_the_weekend_until_monday_open():
     assert math.isnan(got.loc[utc("2026-01-12 14:30")])
 
 
+def test_xnys_value_carries_through_saturday_regular_clock_rows():
+    highs = series([
+        ("2026-01-09 14:30", 105.0),
+        ("2026-01-09 15:00", 99.0),
+        ("2026-01-10 14:15", 1.0),
+        ("2026-01-10 14:30", 2.0),
+        ("2026-01-10 15:00", 3.0),
+        ("2026-01-10 17:00", 4.0),
+    ])
+
+    got = aggregate_window(highs, NY_OPEN_30, "max")
+
+    assert list(got.loc[utc("2026-01-10 14:15"):]) == [105.0] * 4
+
+
 def test_an_empty_weekday_occurrence_clears_an_older_value():
     highs = series([
         ("2026-01-05 14:30", 105.0),

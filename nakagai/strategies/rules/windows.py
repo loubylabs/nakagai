@@ -131,7 +131,11 @@ def _current_occurrences(
         minutes = exchange.hour * 60 + exchange.minute
         regular_open = SESSION_OPEN[0] * 60 + SESSION_OPEN[1]
         regular_close = SESSION_CLOSE[0] * 60 + SESSION_CLOSE[1]
-        is_regular = (minutes >= regular_open) & (minutes < regular_close)
+        is_regular = (
+            (exchange.weekday < 5)
+            & (minutes >= regular_open)
+            & (minutes < regular_close)
+        )
         days = _local_naive(index[is_regular], window.tz).normalize().unique().sort_values()
     return _occurrence_bounds(pd.DatetimeIndex(days), window)
 
