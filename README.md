@@ -282,6 +282,12 @@ The hosted product at nakag.ai is built on top of this core.
 
 ## Release notes
 
+### 0.8.2 (2026-08-26)
+
+Generated Pine now identifies `xnys_session` membership on the New York
+regular-session clock while keeping window boundaries in the row's declared
+timezone. This restores engine-to-Pine parity for UTC window rows.
+
 ### 0.8.1 (2026-08-26)
 
 The window-axis parity gate now executes generated Pine through data gaps that
