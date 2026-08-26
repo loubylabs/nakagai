@@ -286,7 +286,9 @@ The hosted product at nakag.ai is built on top of this core.
 
 Generated Pine now identifies `xnys_session` membership on the New York
 regular-session clock while keeping window boundaries in the row's declared
-timezone. This restores engine-to-Pine parity for UTC window rows.
+timezone. A scheduled row-local opening before the New York bell clears stale
+state and starts aggregation on the first visible bar after a data gap. This
+restores engine-to-Pine parity for UTC window rows.
 
 ### 0.8.1 (2026-08-26)
 

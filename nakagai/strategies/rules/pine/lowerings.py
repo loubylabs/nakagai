@@ -313,6 +313,8 @@ def _window_value(ctx, call, *, source: str, reducer: str,
             regular = _name(ctx, call, f"{suffix}_regular")
             observed_session = _name(
                 ctx, call, f"{suffix}_observed_session")
+            scheduled_preopen = _name(
+                ctx, call, f"{suffix}_scheduled_preopen")
             # Exchange membership is a New York fact. The occurrence key and
             # its start and end clocks remain facts of the declared row zone.
             owner_lines = [
@@ -328,11 +330,17 @@ def _window_value(ctx, call, *, source: str, reducer: str,
                 f"var int {observed_session} = na",
                 f"if {regular}",
                 f"    {observed_session} := {calendar_key}",
-                f"int {key} = {observed_session}",
+                f"bool {scheduled_preopen} = {exchange_weekday} >= 2 and "
+                f"{exchange_weekday} <= 6 and {exchange_clock} < 570 and "
+                f"{inside}",
+                f"int {key} = {scheduled_preopen} ? {calendar_key} : "
+                f"{observed_session}",
             ]
-            observed = f"not na({observed_session})"
+            observed = f"not na({observed_session}) or {scheduled_preopen}"
             fresh_guard = f" and {clock} >= {start}"
-            active_owner = f" and {calendar_key} == {observed_session}"
+            active_owner = (
+                f" and ({calendar_key} == {observed_session} or "
+                f"{scheduled_preopen})")
             closes_when = (
                 f"not na({occurrence}) and "
                 f"({occurrence} != {calendar_key} or {after})")

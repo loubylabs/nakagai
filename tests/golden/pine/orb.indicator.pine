@@ -97,10 +97,11 @@ bool nk_highest_1_window_regular = nk_highest_1_window_exchange_weekday >= 2 and
 var int nk_highest_1_window_observed_session = na
 if nk_highest_1_window_regular
     nk_highest_1_window_observed_session := nk_highest_1_window_calendar_key
-int nk_highest_1_window_key = nk_highest_1_window_observed_session
+bool nk_highest_1_window_scheduled_preopen = nk_highest_1_window_exchange_weekday >= 2 and nk_highest_1_window_exchange_weekday <= 6 and nk_highest_1_window_exchange_clock < 570 and nk_highest_1_window_clock >= 570 and nk_highest_1_window_clock < 600
+int nk_highest_1_window_key = nk_highest_1_window_scheduled_preopen ? nk_highest_1_window_calendar_key : nk_highest_1_window_observed_session
 var int nk_highest_1_window_occurrence = na
 var bool nk_highest_1_window_closed = false
-bool nk_highest_1_window_reached = not na(nk_highest_1_window_observed_session)
+bool nk_highest_1_window_reached = not na(nk_highest_1_window_observed_session) or nk_highest_1_window_scheduled_preopen
 bool nk_highest_1_window_closes = nk_highest_1_window_reached and not nk_highest_1_window_closed and not na(nk_highest_1_window_occurrence) and (nk_highest_1_window_occurrence != nk_highest_1_window_calendar_key or nk_highest_1_window_clock >= 600)
 if nk_highest_1_window_closes
     nk_highest_1_window_completed := nk_highest_1_window_current
@@ -111,7 +112,7 @@ if nk_highest_1_window_fresh
     nk_highest_1_window_current := na
     nk_highest_1_window_completed := na
     nk_highest_1_window_closed := false
-bool nk_highest_1_window_active = nk_highest_1_window_reached and nk_highest_1_window_calendar_key == nk_highest_1_window_observed_session and nk_highest_1_window_occurrence == nk_highest_1_window_key and nk_highest_1_window_clock >= 570 and nk_highest_1_window_clock < 600
+bool nk_highest_1_window_active = nk_highest_1_window_reached and (nk_highest_1_window_calendar_key == nk_highest_1_window_observed_session or nk_highest_1_window_scheduled_preopen) and nk_highest_1_window_occurrence == nk_highest_1_window_key and nk_highest_1_window_clock >= 570 and nk_highest_1_window_clock < 600
 if nk_highest_1_window_active
     if not na(high)
         nk_highest_1_window_current := na(nk_highest_1_window_current) ? high : math.max(nk_highest_1_window_current, high)
@@ -129,10 +130,11 @@ bool nk_lowest_1_window_regular = nk_lowest_1_window_exchange_weekday >= 2 and n
 var int nk_lowest_1_window_observed_session = na
 if nk_lowest_1_window_regular
     nk_lowest_1_window_observed_session := nk_lowest_1_window_calendar_key
-int nk_lowest_1_window_key = nk_lowest_1_window_observed_session
+bool nk_lowest_1_window_scheduled_preopen = nk_lowest_1_window_exchange_weekday >= 2 and nk_lowest_1_window_exchange_weekday <= 6 and nk_lowest_1_window_exchange_clock < 570 and nk_lowest_1_window_clock >= 570 and nk_lowest_1_window_clock < 600
+int nk_lowest_1_window_key = nk_lowest_1_window_scheduled_preopen ? nk_lowest_1_window_calendar_key : nk_lowest_1_window_observed_session
 var int nk_lowest_1_window_occurrence = na
 var bool nk_lowest_1_window_closed = false
-bool nk_lowest_1_window_reached = not na(nk_lowest_1_window_observed_session)
+bool nk_lowest_1_window_reached = not na(nk_lowest_1_window_observed_session) or nk_lowest_1_window_scheduled_preopen
 bool nk_lowest_1_window_closes = nk_lowest_1_window_reached and not nk_lowest_1_window_closed and not na(nk_lowest_1_window_occurrence) and (nk_lowest_1_window_occurrence != nk_lowest_1_window_calendar_key or nk_lowest_1_window_clock >= 600)
 if nk_lowest_1_window_closes
     nk_lowest_1_window_completed := nk_lowest_1_window_current
@@ -143,7 +145,7 @@ if nk_lowest_1_window_fresh
     nk_lowest_1_window_current := na
     nk_lowest_1_window_completed := na
     nk_lowest_1_window_closed := false
-bool nk_lowest_1_window_active = nk_lowest_1_window_reached and nk_lowest_1_window_calendar_key == nk_lowest_1_window_observed_session and nk_lowest_1_window_occurrence == nk_lowest_1_window_key and nk_lowest_1_window_clock >= 570 and nk_lowest_1_window_clock < 600
+bool nk_lowest_1_window_active = nk_lowest_1_window_reached and (nk_lowest_1_window_calendar_key == nk_lowest_1_window_observed_session or nk_lowest_1_window_scheduled_preopen) and nk_lowest_1_window_occurrence == nk_lowest_1_window_key and nk_lowest_1_window_clock >= 570 and nk_lowest_1_window_clock < 600
 if nk_lowest_1_window_active
     if not na(low)
         nk_lowest_1_window_current := na(nk_lowest_1_window_current) ? low : math.min(nk_lowest_1_window_current, low)
