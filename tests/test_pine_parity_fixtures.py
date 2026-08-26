@@ -89,6 +89,21 @@ def test_all_reducers_match_on_ordinary_current_sessions(term, source):
         bars, NY_AM)
 
 
+def test_xnys_session_identity_uses_new_york_for_a_utc_window():
+    utc_midday = WindowSpec(
+        "utc_midday", "UTC", time(18), time(20),
+        "xnys_session", "standard")
+    bars = _local_spans("America/New_York", [
+        ("2026-02-02", "12:00", "17:00"),
+        ("2026-02-03", "12:00", "17:00"),
+        ("2026-02-04", "12:00", "17:00"),
+    ])
+    _assert_parity(
+        {"ind": "highest", "of": {"src": "high"},
+         "window": "utc_midday"},
+        bars, utc_midday)
+
+
 def test_a_data_gap_crossing_open_clears_the_completed_weekday_value():
     london = WindowSpec(
         "london", "Europe/London", time(8), time(16, 30),

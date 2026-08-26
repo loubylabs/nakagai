@@ -307,18 +307,24 @@ def _window_value(ctx, call, *, source: str, reducer: str,
                 f"({after} or {weekend_days} > 0)")
         else:
             calendar_key = _name(ctx, call, f"{suffix}_calendar_key")
-            calendar_weekday = _name(
-                ctx, call, f"{suffix}_calendar_weekday")
+            exchange_clock = _name(ctx, call, f"{suffix}_exchange_clock")
+            exchange_weekday = _name(
+                ctx, call, f"{suffix}_exchange_weekday")
             regular = _name(ctx, call, f"{suffix}_regular")
             observed_session = _name(
                 ctx, call, f"{suffix}_observed_session")
+            # Exchange membership is a New York fact. The occurrence key and
+            # its start and end clocks remain facts of the declared row zone.
             owner_lines = [
                 f"int {calendar_key} = year(time, {tz}) * 10000 + "
                 f"month(time, {tz}) * 100 + dayofmonth(time, {tz})",
-                f"int {calendar_weekday} = dayofweek(time, {tz})",
-                f"bool {regular} = {calendar_weekday} >= 2 and "
-                f"{calendar_weekday} <= 6 and {clock} >= 570 and "
-                f"{clock} < 960",
+                f"int {exchange_clock} = hour(time, \"America/New_York\") "
+                f"* 60 + minute(time, \"America/New_York\")",
+                f"int {exchange_weekday} = "
+                f"dayofweek(time, \"America/New_York\")",
+                f"bool {regular} = {exchange_weekday} >= 2 and "
+                f"{exchange_weekday} <= 6 and {exchange_clock} >= 570 and "
+                f"{exchange_clock} < 960",
                 f"var int {observed_session} = na",
                 f"if {regular}",
                 f"    {observed_session} := {calendar_key}",
