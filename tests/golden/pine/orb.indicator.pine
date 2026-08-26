@@ -91,8 +91,9 @@ int nk_highest_1_window_clock = hour(time, "America/New_York") * 60 + minute(tim
 var float nk_highest_1_window_current = na
 var float nk_highest_1_window_completed = na
 int nk_highest_1_window_calendar_key = year(time, "America/New_York") * 10000 + month(time, "America/New_York") * 100 + dayofmonth(time, "America/New_York")
-int nk_highest_1_window_calendar_weekday = dayofweek(time, "America/New_York")
-bool nk_highest_1_window_regular = nk_highest_1_window_calendar_weekday >= 2 and nk_highest_1_window_calendar_weekday <= 6 and nk_highest_1_window_clock >= 570 and nk_highest_1_window_clock < 960
+int nk_highest_1_window_exchange_clock = hour(time, "America/New_York") * 60 + minute(time, "America/New_York")
+int nk_highest_1_window_exchange_weekday = dayofweek(time, "America/New_York")
+bool nk_highest_1_window_regular = nk_highest_1_window_exchange_weekday >= 2 and nk_highest_1_window_exchange_weekday <= 6 and nk_highest_1_window_exchange_clock >= 570 and nk_highest_1_window_exchange_clock < 960
 var int nk_highest_1_window_observed_session = na
 if nk_highest_1_window_regular
     nk_highest_1_window_observed_session := nk_highest_1_window_calendar_key
@@ -122,8 +123,9 @@ int nk_lowest_1_window_clock = hour(time, "America/New_York") * 60 + minute(time
 var float nk_lowest_1_window_current = na
 var float nk_lowest_1_window_completed = na
 int nk_lowest_1_window_calendar_key = year(time, "America/New_York") * 10000 + month(time, "America/New_York") * 100 + dayofmonth(time, "America/New_York")
-int nk_lowest_1_window_calendar_weekday = dayofweek(time, "America/New_York")
-bool nk_lowest_1_window_regular = nk_lowest_1_window_calendar_weekday >= 2 and nk_lowest_1_window_calendar_weekday <= 6 and nk_lowest_1_window_clock >= 570 and nk_lowest_1_window_clock < 960
+int nk_lowest_1_window_exchange_clock = hour(time, "America/New_York") * 60 + minute(time, "America/New_York")
+int nk_lowest_1_window_exchange_weekday = dayofweek(time, "America/New_York")
+bool nk_lowest_1_window_regular = nk_lowest_1_window_exchange_weekday >= 2 and nk_lowest_1_window_exchange_weekday <= 6 and nk_lowest_1_window_exchange_clock >= 570 and nk_lowest_1_window_exchange_clock < 960
 var int nk_lowest_1_window_observed_session = na
 if nk_lowest_1_window_regular
     nk_lowest_1_window_observed_session := nk_lowest_1_window_calendar_key
