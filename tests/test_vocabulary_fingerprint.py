@@ -16,12 +16,14 @@ rebuilding anything.
 Two things go into the digest, and both are load-bearing.
 
 The production `vocabulary_digest` half carries every term declaration and
-window row. Term args and defaults remain in declaration order. Sorting them
-would hide the failure mode this rule names: a schema assembled from a set or
-another unordered comprehension rebuilds in a different order in a fresh
-interpreter, because string hashing is seeded per process. That order is
-visible to `_bounds` in both prompt renderers and to `_check_args`'s error
-messages. Window rows sort by permanent name inside the production digest.
+window row. Its canonical encoding sorts mapping keys, which is right for
+definition identity. A small supplementary projection retains only each
+term's argument and default key order. Sorting those keys would hide the
+failure mode this rule names: a schema assembled from a set or another
+unordered comprehension rebuilds in a different order in a fresh interpreter,
+because string hashing is seeded per process. That order is visible to
+`_bounds` in both prompt renderers and to `_check_args`'s error messages.
+Window rows sort by permanent name inside the production digest.
 
 The `spec_hash` half covers **one spec per grammar shape**, not one spec. A
 canonicalization that is unstable, or simply wrong, for `any`, for `not`, for a
@@ -92,12 +94,47 @@ def fingerprint_vocabulary():
     )
 
 
-def vocabulary_fingerprint() -> str:
+def ordered_declarations_vocabulary():
+    return fingerprint_vocabulary().with_terms(
+        Term("spawn_order", "series",
+             {"alpha": (1, 2), "beta": (3, 4)},
+             {"alpha": 1, "beta": 3}, _window_only),
+    )
+
+
+def reversed_args_vocabulary():
+    return fingerprint_vocabulary().with_terms(
+        Term("spawn_order", "series",
+             {"beta": (3, 4), "alpha": (1, 2)},
+             {"alpha": 1, "beta": 3}, _window_only),
+    )
+
+
+def reversed_defaults_vocabulary():
+    return fingerprint_vocabulary().with_terms(
+        Term("spawn_order", "series",
+             {"alpha": (1, 2), "beta": (3, 4)},
+             {"beta": 3, "alpha": 1}, _window_only),
+    )
+
+
+def _term_declaration_order(vocabulary):
+    return [
+        [term.name, list(term.args), list(term.defaults)]
+        for term in sorted(vocabulary.all_terms(), key=lambda item: item.name)
+    ]
+
+
+def vocabulary_fingerprint(vocabulary_factory=fingerprint_vocabulary) -> str:
     """Module-level and picklable: a spawn-context worker imports it by
     qualified name, which a closure or a local function could not be."""
-    v = fingerprint_vocabulary()
+    v = vocabulary_factory()
     hashes = [spec_hash(SHAPE_CORPUS[k], v) for k in sorted(SHAPE_CORPUS)]
-    blob = vocabulary_digest(fingerprint_vocabulary) + "|" + "|".join(hashes)
+    blob = json.dumps({
+        "grammar": vocabulary_digest(vocabulary_factory),
+        "term_order": _term_declaration_order(v),
+        "spec_hashes": hashes,
+    }, separators=(",", ":"), sort_keys=True)
     return hashlib.sha256(blob.encode()).hexdigest()
 
 
@@ -108,6 +145,19 @@ def test_spawn_factory_exercises_the_window_grammar_contract():
     term = vocab.indicators["spawn_last"]
     assert term.window_reduce == "last"
     assert term.window_required is True
+
+
+def test_fingerprint_preserves_term_argument_and_default_order():
+    factories = (
+        ordered_declarations_vocabulary,
+        reversed_args_vocabulary,
+        reversed_defaults_vocabulary,
+    )
+    assert len({vocabulary_digest(factory) for factory in factories}) == 1
+
+    ordered = vocabulary_fingerprint(ordered_declarations_vocabulary)
+    assert ordered != vocabulary_fingerprint(reversed_args_vocabulary)
+    assert ordered != vocabulary_fingerprint(reversed_defaults_vocabulary)
 
 
 def _key_counts(spec):
