@@ -67,6 +67,9 @@ def _assert_parity(node: dict, bars: pd.DataFrame, window: WindowSpec) -> None:
 NY_AM = WindowSpec(
     "ny_am", "America/New_York", time(9, 30), time(12),
     "xnys_session", "standard")
+NY_PM = WindowSpec(
+    "ny_pm", "America/New_York", time(12), time(16),
+    "xnys_session", "standard")
 
 
 @pytest.mark.parametrize("term, source", [
@@ -84,6 +87,53 @@ def test_all_reducers_match_on_ordinary_current_sessions(term, source):
     _assert_parity(
         {"ind": term, "of": {"src": source}, "window": "ny_am"},
         bars, NY_AM)
+
+
+@pytest.mark.parametrize("first_close_minute", [0, 15])
+def test_ny_pm_becomes_visible_on_the_first_bar_at_or_after_its_close(
+        first_close_minute):
+    bars = _local_spans("America/New_York", [
+        ("2026-02-02", "08:00", "17:00"),
+        ("2026-02-03", "08:00", "17:00"),
+    ])
+    if first_close_minute:
+        local = bars.index.tz_convert("America/New_York")
+        bars = bars[~((local.hour == 16) & (local.minute == 0))]
+    vocabulary = core_vocabulary().with_windows(NY_PM)
+    node = {"ind": "highest", "of": {"src": "high"}, "window": "ny_pm"}
+    engine = FrameEval(
+        {"15m": bars}, vocabulary=vocabulary).series(node, "15m")
+    pine = _pine(node, bars, vocabulary)
+    local = bars.index.tz_convert("America/New_York")
+    first_close = np.flatnonzero(
+        (local.hour == 16) & (local.minute == first_close_minute))[0]
+    assert not np.isnan(engine.iloc[first_close])
+    assert pine.iloc[first_close] == engine.iloc[first_close]
+    np.testing.assert_allclose(
+        pine.to_numpy(), engine.to_numpy(dtype="float64"),
+        rtol=0.0, atol=0.0, equal_nan=True)
+
+
+def test_an_early_close_partial_does_not_leak_after_the_next_ny_pm_opens():
+    bars = _local_spans("America/New_York", [
+        ("2026-11-27", "08:00", "12:45"),
+        ("2026-11-30", "08:00", "17:00"),
+        ("2026-12-01", "08:00", "17:00"),
+    ])
+    vocabulary = core_vocabulary().with_windows(NY_PM)
+    node = {"ind": "highest", "of": {"src": "high"}, "window": "ny_pm"}
+    engine = FrameEval(
+        {"15m": bars}, vocabulary=vocabulary).series(node, "15m")
+    pine = _pine(node, bars, vocabulary)
+    np.testing.assert_allclose(
+        pine.to_numpy(), engine.to_numpy(dtype="float64"),
+        rtol=0.0, atol=0.0, equal_nan=True)
+    local = bars.index.tz_convert("America/New_York")
+    next_active = (
+        (local.date == pd.Timestamp("2026-11-30").date())
+        & (local.hour >= 12) & (local.hour < 16))
+    assert engine[next_active].isna().all()
+    assert pine[next_active].isna().all()
 
 
 def test_an_overnight_occurrence_belongs_to_the_date_it_opens():

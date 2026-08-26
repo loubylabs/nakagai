@@ -293,26 +293,53 @@ def _window_value(ctx, call, *, source: str, reducer: str,
                 f"{candidate_weekday} == 7 ? 1 : 0",
                 f"int {owner_time} = {owner_candidate} - "
                 f"{weekend_days} * 86400000",
+                f"int {key} = year({owner_time}, {tz}) * 10000 + "
+                f"month({owner_time}, {tz}) * 100 + "
+                f"dayofmonth({owner_time}, {tz})",
+                f"int {weekday} = dayofweek({owner_time}, {tz})",
             ]
             observed = f"{weekday} >= 2 and {weekday} <= 6"
+            fresh_guard = ""
             active_owner = (
                 f" and {candidate_weekday} >= 2 and {candidate_weekday} <= 6")
-            closed_after = f"({after} or {weekend_days} > 0)"
+            closes_when = (
+                f"{occurrence} == {key} and "
+                f"({after} or {weekend_days} > 0)")
         else:
-            owner_lines = [f"int {owner_time} = {owner}"]
-            observed = (f"{weekday} >= 2 and {weekday} <= 6 and "
-                        f"{clock} >= 570 and {clock} < 960")
+            calendar_key = _name(ctx, call, f"{suffix}_calendar_key")
+            calendar_weekday = _name(
+                ctx, call, f"{suffix}_calendar_weekday")
+            regular = _name(ctx, call, f"{suffix}_regular")
+            observed_session = _name(
+                ctx, call, f"{suffix}_observed_session")
+            owner_lines = [
+                f"int {calendar_key} = year(time, {tz}) * 10000 + "
+                f"month(time, {tz}) * 100 + dayofmonth(time, {tz})",
+                f"int {calendar_weekday} = dayofweek(time, {tz})",
+                f"bool {regular} = {calendar_weekday} >= 2 and "
+                f"{calendar_weekday} <= 6 and {clock} >= 570 and "
+                f"{clock} < 960",
+                f"var int {observed_session} = na",
+                f"if {regular}",
+                f"    {observed_session} := {calendar_key}",
+                f"int {key} = {observed_session}",
+            ]
+            observed = f"not na({observed_session})"
+            fresh_guard = f" and {clock} >= {start}"
             active_owner = ""
-            closed_after = after
+            closes_when = (
+                f"not na({occurrence}) and "
+                f"({occurrence} != {calendar_key} or {after})")
         lines += [
             *owner_lines,
-            f"int {key} = year({owner_time}, {tz}) * 10000 + "
-            f"month({owner_time}, {tz}) * 100 + dayofmonth({owner_time}, {tz})",
-            f"int {weekday} = dayofweek({owner_time}, {tz})",
             f"var int {occurrence} = na",
             f"var bool {closed} = false",
             f"bool {reached} = {observed}",
-            f"bool {fresh} = {reached} and "
+            f"bool {closes} = {reached} and not {closed} and {closes_when}",
+            f"if {closes}",
+            f"    {completed} := {current}",
+            f"    {closed} := true",
+            f"bool {fresh} = {reached}{fresh_guard} and "
             f"(na({occurrence}) or {occurrence} != {key})",
             f"if {fresh}",
             f"    {occurrence} := {key}",
@@ -326,13 +353,6 @@ def _window_value(ctx, call, *, source: str, reducer: str,
         reduced: list[str] = []
         _reduce(reduced, current, source, reducer)
         lines += [f"    {line}" for line in reduced]
-        lines += [
-            f"bool {closes} = {reached} and {occurrence} == {key} and "
-            f"not {closed} and {closed_after}",
-            f"if {closes}",
-            f"    {completed} := {current}",
-            f"    {closed} := true",
-        ]
         value = f"{active} ? na : {completed}"
     else:
         period = _name(ctx, call, f"{suffix}_period")

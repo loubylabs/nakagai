@@ -36,7 +36,7 @@ import dataclasses
 import hashlib
 import json
 import math
-from datetime import date, timedelta
+from datetime import date, time, timedelta
 from enum import Enum
 from pathlib import Path
 
@@ -67,6 +67,7 @@ from nakagai.engine.registry import (
 from nakagai.engine.replay import run_portfolio
 from nakagai.strategies.catalog import load_entries
 from nakagai.strategies.rules import core_vocabulary
+from nakagai.strategies.rules.windows import WindowSpec
 from tests.portfolio_fixtures import (
     base_identity,
     base_request,
@@ -108,6 +109,22 @@ SESSION_INTERVALS = 26  # 09:30 to 16:00 Eastern, on the 15-minute base clock
 # this module's runtime, because every evaluation re-reads its own prefix.
 SESSIONS = 340
 TRAIN_SESSIONS = 210
+
+
+def _orb_fixture_vocabulary():
+    """The frozen ORB fixture's grammar, identical to its Pine fixture row."""
+    return core_vocabulary().with_windows(WindowSpec(
+        "ny_open_30",
+        "America/New_York",
+        time(9, 30),
+        time(10),
+        "xnys_session",
+        "standard",
+    ))
+
+
+def _vocabulary_factory(name: str):
+    return _orb_fixture_vocabulary if name == "fixture:orb" else core_vocabulary
 
 
 # ------------------------------------------------------------ the schedule
@@ -367,10 +384,10 @@ def market():
     return schedule, build_frames(schedule, boundary)
 
 
-def _request(spec: dict, schedule: ReplaySchedule):
+def _request(spec: dict, schedule: ReplaySchedule, vocabulary_factory):
     intervals = schedule.base_intervals
     split = TRAIN_SESSIONS * SESSION_INTERVALS
-    base = spec_base_digest(spec, core_vocabulary)
+    base = spec_base_digest(spec, vocabulary_factory)
     return base_request(
         plays=(PlayRequest(play_id=PLAY_ID, strategy=spec["name"],
                            definition_digest=definition_digest(base, {}),
@@ -397,10 +414,11 @@ def replay(name: str, market):
     """
     schedule, frames = market
     spec = _specs()[name]
-    request, base = _request(spec, schedule)
+    vocabulary_factory = _vocabulary_factory(name)
+    request, base = _request(spec, schedule, vocabulary_factory)
     registry = FrozenStrategyRegistry.from_definitions(
         (rules_definition(spec["name"], base, spec=spec,
-                          vocabulary_factory=core_vocabulary),))
+                          vocabulary_factory=vocabulary_factory),))
     declared = dependencies_for(request, registry).timeframes
     bars = PortfolioBars({key: frame for key, frame in frames.items()
                           if key[1] in declared})

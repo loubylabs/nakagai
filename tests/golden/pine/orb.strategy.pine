@@ -90,13 +90,21 @@ nk_minutes_into_session() =>
 int nk_highest_1_window_clock = hour(time, "America/New_York") * 60 + minute(time, "America/New_York")
 var float nk_highest_1_window_current = na
 var float nk_highest_1_window_completed = na
-int nk_highest_1_window_owner_time = nk_highest_1_window_clock < 570 ? time - 86400000 : time
-int nk_highest_1_window_key = year(nk_highest_1_window_owner_time, "America/New_York") * 10000 + month(nk_highest_1_window_owner_time, "America/New_York") * 100 + dayofmonth(nk_highest_1_window_owner_time, "America/New_York")
-int nk_highest_1_window_weekday = dayofweek(nk_highest_1_window_owner_time, "America/New_York")
+int nk_highest_1_window_calendar_key = year(time, "America/New_York") * 10000 + month(time, "America/New_York") * 100 + dayofmonth(time, "America/New_York")
+int nk_highest_1_window_calendar_weekday = dayofweek(time, "America/New_York")
+bool nk_highest_1_window_regular = nk_highest_1_window_calendar_weekday >= 2 and nk_highest_1_window_calendar_weekday <= 6 and nk_highest_1_window_clock >= 570 and nk_highest_1_window_clock < 960
+var int nk_highest_1_window_observed_session = na
+if nk_highest_1_window_regular
+    nk_highest_1_window_observed_session := nk_highest_1_window_calendar_key
+int nk_highest_1_window_key = nk_highest_1_window_observed_session
 var int nk_highest_1_window_occurrence = na
 var bool nk_highest_1_window_closed = false
-bool nk_highest_1_window_reached = nk_highest_1_window_weekday >= 2 and nk_highest_1_window_weekday <= 6 and nk_highest_1_window_clock >= 570 and nk_highest_1_window_clock < 960
-bool nk_highest_1_window_fresh = nk_highest_1_window_reached and (na(nk_highest_1_window_occurrence) or nk_highest_1_window_occurrence != nk_highest_1_window_key)
+bool nk_highest_1_window_reached = not na(nk_highest_1_window_observed_session)
+bool nk_highest_1_window_closes = nk_highest_1_window_reached and not nk_highest_1_window_closed and not na(nk_highest_1_window_occurrence) and (nk_highest_1_window_occurrence != nk_highest_1_window_calendar_key or nk_highest_1_window_clock >= 600)
+if nk_highest_1_window_closes
+    nk_highest_1_window_completed := nk_highest_1_window_current
+    nk_highest_1_window_closed := true
+bool nk_highest_1_window_fresh = nk_highest_1_window_reached and nk_highest_1_window_clock >= 570 and (na(nk_highest_1_window_occurrence) or nk_highest_1_window_occurrence != nk_highest_1_window_key)
 if nk_highest_1_window_fresh
     nk_highest_1_window_occurrence := nk_highest_1_window_key
     nk_highest_1_window_current := na
@@ -106,10 +114,6 @@ bool nk_highest_1_window_active = nk_highest_1_window_reached and nk_highest_1_w
 if nk_highest_1_window_active
     if not na(high)
         nk_highest_1_window_current := na(nk_highest_1_window_current) ? high : math.max(nk_highest_1_window_current, high)
-bool nk_highest_1_window_closes = nk_highest_1_window_reached and nk_highest_1_window_occurrence == nk_highest_1_window_key and not nk_highest_1_window_closed and nk_highest_1_window_clock >= 600
-if nk_highest_1_window_closes
-    nk_highest_1_window_completed := nk_highest_1_window_current
-    nk_highest_1_window_closed := true
 nk_highest_1_window_value = nk_highest_1_window_active ? na : nk_highest_1_window_completed
 nk_highest_1 = nk_highest_1_window_value
 nk_minutes_into_session_1 = nk_minutes_into_session()
@@ -117,13 +121,21 @@ nk_long_entry = (ta.crossover(close, nk_highest_1) and nk_minutes_into_session_1
 int nk_lowest_1_window_clock = hour(time, "America/New_York") * 60 + minute(time, "America/New_York")
 var float nk_lowest_1_window_current = na
 var float nk_lowest_1_window_completed = na
-int nk_lowest_1_window_owner_time = nk_lowest_1_window_clock < 570 ? time - 86400000 : time
-int nk_lowest_1_window_key = year(nk_lowest_1_window_owner_time, "America/New_York") * 10000 + month(nk_lowest_1_window_owner_time, "America/New_York") * 100 + dayofmonth(nk_lowest_1_window_owner_time, "America/New_York")
-int nk_lowest_1_window_weekday = dayofweek(nk_lowest_1_window_owner_time, "America/New_York")
+int nk_lowest_1_window_calendar_key = year(time, "America/New_York") * 10000 + month(time, "America/New_York") * 100 + dayofmonth(time, "America/New_York")
+int nk_lowest_1_window_calendar_weekday = dayofweek(time, "America/New_York")
+bool nk_lowest_1_window_regular = nk_lowest_1_window_calendar_weekday >= 2 and nk_lowest_1_window_calendar_weekday <= 6 and nk_lowest_1_window_clock >= 570 and nk_lowest_1_window_clock < 960
+var int nk_lowest_1_window_observed_session = na
+if nk_lowest_1_window_regular
+    nk_lowest_1_window_observed_session := nk_lowest_1_window_calendar_key
+int nk_lowest_1_window_key = nk_lowest_1_window_observed_session
 var int nk_lowest_1_window_occurrence = na
 var bool nk_lowest_1_window_closed = false
-bool nk_lowest_1_window_reached = nk_lowest_1_window_weekday >= 2 and nk_lowest_1_window_weekday <= 6 and nk_lowest_1_window_clock >= 570 and nk_lowest_1_window_clock < 960
-bool nk_lowest_1_window_fresh = nk_lowest_1_window_reached and (na(nk_lowest_1_window_occurrence) or nk_lowest_1_window_occurrence != nk_lowest_1_window_key)
+bool nk_lowest_1_window_reached = not na(nk_lowest_1_window_observed_session)
+bool nk_lowest_1_window_closes = nk_lowest_1_window_reached and not nk_lowest_1_window_closed and not na(nk_lowest_1_window_occurrence) and (nk_lowest_1_window_occurrence != nk_lowest_1_window_calendar_key or nk_lowest_1_window_clock >= 600)
+if nk_lowest_1_window_closes
+    nk_lowest_1_window_completed := nk_lowest_1_window_current
+    nk_lowest_1_window_closed := true
+bool nk_lowest_1_window_fresh = nk_lowest_1_window_reached and nk_lowest_1_window_clock >= 570 and (na(nk_lowest_1_window_occurrence) or nk_lowest_1_window_occurrence != nk_lowest_1_window_key)
 if nk_lowest_1_window_fresh
     nk_lowest_1_window_occurrence := nk_lowest_1_window_key
     nk_lowest_1_window_current := na
@@ -133,10 +145,6 @@ bool nk_lowest_1_window_active = nk_lowest_1_window_reached and nk_lowest_1_wind
 if nk_lowest_1_window_active
     if not na(low)
         nk_lowest_1_window_current := na(nk_lowest_1_window_current) ? low : math.min(nk_lowest_1_window_current, low)
-bool nk_lowest_1_window_closes = nk_lowest_1_window_reached and nk_lowest_1_window_occurrence == nk_lowest_1_window_key and not nk_lowest_1_window_closed and nk_lowest_1_window_clock >= 600
-if nk_lowest_1_window_closes
-    nk_lowest_1_window_completed := nk_lowest_1_window_current
-    nk_lowest_1_window_closed := true
 nk_lowest_1_window_value = nk_lowest_1_window_active ? na : nk_lowest_1_window_completed
 nk_lowest_1 = nk_lowest_1_window_value
 nk_short_entry = (ta.crossunder(close, nk_lowest_1) and nk_minutes_into_session_1 < nk_short_all_1_rhs)
