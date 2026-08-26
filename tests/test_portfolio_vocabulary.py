@@ -23,6 +23,7 @@ measuring the cache instead of the declarations.
 """
 
 import math
+from datetime import time
 
 import pandas as pd
 import pytest
@@ -42,6 +43,7 @@ from nakagai.engine.registry import (
     vocabulary_digest,
 )
 from nakagai.strategies.rules.vocabulary import Term, Vocabulary, core_vocabulary
+from nakagai.strategies.rules.windows import WindowSpec
 from tests.portfolio_fixtures import (
     base_request,
     frictionless_execution,
@@ -113,6 +115,85 @@ def sma_reads_zero() -> Vocabulary:
 def sma_reads_double() -> Vocabulary:
     """`sma` answers twice the close, so a positive close is never above it."""
     return _redefined(lambda series, _args: series * 2.0)
+
+
+def london_vocabulary() -> Vocabulary:
+    return core_vocabulary().with_windows(
+        WindowSpec("london", "Europe/London", time(8), time(16, 30),
+                   "weekday", "low_iex"))
+
+
+def rebuilt_london_vocabulary() -> Vocabulary:
+    return core_vocabulary().with_windows(
+        WindowSpec("london", "Europe/London", time(8), time(16, 30),
+                   "weekday", "low_iex"))
+
+
+def shortened_london_vocabulary() -> Vocabulary:
+    return core_vocabulary().with_windows(
+        WindowSpec("london", "Europe/London", time(8), time(16),
+                   "weekday", "low_iex"))
+
+
+def ordered_window_vocabulary() -> Vocabulary:
+    return core_vocabulary().with_windows(
+        WindowSpec("london", "Europe/London", time(8), time(16, 30),
+                   "weekday", "low_iex"),
+        WindowSpec("tokyo", "Asia/Tokyo", time(9), time(15, 30),
+                   "weekday", "low_iex"),
+    )
+
+
+def reversed_window_vocabulary() -> Vocabulary:
+    return core_vocabulary().with_windows(
+        WindowSpec("tokyo", "Asia/Tokyo", time(9), time(15, 30),
+                   "weekday", "low_iex"),
+        WindowSpec("london", "Europe/London", time(8), time(16, 30),
+                   "weekday", "low_iex"),
+    )
+
+
+def unwindowed_custom_term_vocabulary() -> Vocabulary:
+    return core_vocabulary().with_terms(
+        Term("custom_high", "series", {}, {}, lambda series, _args: series))
+
+
+def windowed_custom_term_vocabulary() -> Vocabulary:
+    return core_vocabulary().with_terms(
+        Term("custom_high", "series", {}, {}, lambda series, _args: series,
+             window_reduce="max"))
+
+
+def required_custom_term_vocabulary() -> Vocabulary:
+    return core_vocabulary().with_terms(
+        Term("custom_high", "series", {}, {}, lambda series, _args: series,
+             window_reduce="max", window_required=True))
+
+
+def test_window_rows_participate_in_the_vocabulary_digest():
+    assert vocabulary_digest(core_vocabulary) != vocabulary_digest(london_vocabulary)
+    assert (vocabulary_digest(london_vocabulary)
+            != vocabulary_digest(shortened_london_vocabulary))
+
+
+def test_equivalent_fresh_window_factories_have_one_digest():
+    assert (vocabulary_digest(london_vocabulary)
+            == vocabulary_digest(rebuilt_london_vocabulary))
+
+
+def test_window_registration_order_does_not_move_the_digest():
+    assert (vocabulary_digest(ordered_window_vocabulary)
+            == vocabulary_digest(reversed_window_vocabulary))
+
+
+def test_window_reducer_metadata_participates_in_the_vocabulary_digest():
+    assert (vocabulary_digest(unwindowed_custom_term_vocabulary)
+            != vocabulary_digest(windowed_custom_term_vocabulary))
+
+
+def test_window_requirement_participates_in_the_vocabulary_digest():
+    assert (vocabulary_digest(windowed_custom_term_vocabulary)
+            != vocabulary_digest(required_custom_term_vocabulary))
 
 
 # ------------------------------------------------------------- an added term

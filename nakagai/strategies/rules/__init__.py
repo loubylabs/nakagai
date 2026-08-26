@@ -13,6 +13,7 @@ from nakagai.strategies.rules.strategy import RuleStrategy
 from nakagai.strategies.rules.vocabulary import (
     Term, Vocabulary, VocabularyFactory, core_vocabulary, resolve_vocabulary,
 )
+from nakagai.strategies.rules.windows import PRIOR_DAY, WindowSpec
 
 __all__ = [
     "RuleStrategy", "DEFAULT_RISK", "canonical_expr", "canonical_spec",
@@ -21,5 +22,5 @@ __all__ = [
     "PineLowering",
     "PineProgram", "PineRisk", "risk_text", "spec_hash", "Term",
     "validate_risk", "validate_spec", "Vocabulary", "VocabularyFactory",
-    "core_vocabulary", "resolve_vocabulary",
+    "WindowSpec", "PRIOR_DAY", "core_vocabulary", "resolve_vocabulary",
 ]

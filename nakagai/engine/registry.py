@@ -65,6 +65,7 @@ from nakagai.strategies.rules.vocabulary import (
     VocabularyFactory,
     core_vocabulary,
 )
+from nakagai.strategies.rules.windows import WindowSpec
 
 # Bumped when the shape of a registry changes rather than its contents, so a
 # candidate identity moves when the contract under it moves.
@@ -464,9 +465,10 @@ def vocabulary_digest(vocabulary_factory: VocabularyFactory) -> str:
     reason.
 
     A term function has no canonical encoding, so this covers what a term
-    DECLARES: its name, kind, argument schema, defaults, and the three causal
-    flags. A change to what a declared term computes does not move the digest,
-    which is why core is version pinned rather than digest pinned.
+    DECLARES: its name, kind, argument schema, defaults, causal flags, and
+    window reducer contract. A change to what a declared term computes does
+    not move the digest, which is why core is version pinned rather than digest
+    pinned.
     """
     vocabulary = vocabulary_factory()
     return _digest({
@@ -476,6 +478,9 @@ def vocabulary_digest(vocabulary_factory: VocabularyFactory) -> str:
         "primitives": [_term_projection(term)
                        for term in sorted(vocabulary.primitives.values(),
                                           key=lambda item: item.name)],
+        "windows": [_window_projection(row)
+                    for row in sorted(vocabulary.windows.values(),
+                                      key=lambda item: item.name)],
     })
 
 
@@ -488,6 +493,19 @@ def _term_projection(term: Term) -> dict:
         "end_anchored": term.end_anchored,
         "session_scoped": term.session_scoped,
         "driving_frame_intraday": term.driving_frame_intraday,
+        "window_reduce": term.window_reduce,
+        "window_required": term.window_required,
+    }
+
+
+def _window_projection(row: WindowSpec) -> dict:
+    return {
+        "name": row.name,
+        "tz": row.tz,
+        "start": row.start.strftime("%H:%M"),
+        "end": row.end.strftime("%H:%M"),
+        "recurrence": row.recurrence,
+        "confidence": row.confidence,
     }
 
 

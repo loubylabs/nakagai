@@ -1,7 +1,10 @@
 import importlib
 import json
+from dataclasses import FrozenInstanceError
+from datetime import time
 from functools import cache
 from pathlib import Path
+from zoneinfo import ZoneInfoNotFoundError
 
 import numpy as np
 import pandas as pd
@@ -21,6 +24,7 @@ from nakagai.strategies.rules.spec import validate_condition_group
 from nakagai.strategies.rules.vocabulary import (
     CONDITION_ARG, Term, core_vocabulary, is_condition_rule, is_json_number,
     is_range_rule)
+from nakagai.strategies.rules.windows import PRIOR_DAY, WindowSpec
 
 
 SPECS = (Path(__file__).resolve().parents[1]
@@ -145,6 +149,33 @@ def test_term_refuses_an_unknown_kind():
 def test_term_refuses_a_non_callable_fn():
     with pytest.raises(TypeError, match="term 'broken' needs a callable fn"):
         Term("broken", "series", {}, {}, None)
+
+
+def test_term_refuses_invalid_window_reducer_metadata():
+    with pytest.raises(ValueError, match="unknown window reducer 'sum'"):
+        Term("bad_reducer", "series", {}, {}, lambda *_: None,
+             window_reduce="sum")
+    with pytest.raises(ValueError, match="requires a window reducer"):
+        Term("missing_reducer", "series", {}, {}, lambda *_: None,
+             window_required=True)
+    with pytest.raises(ValueError, match="only a series term"):
+        Term("primitive_aggregate", "primitive", {}, {}, lambda *_: None,
+             window_reduce="max")
+
+
+def test_core_declares_the_four_window_aggregate_contracts():
+    indicators = core_vocabulary().indicators
+    assert indicators["highest"].window_reduce == "max"
+    assert indicators["highest"].window_required is False
+    assert indicators["lowest"].window_reduce == "min"
+    assert indicators["lowest"].window_required is False
+    assert indicators["first"].window_reduce == "first"
+    assert indicators["first"].window_required is True
+    assert indicators["last"].window_reduce == "last"
+    assert indicators["last"].window_required is True
+    assert all(term.window_reduce is None
+               for name, term in indicators.items()
+               if name not in {"highest", "lowest", "first", "last"})
 
 
 def test_term_refuses_a_default_its_arg_schema_does_not_declare():
@@ -295,7 +326,7 @@ def test_every_core_term_satisfies_the_term_checks():
     # the checks above are satisfied by the shipped declarations rather than
     # only by the hand-written ones in this file.
     vocab = core_vocabulary()
-    assert len(vocab.indicators) == 22 and len(vocab.primitives) == 15
+    assert len(vocab.indicators) == 24 and len(vocab.primitives) == 15
     for term in vocab.all_terms():
         assert set(term.defaults) <= set(term.args)
 
@@ -308,6 +339,58 @@ def test_vocabulary_is_immutable_and_rejects_cross_namespace_duplicates():
         vocab.with_terms(Term("sma", "primitive", {}, {}, lambda *_: None))
 
 
+def test_a_window_is_immutable_grammar_data():
+    row = WindowSpec("london", "Europe/London", time(8), time(16, 30),
+                     "weekday", "low_iex")
+    vocab = core_vocabulary().with_windows(row)
+
+    assert vocab.windows["london"] is row
+    with pytest.raises(FrozenInstanceError):
+        row.end = time(16)
+    with pytest.raises(TypeError):
+        vocab.windows["london"] = row
+
+
+def test_a_window_validates_its_semantic_fields():
+    with pytest.raises(ZoneInfoNotFoundError):
+        WindowSpec("bad_tz", "Mars/Olympus", time(9), time(10),
+                   "weekday", "standard")
+    with pytest.raises(ValueError, match="distinct start and end"):
+        WindowSpec("zero", "UTC", time(9), time(9),
+                   "weekday", "standard")
+    with pytest.raises(ValueError, match="unknown recurrence 'daily'"):
+        WindowSpec("bad_recurrence", "UTC", time(9), time(10),
+                   "daily", "standard")
+    with pytest.raises(ValueError, match="unknown confidence 'medium'"):
+        WindowSpec("bad_confidence", "UTC", time(9), time(10),
+                   "weekday", "medium")
+
+
+def test_an_overnight_window_is_valid():
+    row = WindowSpec("asia", "America/New_York", time(20), time(4),
+                     "weekday", "low_iex")
+    assert row.start == time(20) and row.end == time(4)
+
+
+def test_with_windows_rejects_duplicate_names():
+    row = WindowSpec("london", "Europe/London", time(8), time(16, 30),
+                     "weekday", "low_iex")
+    vocab = core_vocabulary().with_windows(row)
+    replacement = WindowSpec("london", "Europe/London", time(9), time(17),
+                             "weekday", "low_iex")
+
+    with pytest.raises(ValueError, match="duplicate vocabulary window 'london'"):
+        vocab.with_windows(replacement)
+
+
+def test_with_terms_preserves_registered_windows():
+    vocab = core_vocabulary().with_windows(PRIOR_DAY)
+    composed = vocab.with_terms(_double_close())
+
+    assert composed.windows == {"prior_day": PRIOR_DAY}
+    assert composed.windows["prior_day"] is PRIOR_DAY
+
+
 def test_a_vocabulary_cannot_be_a_cache_key():
     # Its docstring says so, and a docstring alone rots. Frozen dataclass, so
     # __hash__ exists and the failure is a TypeError from inside the CALL, not
@@ -316,7 +399,7 @@ def test_a_vocabulary_cannot_be_a_cache_key():
     cached = cache(lambda vocab: len(vocab.indicators))
     with pytest.raises(TypeError, match="unhashable"):
         cached(core_vocabulary())
-    assert cache(lambda factory: len(factory().indicators))(core_vocabulary) == 22
+    assert cache(lambda factory: len(factory().indicators))(core_vocabulary) == 24
 
 
 def test_existing_catalog_hashes_do_not_move():
