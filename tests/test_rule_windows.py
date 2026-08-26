@@ -135,6 +135,19 @@ def test_xnys_window_refuses_an_overnight_span():
         )
 
 
+def test_weekday_premarket_window_remains_valid():
+    premarket = WindowSpec(
+        "premarket",
+        "America/New_York",
+        time(4),
+        time(9, 30),
+        "weekday",
+        "low_iex",
+    )
+
+    assert window_duration(premarket) == pd.Timedelta(hours=5, minutes=30)
+
+
 def test_weekday_window_can_still_cross_midnight():
     overnight = WindowSpec(
         "overnight_weekday",
