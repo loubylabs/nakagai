@@ -287,6 +287,8 @@ The hosted product at nakag.ai is built on top of this core.
 The window-axis parity gate now executes generated Pine through data gaps that
 cross both lifecycle boundaries. It also covers the prior-day high over a
 holiday gap and the prior-day low after an observed early-close session.
+Runtime output is unchanged; the executable parity tests characterize existing
+window lifecycle behavior.
 Current documentation describes the hard retirement in terms of the generic
 window model, without preserving obsolete grammar spellings.
 
