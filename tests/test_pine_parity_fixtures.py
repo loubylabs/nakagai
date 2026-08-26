@@ -89,6 +89,72 @@ def test_all_reducers_match_on_ordinary_current_sessions(term, source):
         bars, NY_AM)
 
 
+def test_a_data_gap_crossing_open_clears_the_completed_weekday_value():
+    london = WindowSpec(
+        "london", "Europe/London", time(8), time(16, 30),
+        "weekday", "low_iex")
+    bars = _local_spans("Europe/London", [
+        ("2026-02-02", "07:30", "17:00"),
+        ("2026-02-03", "07:30", "17:00"),
+    ])
+    local = bars.index.tz_convert("Europe/London")
+    bars = bars[~(
+        (local.date == pd.Timestamp("2026-02-03").date())
+        & (local.hour == 8) & (local.minute == 0)
+    )]
+    vocabulary = core_vocabulary().with_windows(london)
+    node = {"ind": "highest", "of": {"src": "high"}, "window": "london"}
+    engine = FrameEval(
+        {"15m": bars}, vocabulary=vocabulary).series(node, "15m")
+    pine = _pine(node, bars, vocabulary)
+    local = bars.index.tz_convert("Europe/London")
+    before_open = (
+        (local.date == pd.Timestamp("2026-02-03").date())
+        & (local.hour == 7) & (local.minute == 45)
+    )
+    after_open = (
+        (local.date == pd.Timestamp("2026-02-03").date())
+        & (local.hour == 8) & (local.minute == 15)
+    )
+    assert engine[before_open].notna().all()
+    assert pine[before_open].notna().all()
+    assert engine[after_open].isna().all()
+    assert pine[after_open].isna().all()
+    np.testing.assert_allclose(
+        pine.to_numpy(), engine.to_numpy(dtype="float64"),
+        rtol=0.0, atol=0.0, equal_nan=True)
+
+
+def test_a_data_gap_crossing_close_reveals_the_completed_weekday_value():
+    london = WindowSpec(
+        "london", "Europe/London", time(8), time(16, 30),
+        "weekday", "low_iex")
+    bars = _local_spans("Europe/London", [
+        ("2026-02-02", "07:30", "17:00"),
+        ("2026-02-03", "07:30", "17:00"),
+    ])
+    local = bars.index.tz_convert("Europe/London")
+    bars = bars[~(
+        (local.date == pd.Timestamp("2026-02-02").date())
+        & (local.hour == 16) & (local.minute == 30)
+    )]
+    vocabulary = core_vocabulary().with_windows(london)
+    node = {"ind": "highest", "of": {"src": "high"}, "window": "london"}
+    engine = FrameEval(
+        {"15m": bars}, vocabulary=vocabulary).series(node, "15m")
+    pine = _pine(node, bars, vocabulary)
+    local = bars.index.tz_convert("Europe/London")
+    first_after_close = (
+        (local.date == pd.Timestamp("2026-02-02").date())
+        & (local.hour == 16) & (local.minute == 45)
+    )
+    assert engine[first_after_close].notna().all()
+    assert pine[first_after_close].notna().all()
+    np.testing.assert_allclose(
+        pine.to_numpy(), engine.to_numpy(dtype="float64"),
+        rtol=0.0, atol=0.0, equal_nan=True)
+
+
 @pytest.mark.parametrize("first_close_minute", [0, 15])
 def test_ny_pm_becomes_visible_on_the_first_bar_at_or_after_its_close(
         first_close_minute):
@@ -222,6 +288,95 @@ def test_prior_day_skips_a_holiday_and_keeps_an_early_close_session():
     _assert_parity(
         {"ind": "last", "of": {"src": "close"}, "window": "prior_day"},
         bars, prior_day)
+
+
+def test_prior_day_highest_skips_an_absent_holiday():
+    prior_day = WindowSpec(
+        "prior_day", "America/New_York", time(9, 30), time(16),
+        "prior_session", "standard")
+    bars = _local_spans("America/New_York", [
+        ("2026-07-02", "08:00", "17:00"),
+        ("2026-07-06", "08:00", "17:00"),
+        ("2026-07-07", "08:00", "17:00"),
+    ])
+    local = bars.index.tz_convert("America/New_York")
+    thursday_regular = (
+        (local.date == pd.Timestamp("2026-07-02").date())
+        & ((local.hour * 60 + local.minute) >= 570)
+        & ((local.hour * 60 + local.minute) < 960)
+    )
+    monday_regular = (
+        (local.date == pd.Timestamp("2026-07-06").date())
+        & ((local.hour * 60 + local.minute) >= 570)
+        & ((local.hour * 60 + local.minute) < 960)
+    )
+    bars.loc[thursday_regular, "high"] = 200.0
+    bars.loc[bars.index[thursday_regular][0], "high"] = 222.0
+    bars.loc[monday_regular, "high"] = 300.0
+    bars.loc[bars.index[monday_regular][0], "high"] = 333.0
+    vocabulary = core_vocabulary().with_windows(prior_day)
+    node = {
+        "ind": "highest", "of": {"src": "high"}, "window": "prior_day",
+    }
+    engine = FrameEval(
+        {"15m": bars}, vocabulary=vocabulary).series(node, "15m")
+    pine = _pine(node, bars, vocabulary)
+    monday = local.date == pd.Timestamp("2026-07-06").date()
+    tuesday = local.date == pd.Timestamp("2026-07-07").date()
+    assert engine[monday].eq(222.0).all()
+    assert pine[monday].eq(222.0).all()
+    assert engine[tuesday].eq(333.0).all()
+    assert pine[tuesday].eq(333.0).all()
+    np.testing.assert_allclose(
+        pine.to_numpy(), engine.to_numpy(dtype="float64"),
+        rtol=0.0, atol=0.0, equal_nan=True)
+
+
+def test_prior_day_lowest_keeps_an_observed_early_close_session():
+    prior_day = WindowSpec(
+        "prior_day", "America/New_York", time(9, 30), time(16),
+        "prior_session", "standard")
+    bars = _local_spans("America/New_York", [
+        ("2026-11-27", "08:00", "12:45"),
+        ("2026-11-30", "08:00", "17:00"),
+        ("2026-12-01", "08:00", "17:00"),
+    ])
+    local = bars.index.tz_convert("America/New_York")
+    friday_regular = (
+        (local.date == pd.Timestamp("2026-11-27").date())
+        & ((local.hour * 60 + local.minute) >= 570)
+        & ((local.hour * 60 + local.minute) < 960)
+    )
+    friday_premarket = (
+        (local.date == pd.Timestamp("2026-11-27").date())
+        & ((local.hour * 60 + local.minute) < 570)
+    )
+    monday_regular = (
+        (local.date == pd.Timestamp("2026-11-30").date())
+        & ((local.hour * 60 + local.minute) >= 570)
+        & ((local.hour * 60 + local.minute) < 960)
+    )
+    bars.loc[friday_regular, "low"] = 50.0
+    bars.loc[bars.index[friday_regular][0], "low"] = 44.0
+    bars.loc[friday_premarket, "low"] = -999.0
+    bars.loc[monday_regular, "low"] = 60.0
+    bars.loc[bars.index[monday_regular][0], "low"] = 55.0
+    vocabulary = core_vocabulary().with_windows(prior_day)
+    node = {
+        "ind": "lowest", "of": {"src": "low"}, "window": "prior_day",
+    }
+    engine = FrameEval(
+        {"15m": bars}, vocabulary=vocabulary).series(node, "15m")
+    pine = _pine(node, bars, vocabulary)
+    monday = local.date == pd.Timestamp("2026-11-30").date()
+    tuesday = local.date == pd.Timestamp("2026-12-01").date()
+    assert engine[monday].eq(44.0).all()
+    assert pine[monday].eq(44.0).all()
+    assert engine[tuesday].eq(55.0).all()
+    assert pine[tuesday].eq(55.0).all()
+    np.testing.assert_allclose(
+        pine.to_numpy(), engine.to_numpy(dtype="float64"),
+        rtol=0.0, atol=0.0, equal_nan=True)
 
 
 @pytest.mark.parametrize("row", [
