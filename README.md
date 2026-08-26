@@ -223,6 +223,56 @@ Two more examples ship in `nakagai/strategies/catalog/specs/`: `rsi_reversion.js
 core_vocabulary)` turns every JSON file in a directory like this one into a
 frozen `StrategyDefinition` ready to enter a registry.
 
+### Named time windows
+
+An aggregate indicator can read one immutable, recurring window row. The row
+belongs to the injected `Vocabulary`, so the same name means the same timezone,
+boundaries, recurrence, and confidence everywhere the spec travels. Core does
+not register venue-specific house rows on its own. A caller composes the rows
+it supports and passes that vocabulary through validation, evaluation, identity,
+description, and Pine export.
+
+```python
+from datetime import time
+
+from nakagai.strategies.rules import WindowSpec, core_vocabulary
+
+vocabulary = core_vocabulary().with_windows(WindowSpec(
+    name="london",
+    tz="Europe/London",
+    start=time(8),
+    end=time(16, 30),
+    recurrence="weekday",
+    confidence="low_iex",
+))
+```
+
+The grammar then composes ordinary aggregate terms with that row:
+
+```json
+{
+  "version": 2,
+  "name": "london-range",
+  "timeframe": "15m",
+  "long": {"all": [{
+    "lhs": {"ind": "highest", "of": {"src": "high"}, "window": "london"},
+    "op": ">",
+    "rhs": {"ind": "lowest", "of": {"src": "low"}, "window": "london"}
+  }]}
+}
+```
+
+`highest` and `lowest` retain their rolling `n` form when `window` is absent.
+In window mode, `n` and `window` are mutually exclusive. `first` and `last`
+require a window because they have no rolling interpretation. An aggregate may
+also select its own `tf`; its `of` expression is evaluated on that frame.
+
+Current windows are half-open. Their aggregate is NaN while an occurrence is
+active, becomes visible at the first bar on or after its close, and carries
+until the next occurrence opens. A row with `confidence="low_iex"` keeps the
+same arithmetic and adds the sparse US-equity extended-hours IEX disclosure to
+spec readback, prompts, and generated Pine source.
+
 ## What is NOT here
 
 This repo does not include the curated Playbook content (the hand-authored
@@ -232,7 +282,25 @@ The hosted product at nakag.ai is built on top of this core.
 
 ## Release notes
 
-### 0.7.0
+### 0.8.0 (2026-08-26)
+
+RuleSpec now has one composable `window` axis. Immutable `WindowSpec` rows live
+in the strategy vocabulary; `highest`, `lowest`, `first`, and `last` evaluate
+the same row contract in the engine and Pine compiler. Window scope participates
+in canonical spec and vocabulary identity. A grammar that adds or changes rows
+therefore produces new definition, replay, and trade identifiers even when a
+spec body is untouched.
+
+**Breaking:** `opening_range_high`, `opening_range_low`, `prev_session_high`,
+`prev_session_low`, and `prev_session_close` are removed. Register immutable
+rows and use `highest(high)`, `lowest(low)`, or `last(close)` over the matching
+window. No alias, fallback, or compatibility path remains.
+
+Low-confidence rows identify sparse US-equity extended-hours IEX coverage in
+natural-language prompts, spec readback, and generated Pine source. Confidence
+is disclosure metadata and does not change arithmetic.
+
+### 0.7.0 (2026-08-23)
 
 `benjamini_hochberg` is now the false-discovery control for an unordered
 search. `effective_n_trials` is removed because it derived a result from the
@@ -598,7 +666,7 @@ hard enough to find noise", is not being abandoned; it is moving to the
 deflated-Sharpe family, which prices the same overfitting risk from the trial
 count directly rather than by replaying the search on permuted bars.
 
-### 0.2.0
+### Session corrections (2026-08-06)
 
 **Behavior change: every session-scoped term is anchored on the 09:30 bell and
 scoped to regular hours.** Backtest output moves for any play reading
@@ -625,6 +693,8 @@ label a resampled daily bar carries and was read as the next day: Tuesday, for a
 Monday evening. It answered wrong on one bar of a session and right on all the
 others, which is the shape of divergence a spec author never catches. The
 weekday is now the frame's to decide, per `strategies/rules/primitives.py`.
+
+### 0.2.0 (2026-08-04)
 
 **New: a Pine v6 compiler for RuleSpec v2.** `compile_pine(spec, vocabulary)`
 returns an indicator and a strategy, rendered from one lowering so the pair

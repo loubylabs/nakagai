@@ -584,6 +584,6 @@ def test_no_dash_lookalike_reaches_an_artifact(
     bundle = compile_pine(
         load_rule_spec(name), vocabulary=rule_fixture_vocabulary)
     for source in (bundle.indicator, bundle.strategy):
-        assert "—" not in source
+        assert chr(0x2014) not in source
         assert "–" not in source
         assert " · " in source
