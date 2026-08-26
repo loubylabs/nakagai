@@ -38,6 +38,12 @@ class WindowSpec:
 
     def __post_init__(self) -> None:
         ZoneInfo(self.tz)
+        for label, boundary in (("start", self.start), ("end", self.end)):
+            if (boundary.tzinfo is not None or boundary.second != 0
+                    or boundary.microsecond != 0):
+                raise ValueError(
+                    f"window {self.name!r} {label} must be a naive "
+                    "minute-resolution time")
         if self.start == self.end:
             raise ValueError(f"window {self.name!r} needs distinct start and end")
         if self.recurrence not in RECURRENCES:

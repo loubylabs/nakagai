@@ -1,7 +1,7 @@
 import importlib
 import json
 from dataclasses import FrozenInstanceError
-from datetime import time
+from datetime import time, timezone
 from functools import cache
 from pathlib import Path
 from zoneinfo import ZoneInfoNotFoundError
@@ -364,6 +364,24 @@ def test_a_window_validates_its_semantic_fields():
     with pytest.raises(ValueError, match="unknown confidence 'medium'"):
         WindowSpec("bad_confidence", "UTC", time(9), time(10),
                    "weekday", "medium")
+
+
+@pytest.mark.parametrize(
+    ("start", "end"),
+    [
+        (time(8, 0, 1), time(16, 30)),
+        (time(8, 0, 0, 1), time(16, 30)),
+        (time(8), time(16, 30, 1)),
+        (time(8), time(16, 30, 0, 1)),
+        (time(8, tzinfo=timezone.utc), time(16, 30)),
+        (time(8), time(16, 30, tzinfo=timezone.utc)),
+    ],
+)
+def test_no_accepted_window_can_hide_boundary_precision_from_its_digest(
+        start, end):
+    with pytest.raises(ValueError, match="naive minute-resolution"):
+        WindowSpec("hidden_precision", "UTC", start, end,
+                   "weekday", "standard")
 
 
 def test_an_overnight_window_is_valid():
