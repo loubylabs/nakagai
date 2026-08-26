@@ -1,5 +1,7 @@
 """ScreenSpec v1: the conditions-only IR reusing RuleSpec v2's grammar."""
 
+from datetime import time
+
 import pytest
 import numpy as np
 
@@ -8,8 +10,83 @@ from nakagai.strategies.rules.spec import group_text, validate_condition_group
 from nakagai.strategies.rules.vocabulary import (
     Term, Vocabulary, core_vocabulary,
 )
+from nakagai.strategies.rules.windows import PRIOR_DAY, WindowSpec
 
 RSI_LT_30 = {"lhs": {"ind": "rsi", "n": 14}, "op": "<", "rhs": 30}
+LOW_IEX_DISCLOSURE = "US-equity extended-hours IEX data can be sparse."
+LONDON = WindowSpec(
+    "london", "Europe/London", time(8), time(16, 30), "weekday", "low_iex")
+NY_AM = WindowSpec(
+    "ny_am", "America/New_York", time(9, 30), time(12),
+    "xnys_session", "standard")
+NY_OPEN_15 = WindowSpec(
+    "ny_open_15", "America/New_York", time(9, 30), time(9, 45),
+    "xnys_session", "standard")
+NY_OPEN_30 = WindowSpec(
+    "ny_open_30", "America/New_York", time(9, 30), time(10),
+    "xnys_session", "standard")
+WINDOW_VOCABULARY = core_vocabulary().with_windows(
+    LONDON, NY_AM, NY_OPEN_15, NY_OPEN_30, PRIOR_DAY)
+
+
+def _screen_with(expr: dict, tf: str = "15m") -> dict:
+    return {
+        "version": 1,
+        "tf": tf,
+        "conditions": {"all": [
+            {"lhs": {"src": "close"}, "op": ">", "rhs": expr},
+        ]},
+    }
+
+
+@pytest.mark.parametrize("expr,tf", [
+    ({"ind": "highest", "of": {"src": "high"}, "window": "london"},
+     "15m"),
+    ({"ind": "last", "of": {"src": "close"}, "window": "prior_day"},
+     "15m"),
+    ({"ind": "highest", "of": {"src": "high"}, "tf": "15m",
+      "window": "ny_open_15"}, "1h"),
+    ({"ind": "highest", "of": {"src": "high"},
+      "window": "ny_open_15"}, "15m"),
+    ({"ind": "highest", "of": {"src": "high"},
+      "window": "prior_day"}, "1d"),
+], ids=["current", "required", "own-tf", "equal-width", "daily-prior"])
+def test_screen_spec_accepts_every_window_contract(expr, tf):
+    assert validate_screen_spec(
+        _screen_with(expr, tf), vocabulary=WINDOW_VOCABULARY) == []
+
+
+@pytest.mark.parametrize("expr,tf,expected", [
+    ({"ind": "highest", "of": {"src": "high"}, "window": "unknown"},
+     "15m", "unknown window 'unknown'"),
+    ({"src": "high", "window": "london"},
+     "15m", "window is only valid on an aggregate indicator"),
+    ({"op": "max", "args": [{"src": "high"}, 1], "window": "london"},
+     "15m", "window is only valid on an aggregate indicator"),
+    ({"prim": "gap_pct", "window": "london"},
+     "15m", "window is only valid on an aggregate indicator"),
+    ({"ind": "rsi", "window": "london"},
+     "15m", "rsi does not support window aggregation"),
+    ({"ind": "first", "of": {"src": "open"}},
+     "15m", "first requires window"),
+    ({"ind": "highest", "of": {"src": "high"}, "n": 20,
+      "window": "london"},
+     "15m", "highest cannot combine n with window"),
+    ({"ind": "highest", "of": {"src": "high"},
+      "window": "ny_open_30"},
+     "1h", "window 'ny_open_30' spans 30 minutes, narrower than '1h' bars "
+           "(60 minutes)"),
+    ({"ind": "highest", "of": {"src": "high"}, "window": "ny_am"},
+     "1d", "window 'ny_am' is intraday and cannot be resolved from "
+           "session-aligned '1d' bars"),
+], ids=[
+    "unknown", "source", "math", "primitive", "non-aggregate",
+    "required", "scope-conflict", "wide-fixed-frame", "daily-current",
+])
+def test_screen_spec_refuses_every_invalid_window_shape(expr, tf, expected):
+    errors = validate_screen_spec(
+        _screen_with(expr, tf), vocabulary=WINDOW_VOCABULARY)
+    assert errors == [f"conditions.all[0].rhs: {expected}"]
 
 
 def test_validate_condition_group_accepts_a_bare_group():
@@ -94,49 +171,6 @@ def test_an_intraday_screen_may_reference_a_higher_timeframe():
     assert validate_screen_spec(spec) == []
 
 
-def test_screen_spec_refuses_an_opening_range_shorter_than_its_bar():
-    spec = {"version": 1, "tf": "1h", "conditions": {"all": [
-        {"lhs": {"src": "close"}, "op": ">",
-         "rhs": {"prim": "opening_range_high", "minutes": 30}}]}}
-    errs = validate_screen_spec(spec)
-    assert any("opening_range_high" in error and "30-minute" in error
-               and "'1h'" in error and "60 minutes" in error
-               for error in errs), errs
-
-
-@pytest.mark.parametrize("minutes", [
-    1, 121, float("nan"), float("inf"), float("-inf"), True, "30", None,
-    10 ** 400, -(10 ** 400),
-])
-def test_screen_spec_reports_invalid_opening_range_minutes_only_once(minutes):
-    spec = {"version": 1, "tf": "1h", "conditions": {"all": [
-        {"lhs": {"src": "close"}, "op": ">",
-         "rhs": {"prim": "opening_range_high", "minutes": minutes}}]}}
-    errs = validate_screen_spec(spec)
-    assert len(errs) == 1, errs
-    assert "opening_range_high.minutes must be a number in [5, 120]" in errs[0]
-
-
-def test_screen_spec_rejects_a_huge_injected_opening_range_default():
-    base = core_vocabulary()
-    huge = -(10 ** 400)
-    replacement = Term(
-        "opening_range_high", "primitive",
-        {"minutes": (-(10 ** 401), 10 ** 401)},
-        {"minutes": huge}, lambda *_args: None,
-    )
-    vocabulary = Vocabulary(
-        base.indicators,
-        {**base.primitives, "opening_range_high": replacement},
-    )
-    spec = {"version": 1, "tf": "1h", "conditions": {"all": [
-        {"lhs": {"src": "close"}, "op": ">",
-         "rhs": {"prim": "opening_range_high"}}]}}
-    errs = validate_screen_spec(spec, vocabulary=vocabulary)
-    assert len(errs) == 1, errs
-    assert "opening_range_high.minutes has invalid argument rule" in errs[0]
-
-
 @pytest.mark.parametrize("node", [
     {"prim": "custom_numeric", "n": 10 ** 400},
     {"prim": "custom_numeric"},
@@ -187,67 +221,6 @@ def test_screen_spec_refuses_an_invalid_injected_choice_default():
     assert len(errs) == 1 and "invalid_choice.side default" in errs[0], errs
 
 
-def test_screen_spec_refuses_a_wide_hourly_bar_with_numpy_opening_bounds():
-    base = core_vocabulary()
-    replacement = Term(
-        "opening_range_high", "primitive",
-        {"minutes": (np.int64(5), np.int64(120))}, {"minutes": 30},
-        lambda *_args: None,
-    )
-    vocabulary = Vocabulary(
-        base.indicators,
-        {**base.primitives, "opening_range_high": replacement},
-    )
-    spec = {"version": 1, "tf": "1h", "conditions": {"all": [
-        {"lhs": {"src": "close"}, "op": ">",
-         "rhs": {"prim": "opening_range_high"}}]}}
-    errs = validate_screen_spec(spec, vocabulary=vocabulary)
-    assert any("opening_range_high" in error and "30-minute" in error
-               and "60 minutes" in error for error in errs), errs
-
-
-@pytest.mark.parametrize("node", [
-    {"prim": "opening_range_high", "minutes": np.int64(30)},
-    {"prim": "opening_range_high"},
-], ids=["explicit", "default"])
-def test_screen_spec_rejects_numpy_opening_range_values(node):
-    base = core_vocabulary()
-    replacement = Term(
-        "opening_range_high", "primitive", {"minutes": (5, 120)},
-        {"minutes": np.int64(30)}, lambda *_args: None,
-    )
-    vocabulary = Vocabulary(
-        base.indicators,
-        {**base.primitives, "opening_range_high": replacement},
-    )
-    spec = {"version": 1, "tf": "15m", "conditions": {"all": [
-        {"lhs": {"src": "close"}, "op": ">", "rhs": node}]}}
-    errs = validate_screen_spec(spec, vocabulary=vocabulary)
-    assert len(errs) == 1, errs
-    assert "opening_range_high.minutes must be a number" in errs[0]
-
-
-@pytest.mark.parametrize("node", [
-    {"prim": "opening_range_high", "minutes": np.float64(30.0)},
-    {"prim": "opening_range_high"},
-], ids=["explicit-float", "default-float"])
-def test_screen_spec_rejects_numpy_float_opening_range_values(node):
-    base = core_vocabulary()
-    replacement = Term(
-        "opening_range_high", "primitive", {"minutes": (5, 120)},
-        {"minutes": np.float64(30.0)}, lambda *_args: None,
-    )
-    vocabulary = Vocabulary(
-        base.indicators,
-        {**base.primitives, "opening_range_high": replacement},
-    )
-    spec = {"version": 1, "tf": "15m", "conditions": {"all": [
-        {"lhs": {"src": "close"}, "op": ">", "rhs": node}]}}
-    errs = validate_screen_spec(spec, vocabulary=vocabulary)
-    assert len(errs) == 1, errs
-    assert "opening_range_high.minutes must be a number" in errs[0]
-
-
 @pytest.mark.parametrize("bounds", [
     (-(10 ** 400), 10 ** 400),
     (float("-inf"), float("inf")),
@@ -274,6 +247,21 @@ def test_describe_screen_renders_the_readback():
     text = describe_screen(GOOD)
     assert text.startswith("Screen on 1d bars")
     assert "rsi(14) is below 30" in text
+
+
+def test_windowed_screen_readback_discloses_only_low_iex_rows():
+    london = _screen_with(
+        {"ind": "highest", "of": {"src": "high"}, "window": "london"})
+    standard = _screen_with(
+        {"ind": "highest", "of": {"src": "high"}, "window": "ny_am"})
+
+    london_text = describe_screen(london, vocabulary=WINDOW_VOCABULARY)
+    assert "highest(of=high) over london" in london_text
+    assert LOW_IEX_DISCLOSURE in london_text
+
+    standard_text = describe_screen(standard, vocabulary=WINDOW_VOCABULARY)
+    assert "highest(of=high) over ny_am" in standard_text
+    assert LOW_IEX_DISCLOSURE not in standard_text
 
 
 def test_the_screen_surface_reads_one_vocabulary_end_to_end():
@@ -338,6 +326,22 @@ def test_screen_prompt_renders_a_condition_typed_arg_readably():
     prompt = render_screen_prompt()
     assert "- bars_since(cond={lhs,op,rhs})" in prompt.splitlines()
     assert "cond=condition" not in prompt
+
+
+def test_screen_prompt_renders_window_rows_from_the_supplied_vocabulary():
+    prompt = render_screen_prompt(WINDOW_VOCABULARY)
+    lines = prompt.splitlines()
+    london = next(line for line in lines if line.startswith("- london:"))
+    assert london == (
+        "- london: timezone=Europe/London; span=[08:00, 16:30); "
+        "recurrence=weekday; confidence=low_iex. " + LOW_IEX_DISCLOSURE)
+    ny_am = next(line for line in lines if line.startswith("- ny_am:"))
+    assert ny_am == (
+        "- ny_am: timezone=America/New_York; span=[09:30, 12:00); "
+        "recurrence=xnys_session; confidence=standard")
+    assert LOW_IEX_DISCLOSURE not in ny_am
+    assert '"window"?: <registered window>' in prompt
+    assert "- first(no args) [takes of=<expr>] [window required; reducer=first]" in lines
 
 
 def test_screen_prompt_describes_a_second_condition_taking_term_generically(

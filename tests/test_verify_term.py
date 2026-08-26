@@ -30,6 +30,13 @@ def test_an_ordinary_term_is_not_exempt():
     assert exemption_reason(v.primitives["gap_pct"]) is None
 
 
+def test_window_required_aggregates_are_classified_without_being_called(bars):
+    for name in ("first", "last"):
+        verdict = verify_term(core_vocabulary().indicators[name], bars)
+        assert verdict.status == EXEMPT
+        assert "window_required" in verdict.reason
+
+
 def test_exactly_these_core_terms_are_exempt():
     """The exempt set is a declared constant, not whatever the code happens to skip.
 
@@ -38,7 +45,7 @@ def test_exactly_these_core_terms_are_exempt():
     """
     exempt = {t.name for t in core_vocabulary().all_terms()
               if exemption_reason(t) is not None}
-    assert exempt == {"fvg_nearest", "order_block"}
+    assert exempt == {"first", "last", "fvg_nearest", "order_block"}
     # N3-D12 retired the condition exemption, so the declared constant has to
     # lose bars_since in the same change the computed set does. Asserted here
     # rather than in a test of its own, which would be a third statement of the
@@ -1197,13 +1204,15 @@ def test_an_honest_condition_term_is_checked_not_merely_not_failed(bars):
 # The exempt set is declared, not counted. A term going silently exempt is how a
 # real look-ahead bug would hide behind a green run.
 EXPECTED_EXEMPT = {
+    "first": "window_required",
+    "last": "window_required",
     "fvg_nearest": "end_anchored",
     "order_block": "end_anchored",
 }
 
 
 def test_every_core_term_is_checked_or_declared_exempt(verdicts):
-    assert len(verdicts) == len(core_vocabulary().all_terms()) == 37
+    assert len(verdicts) == len(core_vocabulary().all_terms()) == 34
 
     failed = [v for v in verdicts if v.status == FAILED]
     assert not failed, "\n".join(f"{v.name}: {v.reason}" for v in failed)

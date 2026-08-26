@@ -1,3 +1,5 @@
+from datetime import time
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -6,6 +8,8 @@ from nakagai.data.schema import DEFAULT_TIMEFRAMES as TFS
 from nakagai.strategies.base import Direction, MarketContext
 from nakagai.strategies.rules import RuleStrategy
 from nakagai.strategies.rules.frame_eval import FrameEval
+from nakagai.strategies.rules.vocabulary import core_vocabulary
+from nakagai.strategies.rules.windows import WindowSpec
 
 RISK = {"stop": {"kind": "atr", "n": 14, "mult": 2.0}, "target": {"kind": "rr", "rr": 2.0}}
 
@@ -26,12 +30,13 @@ def _fe(b15, b1h=None, b1d=None) -> FrameEval:
     return FrameEval(_frames(b15, b1h, b1d), TFS)
 
 
-def _ctx(b15, b1h=None, b1d=None) -> MarketContext:
+def _ctx(b15, b1h=None, b1d=None, *, vocabulary=None) -> MarketContext:
     """A context shaped the way build_context builds one: cut frames, a walker
     over them, and a cursor on the last row of each."""
     frames = _frames(b15, b1h, b1d)
     return MarketContext("SPY", b15.index[-1] + pd.Timedelta(minutes=15),
-                         bars=frames, tfs=TFS, fe=FrameEval(frames, TFS),
+                         bars=frames, tfs=TFS,
+                         fe=FrameEval(frames, TFS, vocabulary=vocabulary),
                          cursor={tf: len(f) - 1 for tf, f in frames.items()})
 
 
@@ -121,15 +126,20 @@ def test_rule_strategy_emits_signal_and_validates():
     assert RuleStrategy({}).on_bar(_ctx(b)) == ()      # inert without a spec
 
 
-def test_primitive_in_condition_end_to_end():
-    # first two 15m bars set the 30m opening range; the tape then holds below
+def test_window_aggregate_in_condition_end_to_end():
+    # first two 15m bars set the 30m opening window; the tape then holds below
     # it and only breaks out on the final bar, so the crossing lands on the
     # bar RuleStrategy actually evaluates.
     ramp = list(np.linspace(100, 100.3, 26))
     b = _bars(ramp + [100.3] * 5 + [103.0])
     spec = {"version": 2, "name": "orb", "timeframe": "15m",
             "long": {"all": [{"lhs": {"src": "close"}, "op": "crosses_above",
-                              "rhs": {"prim": "opening_range_high", "minutes": 30}}]},
+                              "rhs": {"ind": "highest", "of": {"src": "high"},
+                                      "window": "ny_open_30"}}]},
             "risk": RISK}
-    sigs = RuleStrategy({"spec": spec}).on_bar(_ctx(b))
+    vocabulary = core_vocabulary().with_windows(WindowSpec(
+        "ny_open_30", "America/New_York", time(9, 30), time(10),
+        "xnys_session", "standard"))
+    sigs = RuleStrategy({"spec": spec}, vocabulary=vocabulary).on_bar(
+        _ctx(b, vocabulary=vocabulary))
     assert len(sigs) == 1

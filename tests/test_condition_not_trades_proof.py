@@ -1,5 +1,4 @@
-"""Hard rule 3's core half: every existing catalog spec and fixture produces
-byte-identical trades before and after node 03.
+"""Every existing catalog spec and fixture preserves its trade behavior.
 
 The instrument is the one public replay door, `run_portfolio`. Engine Phase 1
 retired the singleton `Engine` this proof used to drive, so the harness below
@@ -14,29 +13,21 @@ spec producing zero trades before and after passes an equality assertion while
 proving nothing. Every one of the nine specs below is asserted to produce at
 least one trade on this frame; none needed a named exemption.
 
-The comparison has two halves, because the fields answer to two authorities.
-The fourteen fields that are not arithmetic go into a sha256 and are compared
-EXACTLY: the timestamps, direction, quantity, ordinals, exit reason, tags and
-the four identity digests Phase 1 added. Those are what a grammar regression
-moves, since a spec that evaluates differently fires on a different BAR. The
-twelve float fields are compared per trade and per field against a committed
+The comparison has three parts because the fields answer to three authorities.
+Non-arithmetic behavior is compared exactly against the core 0.7.0 baseline.
+The twelve float fields are compared per trade and per field against a committed
 reference with a relative tolerance, because the last digits of a computed
-price are not reproducible across architectures and a full-precision table
-would pin the machine that derived it. `_FLOAT_TOLERANCE` carries the
-measurement that forced this, including the experiment that ruled the fixture
-out as the cause.
-
-The identity fields are safe on the exact side, which is measured rather than
-assumed: `test_the_identities_are_derived_and_never_generated` shows each is a
-digest over the request and the signal, so a moved identity always means a
-moved input and never a flaky run.
+price are not reproducible across architectures. Identity is compared exactly
+only after its production formulas are rechecked. This separation lets an
+intentional grammar digest movement update replay and trade identity without
+blessing a behavioral movement hidden inside the same combined digest.
 """
 
 import dataclasses
 import hashlib
 import json
 import math
-from datetime import date, timedelta
+from datetime import date, time, timedelta
 from enum import Enum
 from pathlib import Path
 
@@ -67,6 +58,7 @@ from nakagai.engine.registry import (
 from nakagai.engine.replay import run_portfolio
 from nakagai.strategies.catalog import load_entries
 from nakagai.strategies.rules import core_vocabulary
+from nakagai.strategies.rules.windows import WindowSpec
 from tests.portfolio_fixtures import (
     base_identity,
     base_request,
@@ -83,8 +75,8 @@ FIXTURE_SPECS = Path(__file__).resolve().parent / "fixtures" / "rules"
 
 SYMBOL = "SPY"
 PLAY_ID = "play-p"
-# The spec the two machinery guards below drive. Named rather than read off
-# GOLDEN, because both ask whether the DIGEST can see a change and neither is
+# The spec the field-partition guard below drives. Named rather than read off
+# GOLDEN, because it asks whether the DIGEST can see a change and is not
 # about the table: reading `sorted(GOLDEN)[0]` made them raise IndexError on an
 # underived table, which reads as a broken guard where the real fault is one
 # missing derivation. `test_the_frame_covers_every_spec_in_the_golden_table` is
@@ -108,6 +100,22 @@ SESSION_INTERVALS = 26  # 09:30 to 16:00 Eastern, on the 15-minute base clock
 # this module's runtime, because every evaluation re-reads its own prefix.
 SESSIONS = 340
 TRAIN_SESSIONS = 210
+
+
+def _orb_fixture_vocabulary():
+    """The frozen ORB fixture's grammar, identical to its Pine fixture row."""
+    return core_vocabulary().with_windows(WindowSpec(
+        "ny_open_30",
+        "America/New_York",
+        time(9, 30),
+        time(10),
+        "xnys_session",
+        "standard",
+    ))
+
+
+def _vocabulary_factory(name: str):
+    return _orb_fixture_vocabulary if name == "fixture:orb" else core_vocabulary
 
 
 # ------------------------------------------------------------ the schedule
@@ -367,10 +375,10 @@ def market():
     return schedule, build_frames(schedule, boundary)
 
 
-def _request(spec: dict, schedule: ReplaySchedule):
+def _request(spec: dict, schedule: ReplaySchedule, vocabulary_factory):
     intervals = schedule.base_intervals
     split = TRAIN_SESSIONS * SESSION_INTERVALS
-    base = spec_base_digest(spec, core_vocabulary)
+    base = spec_base_digest(spec, vocabulary_factory)
     return base_request(
         plays=(PlayRequest(play_id=PLAY_ID, strategy=spec["name"],
                            definition_digest=definition_digest(base, {}),
@@ -397,10 +405,11 @@ def replay(name: str, market):
     """
     schedule, frames = market
     spec = _specs()[name]
-    request, base = _request(spec, schedule)
+    vocabulary_factory = _vocabulary_factory(name)
+    request, base = _request(spec, schedule, vocabulary_factory)
     registry = FrozenStrategyRegistry.from_definitions(
         (rules_definition(spec["name"], base, spec=spec,
-                          vocabulary_factory=core_vocabulary),))
+                          vocabulary_factory=vocabulary_factory),))
     declared = dependencies_for(request, registry).timeframes
     bars = PortfolioBars({key: frame for key, frame in frames.items()
                           if key[1] in declared})
@@ -498,6 +507,19 @@ def _exact_fields():
                  if f.name not in floats)
 
 
+_IDENTITY_FIELDS = frozenset({"trade_id", "replay_id"})
+
+
+def _behavior_digest(trades):
+    """Every exact field except the two grammar-derived identifiers."""
+    names = tuple(name for name in _exact_fields()
+                  if name not in _IDENTITY_FIELDS)
+    rows = [{name: _cell(getattr(trade, name)) for name in names}
+            for trade in trades]
+    blob = json.dumps(rows, sort_keys=True)
+    return hashlib.sha256(blob.encode()).hexdigest()
+
+
 def _trade_digest(trades):
     """Every NON-float field, discovered rather than listed.
 
@@ -534,12 +556,24 @@ def _float_mismatches(got, want):
     out = []
     for i, (grow, wrow) in enumerate(zip(got, want)):
         for name, g, w in zip(names, grow, wrow):
-            if math.isclose(g, w, rel_tol=_FLOAT_TOLERANCE,
-                            abs_tol=_FLOAT_TOLERANCE):
+            if math.isclose(
+                    g, w, rel_tol=_FLOAT_TOLERANCE, abs_tol=0.0):
                 continue
             rel = abs(g - w) / max(abs(g), abs(w), 1e-300)
             out.append(f"trade {i} {name}: {g!r} vs {w!r} (rel {rel:.2e})")
     return out
+
+
+def test_float_comparison_rejects_near_zero_absolute_drift():
+    names = _float_fields()
+    got = [[0.0] * len(names)]
+    want = [[0.0] * len(names)]
+    got[0][0] = 5e-12
+
+    moved = _float_mismatches(got, want)
+
+    assert len(moved) == 1
+    assert moved[0].startswith(f"trade 0 {names[0]}: 5e-12 vs 0.0")
 
 
 def _perturb(v):
@@ -641,39 +675,11 @@ def test_every_field_reaches_one_side_of_the_comparison(market):
         f"to them is invisible: {missed_float}")
 
 
-def test_the_identities_are_derived_and_never_generated(market):
-    """Why the four Phase 1 identity fields are safe to digest.
-
-    An identity that were minted per run would make this whole table flap: the
-    digest covers every field, so a fresh `trade_id` on every replay would
-    change it every time and the golden numbers would be unreproducible by
-    construction. They are not minted. Every one is a digest over the request
-    and the signal, so this asserts the formulas rather than trusting them, and
-    a future change that generated an identity would fail HERE, naming the
-    cause, instead of showing up as nine unexplained digest drifts.
-
-    `replay_id` carries the vocabulary through `definition_digest`, which is
-    the other half of the same point: it moves when the GRAMMAR moves. Node 03
-    declares no new term and changes no term's schema, so it does not move, and
-    the golden table can be compared across the node at all.
-    """
-    request, result = replay(PROBE, market)
-    assert result.trades
-    assert request.replay_id == expected_replay_id(request)
-    for ordinal, trade in enumerate(result.trades):
-        assert trade.replay_id == request.replay_id
-        assert trade.trade_ordinal == ordinal
-        assert trade.play_id == PLAY_ID
-        assert trade.trade_id == trade_id(
-            request.replay_id, trade.play_id, trade.symbol,
-            trade.signal_ordinal)
-
-
-# DERIVED, NOT TRANSCRIBED. Printed by running this module's harness over
-# _specs() at core 992f55e with the node 03 production diff ABSENT, then
-# re-printed on the node's own branch and confirmed identical. That second run
-# is what makes the table a measurement of "this node moved no trade" rather
-# than a stamp of "this node produced these numbers".
+# DERIVED, NOT TRANSCRIBED. Recomputed on 2026-08-26 only after the core 0.7.0
+# run and the Node 05 run matched on all nine trade counts, every behavior-only
+# digest below, and every float reference. The parametrized proof also rebuilds
+# each definition, replay, and trade identity through the production formulas
+# before it accepts one of these combined digests.
 #
 # It is also re-derived on a SECOND ARCHITECTURE. Every operation building the
 # frame is bit-identical everywhere, which `_ohlcv` says took two fixes to get
@@ -681,22 +687,36 @@ def test_the_identities_are_derived_and_never_generated(market):
 # Linux and arm64 Darwin, and the tolerant half absorbs what the ENGINE's
 # arithmetic still differs by.
 #
-# The counts are not carried over from the table this file held before engine
-# Phase 1. That engine replayed each spec on its own timeframe with no account
-# between the signal and the trade; this one drives a 15-minute base clock,
-# funds every fill out of one account, and closes the window at its end. The
-# numbers moved because the replay model moved, and the baseline run above is
-# what attributes that rather than assuming it.
+# Node 05 is expected to move these digests because the grammar digest is an
+# input to definition identity. Behavior remains pinned separately so this
+# table cannot bless an arithmetic or signal movement as part of that change.
 GOLDEN = {
-    "catalog:macd_trend": (65, "564180028e581a24a12df61791cd2ce3b82561b6983ecbb14ee569cef50d9114"),
-    "catalog:rsi_reversion": (7, "ba3898c5b1a92fe6f559354fdf0c6c8c0096e4dc10f37e73df043f3e63c87e06"),
-    "catalog:sma_cross": (40, "e40bab366bd80114bdd7d976335b295c67284d230d82c5a32150ab1ecf237103"),
-    "fixture:bollinger_breakout": (4, "63366c3fe7501c81cd4195327311cc57697d78dfa939eedf48e11fbe62cd3e3b"),
-    "fixture:discount_pullback": (23, "3ad81b3a64f670795d2ff9a85fc8b8f4222b564dd192b8a8abd4e5e089d681ab"),
-    "fixture:ifvg_reversal": (65, "3dec72caaa3ea53b64b6f9be202df20b2280f853786f23272145301aa294ac43"),
-    "fixture:ob_bounce": (55, "11ad81be9bfc3770ca11f516d3a81cfdf031376e840aa7e02c0c97f9b7404890"),
-    "fixture:orb": (135, "71da11a9170c835f4b6fd0e29a22f0bef389f8e8356a196c3abe3ae6b6743e2f"),
-    "fixture:sma_cross": (40, "e40bab366bd80114bdd7d976335b295c67284d230d82c5a32150ab1ecf237103"),
+    "catalog:macd_trend": (65, "02d871c6c80f0b31ec89be9b20db6e41db61c905ccc37a22ff350b60c79905c2"),
+    "catalog:rsi_reversion": (7, "7e3b63d6bd3b1add7effc0cdb38ff26aab161039cb541f200091c9864c13461a"),
+    "catalog:sma_cross": (40, "ae07aefa77f3966e6868a826b730eb27ddedce2292ddd65a1d2ca9bbd3706567"),
+    "fixture:bollinger_breakout": (4, "3d4f83e36f989083a067be1c80bc3a80dd8f6af741e9336f02ffab04715f671f"),
+    "fixture:discount_pullback": (23, "6a2e51eccf5de9a91e0d2f144f43d6cfac0aec79dc20c841458da2d2afa0db81"),
+    "fixture:ifvg_reversal": (65, "a0ac5cc152e22e9653dc7dc0bcc732eb2493ae0d36e2c9cf8b0957115f0addba"),
+    "fixture:ob_bounce": (55, "57b66c78dc1c8e13dbc61c1e55131a1db8460088806deffc8d2744381b7c984a"),
+    "fixture:orb": (135, "6ab9e4ae0ce5874b80ba9e3389e627a46d55808f004db1a77082a566de13c483"),
+    "fixture:sma_cross": (40, "ae07aefa77f3966e6868a826b730eb27ddedce2292ddd65a1d2ca9bbd3706567"),
+}
+
+
+# Derived on 2026-08-26 from the production harness at the reviewed core 0.7.0
+# branch point df8f105e. Node 05 deliberately moves the two identity fields by
+# expanding the vocabulary digest. These payloads keep every other exact field
+# pinned while the combined identity goldens below are reconciled.
+BEHAVIOR_BASELINE = {
+    "catalog:macd_trend": "0f5977c34e275c4a802198d4e03c43217a23c6aaca85a2d2f565879a72cfac58",
+    "catalog:rsi_reversion": "aeba3176938cd2d985bf64f4e1686357f2981fc44d0e0a5e19aff229f3286454",
+    "catalog:sma_cross": "eeda7c46902a0e291ec502664a09c447f902e9ef908db655877a7729c7fad4bc",
+    "fixture:bollinger_breakout": "0d4c22ebf8a0df48cc8b2fb7b36a7043421a209c5c2371d3c8fa26434d76132a",
+    "fixture:discount_pullback": "c09e5bcfa03abf6154832ba684a7629ff9b919bc3c2506dd8def7f38235238c4",
+    "fixture:ifvg_reversal": "500ea802fb79d294f887698e8dac1b03417c1b06f464ee1f97a369a2190030af",
+    "fixture:ob_bounce": "edaadfca76e72606b20dfae6668dbae83fe7d6c444bd6ec369fed40a10014dfe",
+    "fixture:orb": "9d27ad7502a3ff51f87b5dc91a922dba8ddcd598d2df3740d37b625589e06ada",
+    "fixture:sma_cross": "eeda7c46902a0e291ec502664a09c447f902e9ef908db655877a7729c7fad4bc",
 }
 
 
@@ -710,6 +730,7 @@ def test_the_frame_covers_every_spec_in_the_golden_table():
     """
     assert len(GOLDEN) == 9, f"GOLDEN has {len(GOLDEN)} entries, expected 9"
     assert set(_specs()) == set(GOLDEN)
+    assert set(BEHAVIOR_BASELINE) == set(GOLDEN)
 
 
 def _diagnostic(name, market, result):
@@ -747,12 +768,16 @@ def _diagnostic(name, market, result):
 
 @pytest.mark.parametrize("name", sorted(GOLDEN))
 def test_every_spec_produces_the_golden_trades(name, market):
-    _, result = replay(name, market)
+    request, result = replay(name, market)
     n, digest = _trade_digest(result.trades)
     want_n, want_digest = GOLDEN[name]
     assert n >= 1, f"{name}: zero trades proves nothing"
     assert n == want_n, f"{name}: trade count moved from {want_n} to {n}"
-    assert digest == want_digest, _diagnostic(name, market, result)
+
+    behavior = _behavior_digest(result.trades)
+    assert behavior == BEHAVIOR_BASELINE[name], (
+        f"{name}: non-arithmetic behavior moved before identity reconciliation\n"
+        + _diagnostic(name, market, result))
 
     reference = json.loads(FLOAT_REFERENCE.read_text())
     assert name in reference, (
@@ -764,6 +789,21 @@ def test_every_spec_produces_the_golden_trades(name, market):
         f"{_FLOAT_TOLERANCE:g} relative, which is far above the 3.4e-13 two "
         f"architectures differ by.\n  " + "\n  ".join(moved[:12])
         + f"\n{_diagnostic(name, market, result)}")
+
+    spec = _specs()[name]
+    vocabulary_factory = _vocabulary_factory(name)
+    expected_definition = definition_digest(
+        spec_base_digest(spec, vocabulary_factory), {})
+    assert request.plays[0].definition_digest == expected_definition
+    assert request.replay_id == expected_replay_id(request)
+    for ordinal, trade in enumerate(result.trades):
+        assert trade.replay_id == request.replay_id
+        assert trade.trade_ordinal == ordinal
+        assert trade.trade_id == trade_id(
+            request.replay_id, trade.play_id, trade.symbol,
+            trade.signal_ordinal)
+
+    assert digest == want_digest, _diagnostic(name, market, result)
 
 
 def test_the_float_reference_covers_the_same_specs_as_the_table():

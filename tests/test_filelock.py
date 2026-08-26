@@ -1,6 +1,7 @@
 """Concurrent parquet appends must not lose rows: a shared file is evidence."""
 
 import os
+import warnings
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
@@ -57,7 +58,14 @@ def test_append_parquet_keeps_prior_data_when_the_write_fails(tmp_path, monkeypa
 
 def test_file_lock_times_out_rather_than_corrupting(tmp_path):
     target = tmp_path / "shared.parquet"
-    pid = os.fork() if hasattr(os, "fork") else None
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message=(r"This process \(pid=\d+\) is multi-threaded, use of "
+                     r"fork\(\) may lead to deadlocks in the child\."),
+            category=DeprecationWarning,
+        )
+        pid = os.fork() if hasattr(os, "fork") else None
     if pid == 0:  # child: hold the lock past the parent's timeout
         with file_lock(target):
             import time

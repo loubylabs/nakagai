@@ -6,6 +6,8 @@ that declared the argument, so no input can be set to a value the engine would
 refuse.
 """
 
+from datetime import time
+
 import numpy as np
 import pytest
 
@@ -14,6 +16,12 @@ from nakagai.strategies.rules import (
     validate_spec,
 )
 from nakagai.strategies.rules.vocabulary import Term, core_vocabulary, is_choice_rule
+from nakagai.strategies.rules.windows import WindowSpec
+
+
+INPUT_WINDOW = WindowSpec(
+    "input_window", "America/New_York", time(9, 30), time(10),
+    "xnys_session", "standard")
 
 
 def _spec(lhs, op=">", rhs=0, **extra):
@@ -119,11 +127,20 @@ def test_a_bare_threshold_becomes_an_unbounded_input():
 @pytest.mark.parametrize("name", sorted(core_vocabulary().indicators))
 def test_every_numeric_argument_of_an_indicator_reaches_one_input(name):
     term = core_vocabulary().indicators[name]
-    program = lower_pine(_spec({"ind": name}))
+    node = {"ind": name}
+    vocabulary = core_vocabulary()
+    numeric_args = [arg for arg, rule in term.args.items()
+                    if not is_choice_rule(rule)]
+    if term.window_required:
+        assert numeric_args == [], (
+            f"window-required indicator {name!r} has numeric args "
+            f"{numeric_args}; this vocabulary-wide input proof must exercise "
+            "them through a registered row")
+        node["window"] = INPUT_WINDOW.name
+        vocabulary = vocabulary.with_windows(INPUT_WINDOW)
+    program = lower_pine(_spec(node), vocabulary=vocabulary)
     names = {item.name for item in program.inputs}
-    for arg, rule in term.args.items():
-        if is_choice_rule(rule):
-            continue
+    for arg in numeric_args:
         assert f"nk_long_all_0_lhs_{name}_{arg}" in names
 
 

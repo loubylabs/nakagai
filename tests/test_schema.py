@@ -185,8 +185,10 @@ def test_rth_mask_is_all_true_on_a_session_frame():
     fail it at different hours: the cache's own resample stamps midnight UTC
     and Alpaca's 1Day bars stamp midnight Eastern. Without the session-frame
     branch this mask is all False on either, which does not raise anywhere; it
-    silently blanks every session-scoped reading on every daily spec, and
-    prev_session_*, gap_pct and vwap all run on 1d frames today.
+    silently blanks every session-scoped reading on every daily spec. gap_pct
+    and vwap both run on 1d frames today. Generic prior-session window
+    aggregates preserve the same one-row-is-one-session rule through their
+    `session_aligned` branch.
     """
     midnight_utc = pd.date_range("2026-01-05", periods=5, freq="B", tz="UTC")
     eastern_midnight = pd.DatetimeIndex(

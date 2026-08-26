@@ -4,7 +4,7 @@
 // emulator, entering at the next bar's open and carrying the stop and target
 // the signal froze.
 // Generator version: 1
-// Spec hash: 1f08c61b6c7fc42f801e2a5a25b074d83b95a269b355e302248816250ab85904
+// Spec hash: 4c859a415b6f45842b2831796b6b3904155ec2710d852dfe4b1ba4eef7a261f0
 //
 // Chart: a standard 15-minute candle chart. Heikin Ashi, Renko, Line Break,
 // Kagi, Point and Figure, Range and every other synthetic-price chart show
@@ -69,9 +69,7 @@ if barstate.isfirst and syminfo.session != session.extended
     runtime.error("Nakagai Pine exports require extended trading hours to be enabled: a regular-hours chart is missing bars, and TradingView aggregates its higher timeframes from the 09:30 session open rather than on the wall clock Nakagai uses.")
 
 // --- Inputs ---
-nk_long_all_0_rhs_opening_range_high_minutes = input.int(30, "Long · rhs · opening_range_high · minutes", minval=5, maxval=120)
 nk_long_all_1_rhs = input.int(270, "Long · rhs")
-nk_short_all_0_rhs_opening_range_low_minutes = input.int(30, "Short · rhs · opening_range_low · minutes", minval=5, maxval=120)
 nk_short_all_1_rhs = input.int(270, "Short · rhs")
 nk_exits_exit_any_0_rhs = input.int(375, "Exits · exit · rhs")
 nk_exits_time_stop_bars = input.int(26, "Exits · time_stop · bars", minval=1, maxval=500)
@@ -80,10 +78,6 @@ nk_risk_stop_mult = input.float(2.0, "Risk · stop · mult", minval=0.1, maxval=
 nk_risk_target_rr = input.float(2.0, "Risk · target · rr", minval=0.1, maxval=20.0)
 
 // --- Helpers ---
-nk_session_key() =>
-    string tz = "America/New_York"
-    year(time, tz) * 10000 + month(time, tz) * 100 + dayofmonth(time, tz)
-
 nk_session_open() =>
     int into = hour(time, "America/New_York") * 60 + minute(time, "America/New_York") - 570
     time - into * 60000
@@ -92,36 +86,68 @@ nk_minutes_into_session() =>
     float mins = (time - nk_session_open()) / 60000.0
     mins >= 0 ? mins : na
 
-nk_new_session() =>
-    int key = nk_session_key()
-    na(key[1]) or key != key[1]
-
-nk_opening_range_high(minutes) =>
-    var float level = na
-    if nk_new_session()
-        level := na
-    int start = nk_session_open()
-    int edge = start + minutes * 60000
-    if time >= start and time < edge
-        level := na(level) ? high : math.max(level, high)
-    time >= edge ? level : na
-
-nk_opening_range_low(minutes) =>
-    var float level = na
-    if nk_new_session()
-        level := na
-    int start = nk_session_open()
-    int edge = start + minutes * 60000
-    if time >= start and time < edge
-        level := na(level) ? low : math.min(level, low)
-    time >= edge ? level : na
-
 // --- Calculations ---
-nk_opening_range_high_1 = nk_opening_range_high(nk_long_all_0_rhs_opening_range_high_minutes)
+int nk_highest_1_window_clock = hour(time, "America/New_York") * 60 + minute(time, "America/New_York")
+var float nk_highest_1_window_current = na
+var float nk_highest_1_window_completed = na
+int nk_highest_1_window_calendar_key = year(time, "America/New_York") * 10000 + month(time, "America/New_York") * 100 + dayofmonth(time, "America/New_York")
+int nk_highest_1_window_calendar_weekday = dayofweek(time, "America/New_York")
+bool nk_highest_1_window_regular = nk_highest_1_window_calendar_weekday >= 2 and nk_highest_1_window_calendar_weekday <= 6 and nk_highest_1_window_clock >= 570 and nk_highest_1_window_clock < 960
+var int nk_highest_1_window_observed_session = na
+if nk_highest_1_window_regular
+    nk_highest_1_window_observed_session := nk_highest_1_window_calendar_key
+int nk_highest_1_window_key = nk_highest_1_window_observed_session
+var int nk_highest_1_window_occurrence = na
+var bool nk_highest_1_window_closed = false
+bool nk_highest_1_window_reached = not na(nk_highest_1_window_observed_session)
+bool nk_highest_1_window_closes = nk_highest_1_window_reached and not nk_highest_1_window_closed and not na(nk_highest_1_window_occurrence) and (nk_highest_1_window_occurrence != nk_highest_1_window_calendar_key or nk_highest_1_window_clock >= 600)
+if nk_highest_1_window_closes
+    nk_highest_1_window_completed := nk_highest_1_window_current
+    nk_highest_1_window_closed := true
+bool nk_highest_1_window_fresh = nk_highest_1_window_reached and nk_highest_1_window_clock >= 570 and (na(nk_highest_1_window_occurrence) or nk_highest_1_window_occurrence != nk_highest_1_window_key)
+if nk_highest_1_window_fresh
+    nk_highest_1_window_occurrence := nk_highest_1_window_key
+    nk_highest_1_window_current := na
+    nk_highest_1_window_completed := na
+    nk_highest_1_window_closed := false
+bool nk_highest_1_window_active = nk_highest_1_window_reached and nk_highest_1_window_calendar_key == nk_highest_1_window_observed_session and nk_highest_1_window_occurrence == nk_highest_1_window_key and nk_highest_1_window_clock >= 570 and nk_highest_1_window_clock < 600
+if nk_highest_1_window_active
+    if not na(high)
+        nk_highest_1_window_current := na(nk_highest_1_window_current) ? high : math.max(nk_highest_1_window_current, high)
+nk_highest_1_window_value = nk_highest_1_window_active ? na : nk_highest_1_window_completed
+nk_highest_1 = nk_highest_1_window_value
 nk_minutes_into_session_1 = nk_minutes_into_session()
-nk_long_entry = (ta.crossover(close, nk_opening_range_high_1) and nk_minutes_into_session_1 < nk_long_all_1_rhs)
-nk_opening_range_low_1 = nk_opening_range_low(nk_short_all_0_rhs_opening_range_low_minutes)
-nk_short_entry = (ta.crossunder(close, nk_opening_range_low_1) and nk_minutes_into_session_1 < nk_short_all_1_rhs)
+nk_long_entry = (ta.crossover(close, nk_highest_1) and nk_minutes_into_session_1 < nk_long_all_1_rhs)
+int nk_lowest_1_window_clock = hour(time, "America/New_York") * 60 + minute(time, "America/New_York")
+var float nk_lowest_1_window_current = na
+var float nk_lowest_1_window_completed = na
+int nk_lowest_1_window_calendar_key = year(time, "America/New_York") * 10000 + month(time, "America/New_York") * 100 + dayofmonth(time, "America/New_York")
+int nk_lowest_1_window_calendar_weekday = dayofweek(time, "America/New_York")
+bool nk_lowest_1_window_regular = nk_lowest_1_window_calendar_weekday >= 2 and nk_lowest_1_window_calendar_weekday <= 6 and nk_lowest_1_window_clock >= 570 and nk_lowest_1_window_clock < 960
+var int nk_lowest_1_window_observed_session = na
+if nk_lowest_1_window_regular
+    nk_lowest_1_window_observed_session := nk_lowest_1_window_calendar_key
+int nk_lowest_1_window_key = nk_lowest_1_window_observed_session
+var int nk_lowest_1_window_occurrence = na
+var bool nk_lowest_1_window_closed = false
+bool nk_lowest_1_window_reached = not na(nk_lowest_1_window_observed_session)
+bool nk_lowest_1_window_closes = nk_lowest_1_window_reached and not nk_lowest_1_window_closed and not na(nk_lowest_1_window_occurrence) and (nk_lowest_1_window_occurrence != nk_lowest_1_window_calendar_key or nk_lowest_1_window_clock >= 600)
+if nk_lowest_1_window_closes
+    nk_lowest_1_window_completed := nk_lowest_1_window_current
+    nk_lowest_1_window_closed := true
+bool nk_lowest_1_window_fresh = nk_lowest_1_window_reached and nk_lowest_1_window_clock >= 570 and (na(nk_lowest_1_window_occurrence) or nk_lowest_1_window_occurrence != nk_lowest_1_window_key)
+if nk_lowest_1_window_fresh
+    nk_lowest_1_window_occurrence := nk_lowest_1_window_key
+    nk_lowest_1_window_current := na
+    nk_lowest_1_window_completed := na
+    nk_lowest_1_window_closed := false
+bool nk_lowest_1_window_active = nk_lowest_1_window_reached and nk_lowest_1_window_calendar_key == nk_lowest_1_window_observed_session and nk_lowest_1_window_occurrence == nk_lowest_1_window_key and nk_lowest_1_window_clock >= 570 and nk_lowest_1_window_clock < 600
+if nk_lowest_1_window_active
+    if not na(low)
+        nk_lowest_1_window_current := na(nk_lowest_1_window_current) ? low : math.min(nk_lowest_1_window_current, low)
+nk_lowest_1_window_value = nk_lowest_1_window_active ? na : nk_lowest_1_window_completed
+nk_lowest_1 = nk_lowest_1_window_value
+nk_short_entry = (ta.crossunder(close, nk_lowest_1) and nk_minutes_into_session_1 < nk_short_all_1_rhs)
 nk_exit_signal = (nk_minutes_into_session_1 >= nk_exits_exit_any_0_rhs)
 nk_risk_stop_distance = ta.atr(nk_risk_stop_n) * nk_risk_stop_mult
 

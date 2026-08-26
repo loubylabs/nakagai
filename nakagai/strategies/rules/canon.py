@@ -36,6 +36,20 @@ def canonical_expr(node, vocabulary: Vocabulary):
     if "ind" in node:
         name = node["ind"]
         term = vocabulary.indicators[name]
+        if "window" in node and term.window_reduce is not None:
+            args = {
+                **{k: v for k, v in term.defaults.items() if k != "n"},
+                **{k: v for k, v in node.items()
+                   if k not in ("ind", "of", "tf", "window", "n")},
+            }
+            out = {"ind": name, **{k: _num(v) for k, v in args.items()}}
+            if term.kind != "bar":
+                out["of"] = canonical_expr(
+                    node.get("of", {"src": "close"}), vocabulary)
+            out["window"] = node["window"]
+            if "tf" in node:
+                out["tf"] = node["tf"]
+            return out
         args = {**term.defaults,
                 **{k: v for k, v in node.items() if k not in ("ind", "of", "tf")}}
         out = {"ind": name, **{k: _num(v) for k, v in args.items()}}

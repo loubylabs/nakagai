@@ -2,13 +2,15 @@
 
 A Term owns a name's WHOLE contract in one place: its argument schema and
 bounds, its defaults, the executable function, the doc line the NL prompts
-render, the three causal flags described below, and the slot a Pine lowering
-attaches to. Nothing about a name lives anywhere else, so declaring one is one
-statement and injecting one is one `with_terms` call.
+render, the three causal flags described below, its window reducer contract,
+and the slot a Pine lowering attaches to. Nothing about a name lives anywhere
+else, so declaring one is one statement and injecting one is one `with_terms`
+call.
 
-A Vocabulary holds two namespaces, indicators and primitives, because the
-grammar spells them differently ({"ind": ...} against {"prim": ...}). Names are
-unique across BOTH namespaces, so no name is ever reachable under two readings.
+A Vocabulary holds indicator, primitive, and window namespaces because the
+grammar spells them under different keys. Term names are unique across the two
+term namespaces, so no term is ever reachable under two readings. Window names
+are unique within their separate scope namespace.
 
 The three causal flags, and what each one refuses:
 
@@ -30,7 +32,7 @@ term carries the flags it carries; read them before moving a flag.
 
 import math
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import cache
 from numbers import Real
 from types import MappingProxyType
@@ -40,6 +42,7 @@ from nakagai.strategies import indicators as ind
 from nakagai.strategies.rules import primitives as prim
 from nakagai.strategies.rules.pine import lowerings as pine
 from nakagai.strategies.rules.pine.model import PineLowering
+from nakagai.strategies.rules.windows import WindowSpec
 
 # The arg rule marking a condition-typed argument: its value is a condition
 # node, {"lhs": <expr>, "op": ..., "rhs": <expr>}, never a bare value. A string
@@ -50,6 +53,8 @@ from nakagai.strategies.rules.pine.model import PineLowering
 CONDITION_ARG: Literal["condition"] = "condition"
 ArgRule: TypeAlias = tuple[Real, Real] | tuple[str, ...] | Literal["condition"]
 KINDS = ("series", "frame", "bar", "primitive")
+WINDOW_REDUCERS = ("max", "min", "first", "last")
+WindowReducer: TypeAlias = Literal["max", "min", "first", "last"]
 
 
 def is_condition_rule(rule: ArgRule) -> bool:
@@ -98,6 +103,8 @@ class Term:
     session_scoped: bool = False
     driving_frame_intraday: bool = False
     pine: PineLowering | None = None
+    window_reduce: WindowReducer | None = None
+    window_required: bool = False
 
     def __post_init__(self) -> None:
         # The Literal annotation is documentation, not a runtime check, and
@@ -123,6 +130,17 @@ class Term:
         if self.pine is not None and not isinstance(self.pine, PineLowering):
             raise TypeError(f"term {self.name!r} needs a PineLowering in its "
                             f"pine slot, got {type(self.pine).__name__}")
+        if (self.window_reduce is not None
+                and self.window_reduce not in WINDOW_REDUCERS):
+            raise ValueError(f"term {self.name!r} has unknown window reducer "
+                             f"{self.window_reduce!r} "
+                             f"(valid: {WINDOW_REDUCERS})")
+        if self.window_required and self.window_reduce is None:
+            raise ValueError(f"term {self.name!r} requires a window reducer")
+        if self.window_reduce is not None and self.kind != "series":
+            raise ValueError(f"only a series term may declare a window "
+                             f"reducer; term {self.name!r} has kind "
+                             f"{self.kind!r}")
         args = MappingProxyType(dict(self.args))
         defaults = MappingProxyType(dict(self.defaults))
         undeclared = set(defaults) - set(args)
@@ -180,7 +198,7 @@ class Term:
 
 @dataclass(frozen=True)
 class Vocabulary:
-    """Two namespaces of Terms; see the module docstring for what a Term owns.
+    """Immutable Term namespaces and window rows for one grammar.
 
     UNHASHABLE, despite being a frozen dataclass: both fields are mappings, so
     the generated __hash__ raises TypeError on the dicts it hashes. That makes
@@ -192,16 +210,19 @@ class Vocabulary:
 
     indicators: Mapping[str, Term]
     primitives: Mapping[str, Term]
+    windows: Mapping[str, WindowSpec] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         indicators = dict(self.indicators)
         primitives = dict(self.primitives)
+        windows = dict(self.windows)
         overlap = indicators.keys() & primitives.keys()
         if overlap:
             name = sorted(overlap)[0]
             raise ValueError(f"duplicate vocabulary term {name!r}")
         object.__setattr__(self, "indicators", MappingProxyType(indicators))
         object.__setattr__(self, "primitives", MappingProxyType(primitives))
+        object.__setattr__(self, "windows", MappingProxyType(windows))
 
     def with_terms(self, *terms: Term) -> "Vocabulary":
         indicators, primitives = dict(self.indicators), dict(self.primitives)
@@ -210,7 +231,15 @@ class Vocabulary:
                 raise ValueError(f"duplicate vocabulary term {term.name!r}")
             target = primitives if term.kind == "primitive" else indicators
             target[term.name] = term
-        return Vocabulary(indicators, primitives)
+        return Vocabulary(indicators, primitives, self.windows)
+
+    def with_windows(self, *rows: WindowSpec) -> "Vocabulary":
+        windows = dict(self.windows)
+        for row in rows:
+            if row.name in windows:
+                raise ValueError(f"duplicate vocabulary window {row.name!r}")
+            windows[row.name] = row
+        return Vocabulary(self.indicators, self.primitives, windows)
 
     def resolve(self, kind: str, name: str) -> Term:
         terms = self.primitives if kind == "primitive" else self.indicators
@@ -223,8 +252,10 @@ class Vocabulary:
 VocabularyFactory: TypeAlias = Callable[[], Vocabulary]
 
 
-def _series(name, args, defaults, fn, pine) -> Term:
-    return Term(name, "series", args, defaults, fn, pine=pine)
+def _series(name, args, defaults, fn, pine, *, window_reduce=None,
+            window_required=False) -> Term:
+    return Term(name, "series", args, defaults, fn, pine=pine,
+                window_reduce=window_reduce, window_required=window_required)
 
 
 def _frame(name, args, defaults, fn, pine) -> Term:
@@ -240,6 +271,10 @@ def _primitive(name, args, defaults, fn, pine, *, end_anchored=False,
     return Term(name, "primitive", args, defaults, fn, doc=fn.__doc__ or "",
                 end_anchored=end_anchored, session_scoped=session_scoped,
                 driving_frame_intraday=driving_frame_intraday, pine=pine)
+
+
+def _window_required(*_args):
+    raise RuntimeError("window-required term cannot run without its window")
 
 
 @cache
@@ -262,10 +297,16 @@ def core_vocabulary() -> Vocabulary:
                 PineLowering(pine.emit_zscore, helpers=(pine.DIV,))),
         _series("highest", {"n": (2, 500)}, {"n": 20},
                 lambda s, a: ind.highest(s, a["n"]),
-                PineLowering(pine.emit_series_call("ta.highest", "n"))),
+                PineLowering(pine.emit_series_call("ta.highest", "n")),
+                window_reduce="max"),
         _series("lowest", {"n": (2, 500)}, {"n": 20},
                 lambda s, a: ind.lowest(s, a["n"]),
-                PineLowering(pine.emit_series_call("ta.lowest", "n"))),
+                PineLowering(pine.emit_series_call("ta.lowest", "n")),
+                window_reduce="min"),
+        _series("first", {}, {}, _window_required, None,
+                window_reduce="first", window_required=True),
+        _series("last", {}, {}, _window_required, None,
+                window_reduce="last", window_required=True),
         _series("stdev", {"n": (2, 500)}, {"n": 20},
                 lambda s, a: ind.stdev(s, a["n"]),
                 PineLowering(pine.emit_series_call("ta.stdev", "n"))),
@@ -329,16 +370,12 @@ def core_vocabulary() -> Vocabulary:
              PineLowering(pine.emit_bar_call("ta.wpr", "n"))),
     )
     # session_scoped, on the terms below that carry it: these read the driving
-    # frame's own session or calendar structure (session-open windows, elapsed
+    # frame's own session or calendar structure (elapsed
     # session minutes, a bar's place in the session's volume shape, the bar's
     # calendar weekday) rather than plain OHLCV structure. Feeding them a `tf`
     # swaps in a different frame's bars, which silently degenerates:
-    # opening_range_* on "1d" bars (one bar per session) has no bar inside its
-    # window at all and is NaN forever, and on "1h" bars the window runs from
-    # the 09:30 bell while the labels run from the top of the hour, so a
-    # minutes=30 window holds nothing and a wider one holds a ragged part of
-    # what the spec asked for; minutes_into_session on "1d" bars is 0
-    # everywhere (one row is the whole session); rvol on "1d" bars has one bar
+    # minutes_into_session on "1d" bars is 0 everywhere (one row is the whole
+    # session); rvol on "1d" bars has one bar
     # per session, so its same-clock-time bucket is the whole series and the
     # primitive quietly becomes a plain trailing-median volume ratio, a
     # different measurement wearing the same name, while on "1h" bars the
@@ -351,34 +388,12 @@ def core_vocabulary() -> Vocabulary:
     #
     # driving_frame_intraday is the SECOND rule and a second set: what a
     # session-aligned driving frame cannot answer at all, because there one bar
-    # IS the whole session. The opening-range window is minutes wide and that
-    # one bar cannot sit inside it (NaN forever), minutes_into_session is 0 on
-    # every bar, and rvol's same-clock-time bucket becomes the entire series.
+    # IS the whole session. minutes_into_session is 0 on every bar, and rvol's
+    # same-clock-time bucket becomes the entire series.
     # session_scoped is the right set for the foreign-`tf` rule and the WRONG
     # set for this one, which is why the two flags do not track each other; see
     # day_of_week and rvol.
     primitives = (
-        _primitive("opening_range_high", {"minutes": (5, 120)}, {"minutes": 30},
-                   prim.opening_range_high,
-                   PineLowering(pine.emit_primitive(pine.OPENING_RANGE_HIGH,
-                                                    "minutes"),
-                                helpers=(pine.OPENING_RANGE_HIGH,)),
-                   session_scoped=True, driving_frame_intraday=True),
-        _primitive("opening_range_low", {"minutes": (5, 120)}, {"minutes": 30},
-                   prim.opening_range_low,
-                   PineLowering(pine.emit_primitive(pine.OPENING_RANGE_LOW,
-                                                    "minutes"),
-                                helpers=(pine.OPENING_RANGE_LOW,)),
-                   session_scoped=True, driving_frame_intraday=True),
-        _primitive("prev_session_high", {}, {}, prim.prev_session_high,
-                   PineLowering(pine.emit_primitive(pine.PREV_SESSION_HIGH),
-                                helpers=(pine.PREV_SESSION_HIGH,))),
-        _primitive("prev_session_low", {}, {}, prim.prev_session_low,
-                   PineLowering(pine.emit_primitive(pine.PREV_SESSION_LOW),
-                                helpers=(pine.PREV_SESSION_LOW,))),
-        _primitive("prev_session_close", {}, {}, prim.prev_session_close,
-                   PineLowering(pine.emit_primitive(pine.PREV_SESSION_CLOSE),
-                                helpers=(pine.PREV_SESSION_CLOSE,))),
         _primitive("gap_pct", {}, {}, prim.gap_pct,
                    PineLowering(pine.emit_primitive(pine.GAP_PCT),
                                 helpers=(pine.GAP_PCT,))),

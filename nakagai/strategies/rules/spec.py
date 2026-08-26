@@ -14,6 +14,7 @@ from nakagai.strategies.rules.vocabulary import (
     is_range_rule,
     resolve_vocabulary,
 )
+from nakagai.strategies.rules.windows import window_duration
 
 VERSION = 2
 SESSION_ALIGNED = DEFAULT_TIMEFRAMES.session_aligned
@@ -74,6 +75,21 @@ DEFAULT_RISK = {"stop": {"kind": "atr", "n": STOP_ATR_N_DEFAULT,
                          "mult": STOP_ATR_MULT_DEFAULT},
                 "target": {"kind": "rr", "rr": TARGET_RR_DEFAULT}}
 
+LOW_IEX_DISCLOSURE = "US-equity extended-hours IEX data can be sparse."
+
+
+def window_prompt_text(vocabulary: Vocabulary) -> str:
+    """Render the named scope registry advertised by both NL compilers."""
+    lines = []
+    for name, row in sorted(vocabulary.windows.items()):
+        span = f"[{row.start.strftime('%H:%M')}, {row.end.strftime('%H:%M')})"
+        line = (f"- {name}: timezone={row.tz}; span={span}; "
+                f"recurrence={row.recurrence}; confidence={row.confidence}")
+        if row.confidence == "low_iex":
+            line += f". {LOW_IEX_DISCLOSURE}"
+        lines.append(line)
+    return "\n".join(lines) if lines else "(none registered)"
+
 
 def is_group_node(node) -> bool:
     """True for a dict spelling any group key.
@@ -116,6 +132,8 @@ def _check_args(name: str, given: dict, term, path: str, errs: list[str],
             errs.append(f"{path}: {name}.{arg} number is out of range")
 
     for arg, rule in schema.items():
+        if arg in skip:
+            continue
         if arg in given:
             continue
         if is_condition_rule(rule):
@@ -279,14 +297,7 @@ def _prims_in(node, names_allowed) -> set[str]:
 # What a one-bar session does to each primitive that cannot survive it. Said
 # per primitive because the NL compiler retries against this text, and "needs
 # intraday bars" alone gives it nothing to reason with.
-_OPENING_RANGE_PRIMS = frozenset({"opening_range_high", "opening_range_low"})
 _ONE_BAR_SESSION = {
-    "opening_range_high": "the opening-range window is the first few minutes "
-                          "after the 09:30 bell and a whole-session bar cannot "
-                          "sit inside it, so the level is NaN on every bar",
-    "opening_range_low": "the opening-range window is the first few minutes "
-                         "after the 09:30 bell and a whole-session bar cannot "
-                         "sit inside it, so the level is NaN on every bar",
     "minutes_into_session": "every bar sits 0 minutes into its own session",
     "rvol": "every bar shares one clock time, so the same-clock-time baseline "
             "becomes the whole series and this reads as a plain "
@@ -311,25 +322,6 @@ def _one_bar_session(prim: str) -> str:
               "whole-session bar has only one such position")
 
 
-def _check_opening_range_window(item: dict, prim: str, src_tf: str,
-                                path: str, errs: list[str], term) -> None:
-    if prim not in _OPENING_RANGE_PRIMS:
-        return
-    delta = DEFAULT_TIMEFRAMES.deltas.get(src_tf)
-    minutes = item.get("minutes", term.defaults.get("minutes"))
-    bounds = term.args.get("minutes")
-    if delta is None or not is_range_rule(bounds):
-        return
-    if _not_num(minutes, *bounds) or not _canonicalizable(minutes):
-        return
-    bar_minutes = delta.total_seconds() / 60
-    if bar_minutes > minutes:
-        errs.append(
-            f"{path}: {prim} asks for a {_num_text(minutes)}-minute opening range "
-            f"on {src_tf!r} bars, which are {_num_text(bar_minutes)} minutes wide; "
-            "use a finer timeframe or widen minutes")
-
-
 def _check_session_aligned_refs(node, eval_tf: str, path: str,
                                 errs: list[str], vocabulary: Vocabulary) -> None:
     """Refuse what a session-aligned frame cannot answer. Three rules live here.
@@ -347,18 +339,15 @@ def _check_session_aligned_refs(node, eval_tf: str, path: str,
 
     The second: an intraday-only primitive whose EFFECTIVE frame is session
     aligned. That fires whether or not a foreign timeframe is involved, so it
-    reads src_tf rather than comparing it to the parent's. A spec declaring
-    "timeframe": "1d" and using opening_range_high used to validate clean and
-    then read NaN forever; nothing raised, because the only primitive rule was
-    the foreign-`tf` one, which such a spec never trips.
+    reads src_tf rather than comparing it to the parent's.
 
     The first two rules run over two different sets, deliberately: see
     Term.driving_frame_intraday in vocabulary.py on why day_of_week is refused
     a foreign `tf` and welcome on daily bars.
 
-    The third: an opening-range primitive whose requested window is narrower
-    than a fixed intraday bar. Its level cannot be formed from a partial bar,
-    so the width guard reports the mismatch before evaluation.
+    The third: a current window narrower than a fixed intraday bar. Its value
+    cannot be formed from a partial bar, so the width guard reports the
+    mismatch before evaluation.
 
     `eval_tf` follows the evaluator: a node's own `tf` is the frame its
     children are computed on, which is how a bars_since with a tf, or an
@@ -391,8 +380,27 @@ def _check_session_aligned_refs(node, eval_tf: str, path: str,
         # `names` rather than a bare `.get`: an unhashable prim raises out of
         # the lookup, and this walk runs over the caller's whole condition tree.
         term = vocabulary.primitives[prim] if names(prim, vocabulary.primitives) else None
-        if term is not None:
-            _check_opening_range_window(item, prim, src_tf, at, errs, term)
+        ind_name = item.get("ind")
+        ind_term = (vocabulary.indicators[ind_name]
+                    if names(ind_name, vocabulary.indicators) else None)
+        window_name = item.get("window")
+        if (ind_term is not None and ind_term.window_reduce is not None
+                and names(window_name, vocabulary.windows)):
+            window = vocabulary.windows[window_name]
+            current = window.recurrence in ("weekday", "xnys_session")
+            if current and src_tf in SESSION_ALIGNED:
+                errs.append(
+                    f"{at}: window {window_name!r} is intraday and cannot be "
+                    f"resolved from session-aligned {src_tf!r} bars")
+            elif current:
+                width = DEFAULT_TIMEFRAMES.deltas.get(src_tf)
+                duration = window_duration(window)
+                if width is not None and width > duration:
+                    errs.append(
+                        f"{at}: window {window_name!r} spans "
+                        f"{_num_text(duration.total_seconds() / 60)} minutes, "
+                        f"narrower than {src_tf!r} bars "
+                        f"({_num_text(width.total_seconds() / 60)} minutes)")
         if term is not None and term.driving_frame_intraday and src_tf in SESSION_ALIGNED:
             errs.append(f"{at}: {prim} needs intraday bars and this one is "
                         f"evaluated on {src_tf!r}, where "
@@ -435,7 +443,9 @@ def _check_expr(node, path: str, errs: list[str], budget: _Budget,
     if "src" in node:
         if not names(node["src"], SOURCES):
             errs.append(f"{path}: unknown source {node['src']!r} (valid: {SOURCES})")
-        _check_tf(node, path, errs, allowed_extra=("src",))
+        if "window" in node:
+            errs.append(f"{path}: window is only valid on an aggregate indicator")
+        _check_tf(node, path, errs, allowed_extra=("src", "window"))
         return
     if "op" in node:
         op = node["op"]
@@ -450,7 +460,9 @@ def _check_expr(node, path: str, errs: list[str], budget: _Budget,
         for i, a in enumerate(args):
             _check_expr(a, f"{path}.args[{i}]", errs, budget, vocabulary,
                         depth + 1)
-        if set(node) - {"op", "args"}:
+        if "window" in node:
+            errs.append(f"{path}: window is only valid on an aggregate indicator")
+        if set(node) - {"op", "args", "window"}:
             errs.append(f"{path}: math nodes take only op/args")
         return
     if "ind" in node:
@@ -461,6 +473,16 @@ def _check_expr(node, path: str, errs: list[str], budget: _Budget,
                         f"(valid: {sorted(vocabulary.indicators)})")
             return
         term = vocabulary.indicators[name]
+        has_window = "window" in node
+        if has_window:
+            if term.window_reduce is None:
+                errs.append(f"{path}: {name} does not support window aggregation")
+            elif not names(node["window"], vocabulary.windows):
+                errs.append(f"{path}: unknown window {node['window']!r}")
+            elif "n" in node:
+                errs.append(f"{path}: {name} cannot combine n with window")
+        elif term.window_required:
+            errs.append(f"{path}: {name} requires window")
         if "of" in node:
             if term.kind == "bar":
                 errs.append(f"{path}: {name} works on full bars and takes no `of`")
@@ -468,7 +490,8 @@ def _check_expr(node, path: str, errs: list[str], budget: _Budget,
                 _check_expr(node["of"], f"{path}.of", errs, budget,
                             vocabulary, depth + 1)
         _check_args(name, node, term, path, errs, budget, vocabulary,
-                    depth, skip=("ind", "of", "tf"))
+                    depth, skip=("ind", "of", "tf", "window",
+                                 *(('n',) if has_window else ())))
         _check_tf(node, path, errs)
         return
     if "prim" in node:
@@ -479,6 +502,8 @@ def _check_expr(node, path: str, errs: list[str], budget: _Budget,
                         f"(valid: {sorted(vocabulary.primitives)})")
             return
         term = vocabulary.primitives[name]
+        if "window" in node:
+            errs.append(f"{path}: window is only valid on an aggregate indicator")
         if series_required and term.end_anchored:
             # An end-anchored primitive is one level read from the tail of the
             # frame, not a series, which is exactly what Term.end_anchored
@@ -489,7 +514,7 @@ def _check_expr(node, path: str, errs: list[str], budget: _Budget,
             errs.append(f"{path}: the left side of a cross must be a series; "
                         f"{name} is a level read from the end of the frame")
         _check_args(name, node, term, path, errs, budget, vocabulary,
-                    depth, skip=("prim", "tf"))
+                    depth, skip=("prim", "tf", "window"))
         if "tf" in node and term.session_scoped:
             errs.append(f"{path}: {name} is session-scoped and takes no tf")
         _check_tf(node, path, errs)
@@ -776,8 +801,14 @@ def _expr_text(node, vocabulary: Vocabulary) -> str:
         if not names(name, vocabulary.indicators):
             return repr(name)
         term = vocabulary.indicators[name]
-        args = {**term.defaults,
-                **{k: v for k, v in node.items() if k not in ("ind", "of", "tf")}}
+        window = node.get("window")
+        window_mode = "window" in node and term.window_reduce is not None
+        defaults = ({k: v for k, v in term.defaults.items() if k != "n"}
+                    if window_mode else term.defaults)
+        args = {**defaults,
+                **{k: v for k, v in node.items()
+                   if k not in ("ind", "of", "tf", "window")
+                   and not (window_mode and k == "n")}}
         field = args.pop("field", None)
         parts = [f"{v}" for v in args.values()]
         if term.kind != "bar":
@@ -786,6 +817,11 @@ def _expr_text(node, vocabulary: Vocabulary) -> str:
                 parts.append(f"of={_expr_text(of, vocabulary)}")
         inner = ", ".join(parts)
         text = f"{name}({inner})" if inner else name
+        if window_mode:
+            text += f" over {window}"
+            if (names(window, vocabulary.windows)
+                    and vocabulary.windows[window].confidence == "low_iex"):
+                text += f" ({LOW_IEX_DISCLOSURE})"
         if "tf" in node:
             text += f"[{node['tf']}]"
         return f"{text}.{field}" if field else text

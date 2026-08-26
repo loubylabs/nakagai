@@ -155,9 +155,11 @@ def rth_mask(index: pd.DatetimeIndex) -> pd.Series:
     America/New_York, expressed as 04:00Z or 05:00Z. All of those labels sit
     outside [09:30, 16:00).
     Without the branch the mask would come back all False and silently blank
-    every session-scoped reading on every daily spec. That is a live path and
-    not a hypothetical: prev_session_*, gap_pct and vwap all legitimately run
-    on 1d frames, and turnaround_tuesday is a shipped 1d catalog play.
+    every session-scoped reading on every daily spec. That is a live path:
+    gap_pct and vwap legitimately run on 1d frames, and turnaround_tuesday is
+    a shipped 1d catalog play. Generic prior-session window aggregates carry
+    the same session-frame fact through their `session_aligned` branch, where
+    one daily row is its whole session rather than an out-of-hours timestamp.
     """
     if _is_session_frame(index):
         return pd.Series(True, index=index, dtype=bool)

@@ -9,6 +9,7 @@ import json
 import os
 import subprocess
 import sys
+from datetime import time
 
 import pytest
 
@@ -17,6 +18,7 @@ from nakagai.strategies.rules import (
     PineExits, PineRisk, lower_pine, spec_hash,
 )
 from nakagai.strategies.rules.pine.lower import PINE_TIMEFRAMES, SpecLowerer
+from nakagai.strategies.rules.pine.model import PineExpr
 from nakagai.strategies.rules.spec import (
     DRIVING,
     STOP_ATR_MULT_DEFAULT, STOP_ATR_N_DEFAULT, STOP_PCT_DEFAULT,
@@ -24,6 +26,7 @@ from nakagai.strategies.rules.spec import (
     TRAILING_ATR_N_DEFAULT, TRAILING_PCT_DEFAULT,
 )
 from nakagai.strategies.rules.vocabulary import core_vocabulary, is_choice_rule
+from nakagai.strategies.rules.windows import WindowSpec
 
 # The path prefix every operand in a one-condition long group carries.
 LHS = "nk_long_all_0_lhs"
@@ -36,6 +39,20 @@ def _spec(lhs, op=">", rhs=0, timeframe="15m", **extra):
 
 def _program(lhs, op=">", rhs=0, timeframe="15m", **extra):
     return lower_pine(_spec(lhs, op, rhs, timeframe, **extra))
+
+
+def _window_vocabulary(*rows):
+    return core_vocabulary().with_windows(*rows)
+
+
+LONDON = WindowSpec(
+    "london", "Europe/London", time(8), time(16, 30), "weekday", "low_iex")
+NY_AM = WindowSpec(
+    "ny_am", "America/New_York", time(9, 30), time(12),
+    "xnys_session", "standard")
+LOW_IEX_WARNING = (
+    "Window 'london' uses US-equity extended-hours IEX data, which can be "
+    "sparse.")
 
 
 def _lines(program):
@@ -136,7 +153,11 @@ def test_every_indicator_lowers_to_its_pine_form(node, statements, operand):
 
 def test_the_indicator_table_covers_every_indicator_in_the_vocabulary():
     covered = {node["ind"] for node, _, _ in INDICATORS}
-    assert covered == set(core_vocabulary().indicators)
+    ordinary = {name for name, term in core_vocabulary().indicators.items()
+                if not term.window_required}
+    assert covered == ordinary
+    assert {name for name, term in core_vocabulary().indicators.items()
+            if term.window_required} == {"first", "last"}
 
 
 # One row per (indicator, field) the grammar admits. The table above lowers one
@@ -600,6 +621,72 @@ def test_a_session_anchored_term_warns_where_the_two_engines_differ():
         "ta.vwap anchors to the chart's own session, which follows the "
         "exchange's settings rather than the engine's New York session.",)
     assert _program({"ind": "sma"}).warnings == ()
+
+
+def test_a_window_call_receives_the_resolved_immutable_row(monkeypatch):
+    """A renamed row or unchecked string must not reach the Pine emitter."""
+    import nakagai.strategies.rules.pine.lower as lowering
+
+    seen = []
+
+    def capture(ctx, call):
+        seen.append(call.window)
+        return PineExpr(ctx.calc(call, call.source))
+
+    monkeypatch.setattr(lowering, "emit_window", capture)
+    program = lower_pine(
+        _spec({"ind": "highest", "of": {"src": "high"},
+               "window": "london"}),
+        vocabulary=_window_vocabulary(LONDON),
+    )
+    assert seen == [LONDON]
+    assert program.inputs == tuple(item for item in program.inputs
+                                   if "highest · n" not in item.label)
+
+
+def test_window_lowering_uses_the_row_and_never_materializes_rolling_n():
+    program = lower_pine(
+        _spec({"ind": "highest", "of": {"src": "high"},
+               "window": "london"}),
+        vocabulary=_window_vocabulary(LONDON),
+    )
+    source = "\n".join(program.calculations)
+    assert 'hour(time, "Europe/London")' in source
+    assert 'minute(time, "Europe/London")' in source
+    assert "ta.highest" not in source
+    assert not any(item.name.endswith("_highest_n") for item in program.inputs)
+
+
+def test_a_selected_window_frame_executes_inside_its_single_security_request():
+    program = lower_pine(
+        _spec({"ind": "highest", "of": {"src": "high"}, "tf": "1h",
+               "window": "london"}),
+        vocabulary=_window_vocabulary(LONDON),
+    )
+    requests = [text for text in program.calculations
+                if "request.security(" in text]
+    assert len(requests) == 1
+    function = next(text for text in program.calculations
+                    if text.startswith("nk_htf_") and "() =>" in text)
+    assert 'hour(time, "Europe/London")' in function
+    assert "var float nk_highest_1_window_current = na" in function
+    top_level = "\n".join(text for text in program.calculations
+                          if text != function)
+    assert 'hour(time, "Europe/London")' not in top_level
+
+
+def test_low_iex_window_warning_is_conditional_and_deduplicated():
+    vocabulary = _window_vocabulary(LONDON, NY_AM)
+    london = lower_pine(
+        _spec({"ind": "highest", "window": "london"}),
+        vocabulary=vocabulary,
+    )
+    ny_am = lower_pine(
+        _spec({"ind": "highest", "window": "ny_am"}),
+        vocabulary=vocabulary,
+    )
+    assert london.warnings == (LOW_IEX_WARNING,)
+    assert ny_am.warnings == ()
 
 
 def test_a_warning_is_stated_once_however_many_terms_reach_it():

@@ -15,6 +15,10 @@ module covers terms that do not appear in any list, which that test cannot.
 
 WHAT THIS CANNOT TEST, and why it says so out loud rather than passing:
 
+- `window_required` terms. Their callable has no unwindowed meaning. The
+  window evaluator supplies the occurrence and reducer behavior, so invoking
+  `term.fn` here would test an operation the language refuses.
+
 - `end_anchored` terms. `term.fn` returns a SCALAR for a frame, not a series, so
   there is no whole-frame value at row i to compare a prefix against. What the
   gate would compare is that one scalar, read off the whole frame, against the
@@ -26,10 +30,10 @@ WHAT THIS CANNOT TEST, and why it says so out loud rather than passing:
   `primitives.end_anchored_series` is what the evaluator really runs for these,
   computing row i as `term.fn(bars[:i+1])`, which is causal by construction.
 
-That is the only exemption. A term taking a condition used to be the second one,
-because it needs an evaluator handed back to it and cannot be called without
-one; N3-D12 supplies SYNTHETIC_CONDITION and the callback that reads it, so such
-a term is checked like any other rather than waved through.
+A term taking a condition used to be exempt because it needs an evaluator
+handed back to it and cannot be called without one. N3-D12 supplies
+SYNTHETIC_CONDITION and the callback that reads it, so such a term is checked
+like any other.
 
 A boolean return would make an exemption indistinguishable from a genuine pass,
 which is the one failure this gate cannot afford, so every answer is a
@@ -123,12 +127,17 @@ class TermVerdict:
 def exemption_reason(term: Term) -> str | None:
     """Why this term cannot be checked by whole-frame-against-prefix, or None.
 
-    N3-D12 retired the condition exemption: a condition-typed arg now gets
+    A window-required term has no unwindowed callable to compare. N3-D12
+    retired the condition exemption: a condition-typed arg now gets
     SYNTHETIC_CONDITION and the evaluator callback that reads it, so the term is
     callable here and is checked like any other. end_anchored is unchanged;
     term.fn returns a scalar for a frame there, so the whole-frame path IS the
     per-prefix loop and the comparison would fail an honest term.
     """
+    if term.window_required:
+        return ("window_required: term.fn has no unwindowed meaning; the "
+                "window evaluator applies the declared reducer to each "
+                "occurrence")
     if term.end_anchored:
         # "causal by construction" is load-bearing and it is not free. It holds
         # because end_anchored_series calls term.fn on bars[:i+1] AND because
@@ -723,9 +732,8 @@ def reference_bars(sessions: int = 160) -> pd.DataFrame:
     ANCHORED IN EXCHANGE-LOCAL TIME, not at a fixed UTC hour. A frame pinned to
     14:30 UTC is the 09:30 bell only until daylight saving moves, and 160
     sessions from January crosses that boundary in March. Measured: the
-    UTC-pinned version leaves opening_range_high and opening_range_low NaN at
-    every probe row, because the bars no longer start at the open, and the gate
-    reports VACUOUS for terms that are perfectly causal.
+    UTC-pinned version moves the final 15-minute bars outside regular hours,
+    making session-shaped terms exercise a different frame than intended.
     """
     rng = np.random.default_rng(19)
     days = pd.bdate_range("2026-01-05", periods=sessions, tz=EXCHANGE_TZ)

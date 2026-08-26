@@ -42,9 +42,8 @@ registry's own helpers.
 Pine semantics that ARE modelled, because a helper leans on each:
 - `var` initialises once per call site and survives the bar; a plain local does
   not, and that difference is the swing carry-forward.
-- every call SITE gets its own instance, so nk_gap_pct calling nk_new_session
-  and nk_prev_session_close (which calls it again) keeps two histories, exactly
-  as a chart would.
+- every call SITE gets its own instance, so two helpers calling
+  nk_new_session keep two histories, exactly as a chart would.
 - `for a to b` counts DOWN when a exceeds b, which is what nk_order_block's
   `shove < lookback - 1` guard exists to prevent.
 """
@@ -624,14 +623,16 @@ class Runtime:
             return min(args) if not any(map(_is_na, args)) else NA
         if name == "math.abs":
             return abs(args[0])
-        if name in ("year", "month", "dayofmonth", "hour", "minute",
-                    "dayofweek"):
+        if name in ("year", "month", "weekofyear", "dayofmonth", "hour",
+                    "minute", "dayofweek"):
             if _is_na(args[0]):
                 return NA
             stamp = market.stamp(args[0], args[1])
             if name == "dayofweek":
                 # Pine numbers Sunday 1 through Saturday 7; pandas Monday 0.
                 return (stamp.dayofweek + 1) % 7 + 1
+            if name == "weekofyear":
+                return stamp.isocalendar().week
             return {"year": stamp.year, "month": stamp.month,
                     "dayofmonth": stamp.day, "hour": stamp.hour,
                     "minute": stamp.minute}[name]

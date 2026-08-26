@@ -10,8 +10,11 @@
         },
         "op": "crosses_above",
         "rhs": {
-          "prim": "opening_range_high",
-          "minutes": 30
+          "ind": "highest",
+          "of": {
+            "src": "high"
+          },
+          "window": "ny_open_30"
         }
       },
       {
@@ -31,8 +34,11 @@
         },
         "op": "crosses_below",
         "rhs": {
-          "prim": "opening_range_low",
-          "minutes": 30
+          "ind": "lowest",
+          "of": {
+            "src": "low"
+          },
+          "window": "ny_open_30"
         }
       },
       {

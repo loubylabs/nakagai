@@ -1,14 +1,17 @@
 import json
 import re
+from datetime import time
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from nakagai.nlbuilder.compiler import _check, compile_strategy
 from nakagai.nlbuilder.prompt import render_system_prompt
 from nakagai.strategies.catalog import catalog_definitions, load_entries
-from nakagai.strategies.rules import core_vocabulary
+from nakagai.strategies.rules import core_vocabulary, validate_spec
 from nakagai.strategies.rules.vocabulary import Term
+from nakagai.strategies.rules.windows import WindowSpec
 
 SPECS = Path(__file__).resolve().parents[1] / "nakagai" / "strategies" / "catalog" / "specs"
 
@@ -16,6 +19,16 @@ GOOD_SPEC = {"version": 2, "name": "dip", "timeframe": "1h",
              "long": {"all": [{"lhs": {"ind": "rsi", "n": 14}, "op": "crosses_above", "rhs": 30}]},
              "risk": {"stop": {"kind": "atr", "n": 14, "mult": 2.0},
                       "target": {"kind": "rr", "rr": 2.0}}}
+
+LOW_IEX_DISCLOSURE = "US-equity extended-hours IEX data can be sparse."
+PROMPT_VOCABULARY = core_vocabulary().with_windows(
+    WindowSpec("london", "Europe/London", time(8), time(16, 30),
+               "weekday", "low_iex"),
+    WindowSpec("ny_am", "America/New_York", time(9, 30), time(12),
+               "xnys_session", "standard"),
+    WindowSpec("ny_open_30", "America/New_York", time(9, 30), time(10),
+               "xnys_session", "standard"),
+)
 
 
 class _Block:
@@ -52,9 +65,63 @@ class FakeClient:
 def test_prompt_renders_registries_and_is_deterministic():
     p1, p2 = render_system_prompt(), render_system_prompt()
     assert p1 == p2
-    for needle in ("crosses_above", "opening_range_high", "bars_since", "supertrend",
+    for needle in ("crosses_above", "gap_pct", "bars_since", "supertrend",
                    "time_stop", "not_expressible", '"version": 2'):
         assert needle in p1, needle
+
+
+def test_rule_prompt_renders_window_rows_from_the_supplied_vocabulary():
+    prompt = render_system_prompt(vocabulary=PROMPT_VOCABULARY)
+    lines = prompt.splitlines()
+    london = next(line for line in lines if line.startswith("- london:"))
+    assert london == (
+        "- london: timezone=Europe/London; span=[08:00, 16:30); "
+        "recurrence=weekday; confidence=low_iex. " + LOW_IEX_DISCLOSURE)
+    ny_am = next(line for line in lines if line.startswith("- ny_am:"))
+    assert ny_am == (
+        "- ny_am: timezone=America/New_York; span=[09:30, 12:00); "
+        "recurrence=xnys_session; confidence=standard")
+    assert LOW_IEX_DISCLOSURE not in ny_am
+    assert '"window"?: <registered window>' in prompt
+    assert "- first(no args) [takes of=<expr>] [window required; reducer=first]" in lines
+
+
+def test_rule_prompt_teaches_opening_range_through_the_window_axis():
+    examples = render_system_prompt(
+        vocabulary=PROMPT_VOCABULARY).split("# Examples", 1)[1]
+    assert ('"rhs": {"ind": "highest", "of": {"src": "high"}, '
+            '"window": "ny_open_30"}' in examples)
+
+
+def _advertised_replies(prompt: str) -> list[dict]:
+    """Decode each complete JSON reply in the advertised examples section."""
+    examples = prompt.split("# Examples", 1)[1]
+    decoder = json.JSONDecoder()
+    replies = []
+    cursor = 0
+    while True:
+        start = examples.find("\n{", cursor)
+        if start < 0:
+            return replies
+        reply, consumed = decoder.raw_decode(examples, start + 1)
+        replies.append(reply)
+        cursor = start + 1 + consumed
+
+
+@pytest.mark.parametrize("vocabulary,has_opening_range", [
+    (core_vocabulary(), False),
+    (PROMPT_VOCABULARY, True),
+], ids=["core", "ny-open-30"])
+def test_every_advertised_rule_example_validates_with_its_supplied_vocabulary(
+        vocabulary, has_opening_range):
+    prompt = render_system_prompt(vocabulary=vocabulary)
+    replies = _advertised_replies(prompt)
+    specs = [reply["spec"] for reply in replies if "spec" in reply]
+
+    assert specs
+    assert all(validate_spec(spec, vocabulary) == [] for spec in specs)
+    assert any("ny_open_30" in json.dumps(spec) for spec in specs) is has_opening_range
+    assert ("ny_open_30" in prompt) is has_opening_range
 
 
 _CAT_SPEC = {"version": 2, "name": "donch", "timeframe": "1d",
@@ -82,8 +149,7 @@ def test_prompt_flags_the_primitives_a_daily_spec_cannot_use():
     up front rather than spending a retry on the refusal. day_of_week is not
     flagged: it takes no tf, but on daily bars its reading is exactly right."""
     lines = render_system_prompt().splitlines()
-    for name in ("opening_range_high", "opening_range_low",
-                 "minutes_into_session", "rvol"):
+    for name in ("minutes_into_session", "rvol"):
         line = next(ln for ln in lines if ln.startswith(f"- {name}("))
         assert "intraday spec timeframe" in line, line
     dow = next(ln for ln in lines if ln.startswith("- day_of_week("))

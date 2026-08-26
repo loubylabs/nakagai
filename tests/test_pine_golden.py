@@ -37,8 +37,10 @@ PLAYS = ("sma_cross", "orb", "ifvg_reversal", "ob_bounce",
 @pytest.mark.parametrize("name", PLAYS)
 @pytest.mark.parametrize("artifact", ("indicator", "strategy"))
 def test_the_golden_artifact_is_what_the_compiler_writes(name, artifact,
-                                                         load_rule_spec):
-    bundle = compile_pine(load_rule_spec(name))
+                                                         load_rule_spec,
+                                                         rule_fixture_vocabulary):
+    bundle = compile_pine(
+        load_rule_spec(name), vocabulary=rule_fixture_vocabulary)
     assert getattr(bundle, artifact) == \
         (GOLDEN / f"{name}.{artifact}.pine").read_text()
 

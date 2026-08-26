@@ -46,11 +46,6 @@ SESSION_OPEN = "nk_session_open"
 IN_SESSION = "nk_in_session"
 SESSION_OPEN_BAR = "nk_session_open_bar"
 WINDOW_ATR = "nk_window_atr"
-OPENING_RANGE_HIGH = "nk_opening_range_high"
-OPENING_RANGE_LOW = "nk_opening_range_low"
-PREV_SESSION_HIGH = "nk_prev_session_high"
-PREV_SESSION_LOW = "nk_prev_session_low"
-PREV_SESSION_CLOSE = "nk_prev_session_close"
 GAP_PCT = "nk_gap_pct"
 DAY_OF_WEEK = "nk_day_of_week"
 MINUTES_INTO_SESSION = "nk_minutes_into_session"
@@ -219,10 +214,200 @@ def emit_primitive(helper: str, *args: str):
     """A primitive as one call of its own helper: nk_gap_pct()."""
 
     def emit(ctx, call):
+        if helper == GAP_PCT:
+            previous = _window_value(
+                ctx, call, source="close", reducer="last", suffix="prior")
+            return PineExpr(ctx.calc(call, f"{helper}({previous})"))
         parts = ", ".join(ctx.arg(call, a) for a in args)
         return PineExpr(ctx.calc(call, f"{helper}({parts})"))
 
     return emit
+
+
+def _name(ctx, call, suffix: str) -> str:
+    return ctx.claim(f"{call.slot}_{suffix}", call.path)
+
+
+def _reduce(lines: list[str], current: str, source: str,
+            reducer: str) -> None:
+    """Append one reducer update over a non-NaN source value."""
+    lines.append(f"if not na({source})")
+    if reducer == "first":
+        lines.append(f"    if na({current})")
+        lines.append(f"        {current} := {source}")
+    elif reducer == "last":
+        lines.append(f"    {current} := {source}")
+    elif reducer in ("max", "min"):
+        lines.append(
+            f"    {current} := na({current}) ? {source} : "
+            f"math.{reducer}({current}, {source})")
+    else:
+        raise ValueError(f"unknown Pine window reducer {reducer!r}")
+
+
+def _window_value(ctx, call, *, source: str, reducer: str,
+                  suffix: str = "window") -> str:
+    """Emit the one recurring-window state machine and return its value."""
+    window = call.window
+    if window is None:
+        raise ValueError("a Pine window state machine needs a resolved row")
+
+    tz = f'"{window.tz}"'
+    start = window.start.hour * 60 + window.start.minute
+    end = window.end.hour * 60 + window.end.minute
+    clock = _name(ctx, call, f"{suffix}_clock")
+    current = _name(ctx, call, f"{suffix}_current")
+    completed = _name(ctx, call, f"{suffix}_completed")
+    lines = [
+        f"int {clock} = hour(time, {tz}) * 60 + minute(time, {tz})",
+        f"var float {current} = na",
+        f"var float {completed} = na",
+    ]
+
+    if window.recurrence in ("weekday", "xnys_session"):
+        owner_time = _name(ctx, call, f"{suffix}_owner_time")
+        owner_candidate = _name(ctx, call, f"{suffix}_owner_candidate")
+        key = _name(ctx, call, f"{suffix}_key")
+        weekday = _name(ctx, call, f"{suffix}_weekday")
+        occurrence = _name(ctx, call, f"{suffix}_occurrence")
+        closed = _name(ctx, call, f"{suffix}_closed")
+        reached = _name(ctx, call, f"{suffix}_reached")
+        fresh = _name(ctx, call, f"{suffix}_fresh")
+        active = _name(ctx, call, f"{suffix}_active")
+        closes = _name(ctx, call, f"{suffix}_closes")
+        owner = f"{clock} < {start} ? time - 86400000 : time"
+        inside = (f"{clock} >= {start} and {clock} < {end}"
+                  if start < end else
+                  f"({clock} >= {start} or {clock} < {end})")
+        after = (f"{clock} >= {end}"
+                 if start < end else
+                 f"{clock} >= {end} and {clock} < {start}")
+        if window.recurrence == "weekday":
+            candidate_weekday = _name(
+                ctx, call, f"{suffix}_owner_candidate_weekday")
+            weekend_days = _name(ctx, call, f"{suffix}_weekend_days")
+            owner_lines = [
+                f"int {owner_candidate} = {owner}",
+                f"int {candidate_weekday} = dayofweek({owner_candidate}, {tz})",
+                f"int {weekend_days} = {candidate_weekday} == 1 ? 2 : "
+                f"{candidate_weekday} == 7 ? 1 : 0",
+                f"int {owner_time} = {owner_candidate} - "
+                f"{weekend_days} * 86400000",
+                f"int {key} = year({owner_time}, {tz}) * 10000 + "
+                f"month({owner_time}, {tz}) * 100 + "
+                f"dayofmonth({owner_time}, {tz})",
+                f"int {weekday} = dayofweek({owner_time}, {tz})",
+            ]
+            observed = f"{weekday} >= 2 and {weekday} <= 6"
+            fresh_guard = ""
+            active_owner = (
+                f" and {candidate_weekday} >= 2 and {candidate_weekday} <= 6")
+            closes_when = (
+                f"{occurrence} == {key} and "
+                f"({after} or {weekend_days} > 0)")
+        else:
+            calendar_key = _name(ctx, call, f"{suffix}_calendar_key")
+            calendar_weekday = _name(
+                ctx, call, f"{suffix}_calendar_weekday")
+            regular = _name(ctx, call, f"{suffix}_regular")
+            observed_session = _name(
+                ctx, call, f"{suffix}_observed_session")
+            owner_lines = [
+                f"int {calendar_key} = year(time, {tz}) * 10000 + "
+                f"month(time, {tz}) * 100 + dayofmonth(time, {tz})",
+                f"int {calendar_weekday} = dayofweek(time, {tz})",
+                f"bool {regular} = {calendar_weekday} >= 2 and "
+                f"{calendar_weekday} <= 6 and {clock} >= 570 and "
+                f"{clock} < 960",
+                f"var int {observed_session} = na",
+                f"if {regular}",
+                f"    {observed_session} := {calendar_key}",
+                f"int {key} = {observed_session}",
+            ]
+            observed = f"not na({observed_session})"
+            fresh_guard = f" and {clock} >= {start}"
+            active_owner = f" and {calendar_key} == {observed_session}"
+            closes_when = (
+                f"not na({occurrence}) and "
+                f"({occurrence} != {calendar_key} or {after})")
+        lines += [
+            *owner_lines,
+            f"var int {occurrence} = na",
+            f"var bool {closed} = false",
+            f"bool {reached} = {observed}",
+            f"bool {closes} = {reached} and not {closed} and {closes_when}",
+            f"if {closes}",
+            f"    {completed} := {current}",
+            f"    {closed} := true",
+            f"bool {fresh} = {reached}{fresh_guard} and "
+            f"(na({occurrence}) or {occurrence} != {key})",
+            f"if {fresh}",
+            f"    {occurrence} := {key}",
+            f"    {current} := na",
+            f"    {completed} := na",
+            f"    {closed} := false",
+            f"bool {active} = {reached}{active_owner} and "
+            f"{occurrence} == {key} and {inside}",
+            f"if {active}",
+        ]
+        reduced: list[str] = []
+        _reduce(reduced, current, source, reducer)
+        lines += [f"    {line}" for line in reduced]
+        value = f"{active} ? na : {completed}"
+    else:
+        period = _name(ctx, call, f"{suffix}_period")
+        key = _name(ctx, call, f"{suffix}_key")
+        changed = _name(ctx, call, f"{suffix}_changed")
+        inside = _name(ctx, call, f"{suffix}_active")
+        weekday = _name(ctx, call, f"{suffix}_weekday")
+        if window.recurrence == "prior_session":
+            key_expr = (f"year(time, {tz}) * 10000 + month(time, {tz}) * 100 + "
+                        f"dayofmonth(time, {tz})")
+        elif window.recurrence == "prior_iso_week":
+            iso_weekday = _name(ctx, call, f"{suffix}_iso_weekday")
+            iso_anchor = _name(ctx, call, f"{suffix}_iso_anchor")
+            lines += [
+                f"int {iso_weekday} = (dayofweek(time, {tz}) + 5) % 7",
+                f"int {iso_anchor} = time + (3 - {iso_weekday}) * 86400000",
+            ]
+            key_expr = (f"year({iso_anchor}, {tz}) * 100 + "
+                        f"weekofyear(time, {tz})")
+        else:
+            key_expr = f"year(time, {tz}) * 100 + month(time, {tz})"
+        active_expr = (f"{clock} >= {start} and {clock} < {end}"
+                       if start < end else
+                       f"({clock} >= {start} or {clock} < {end})")
+        lines += [
+            f"int {key} = {key_expr}",
+            f"int {weekday} = dayofweek(time, {tz})",
+            f"var int {period} = na",
+            f"bool {changed} = na({period}) or {period} != {key}",
+            f"if {changed}",
+            f"    if not na({current})",
+            f"        {completed} := {current}",
+            f"    {current} := na",
+            f"    {period} := {key}",
+            f"bool {inside} = {weekday} >= 2 and {weekday} <= 6 and "
+            f"{active_expr}",
+            f"if {inside}",
+        ]
+        reduced = []
+        _reduce(reduced, current, source, reducer)
+        lines += [f"    {line}" for line in reduced]
+        value = completed
+
+    for line in lines:
+        ctx.statement(line)
+    answer = _name(ctx, call, f"{suffix}_value")
+    ctx.statement(f"{answer} = {value}")
+    return answer
+
+
+def emit_window(ctx, call):
+    """Lower any aggregate-capable term through its declared reducer."""
+    value = _window_value(
+        ctx, call, source=call.source, reducer=call.term.window_reduce)
+    return PineExpr(ctx.calc(call, value))
 
 
 def emit_swing(helper: str):
@@ -357,75 +542,6 @@ _PRIMITIVE_HELPERS = (
     if first
         fired := true
     first""", (NEW_SESSION,)),
-    # _opening_range: the level is the extreme over `[start, edge)` and is
-    # returned only `where(ts >= edge)`, so a session that closes inside its
-    # own range never gets a level and neither does a pre-market bar, which is
-    # before the edge too. The window opens at the BELL rather than at the
-    # session's own first bar: measuring from the first bar aggregated a thin
-    # pre-market band and called it the opening range, which is the defect the
-    # engine's docstring names. A name that first trades at 10:30 therefore has
-    # no [09:30, 10:00) range and answers na, rather than answering a different
-    # half-hour under the same name.
-    PineHelper(OPENING_RANGE_HIGH, f"""{OPENING_RANGE_HIGH}(minutes) =>
-    var float level = na
-    if {NEW_SESSION}()
-        level := na
-    int start = {SESSION_OPEN}()
-    int edge = start + minutes * 60000
-    if time >= start and time < edge
-        level := na(level) ? high : math.max(level, high)
-    time >= edge ? level : na""", (NEW_SESSION, SESSION_OPEN)),
-    PineHelper(OPENING_RANGE_LOW, f"""{OPENING_RANGE_LOW}(minutes) =>
-    var float level = na
-    if {NEW_SESSION}()
-        level := na
-    int start = {SESSION_OPEN}()
-    int edge = start + minutes * 60000
-    if time >= start and time < edge
-        level := na(level) ? low : math.min(level, low)
-    time >= edge ? level : na""", (NEW_SESSION, SESSION_OPEN)),
-    # _prev_session: per-session aggregate, shifted one session, read back onto
-    # every bar of the current one. The roll happens on the session's first
-    # bar, so no bar ever sees its own session's aggregate.
-    #
-    # Only REGULAR-hours bars reach the aggregate, which is the engine's
-    # `where(rth_mask(...))` before the groupby. Both engines carry pre-market
-    # and post-market bars, and taking the extremes over the whole span made
-    # "yesterday's high" a thin off-hours print rather than a level the session
-    # defended. The running value is reset to na rather than to this bar's
-    # price for the same reason: a session that prints no regular bar at all
-    # must answer na, not the last off-hours quote it happened to see, which is
-    # exactly what a masked pandas aggregate returns for an all-NaN group.
-    PineHelper(PREV_SESSION_HIGH, f"""{PREV_SESSION_HIGH}() =>
-    var float current = na
-    var float previous = na
-    if {NEW_SESSION}()
-        previous := current
-        current := na
-    if {IN_SESSION}()
-        current := na(current) ? high : math.max(current, high)
-    previous""", (NEW_SESSION, IN_SESSION)),
-    PineHelper(PREV_SESSION_LOW, f"""{PREV_SESSION_LOW}() =>
-    var float current = na
-    var float previous = na
-    if {NEW_SESSION}()
-        previous := current
-        current := na
-    if {IN_SESSION}()
-        current := na(current) ? low : math.min(current, low)
-    previous""", (NEW_SESSION, IN_SESSION)),
-    # The close of a session is its last REGULAR bar's close, the 15:45 one,
-    # rather than the last post-market print hours later. Every "yesterday's
-    # close" in the catalog means the former.
-    PineHelper(PREV_SESSION_CLOSE, f"""{PREV_SESSION_CLOSE}() =>
-    var float current = na
-    var float previous = na
-    if {NEW_SESSION}()
-        previous := current
-        current := na
-    if {IN_SESSION}()
-        current := close
-    previous""", (NEW_SESSION, IN_SESSION)),
     # gap_pct: 100 * (this session's first REGULAR open - last session's
     # regular close) over that close. No zero guard, because the engine has
     # none either.
@@ -443,15 +559,14 @@ _PRIMITIVE_HELPERS = (
     # a branch in the artifact for a case neither side can meet, and guarding
     # it on both sides would be a change to engine arithmetic to serve an
     # export. If a zero close ever becomes reachable, this is the note.
-    PineHelper(GAP_PCT, f"""{GAP_PCT}() =>
+    PineHelper(GAP_PCT, f"""{GAP_PCT}(previous) =>
     var float session_open = na
     if {NEW_SESSION}()
         session_open := na
     if {IN_SESSION}() and na(session_open)
         session_open := open
-    float previous = {PREV_SESSION_CLOSE}()
     100 * (session_open - previous) / previous""",
-               (NEW_SESSION, IN_SESSION, PREV_SESSION_CLOSE)),
+               (NEW_SESSION, IN_SESSION)),
     # day_of_week: 0 = Monday, the way pandas numbers a weekday. Pine numbers
     # Sunday 1 through Saturday 7, so the shift is +5 modulo 7.
     #

@@ -1,7 +1,7 @@
 """Hard rule 5: a vocabulary must hash identically in a pool worker and its
 parent.
 
-`Vocabulary` is deliberately unhashable (a frozen dataclass over two mappings,
+`Vocabulary` is deliberately unhashable (a frozen dataclass over mappings,
 so the generated `__hash__` raises `TypeError` on the dicts it hashes), which
 is why the digest below is computed explicitly rather than taken from `hash()`.
 That property is documented at `vocabulary.py`'s own `Vocabulary` docstring and
@@ -15,12 +15,15 @@ rebuilding anything.
 
 Two things go into the digest, and both are load-bearing.
 
-The per-term tuple carries each term's args and defaults **in declaration
-order**, not sorted. Sorting them would hide the failure mode this rule names:
-a schema assembled from a set or any other unordered comprehension rebuilds in
-a different order in a fresh interpreter, because string hashing is seeded per
-process, and that order is visible to `_bounds` in both prompt renderers and to
-`_check_args`'s error messages.
+The production `vocabulary_digest` half carries every term declaration and
+window row. Its canonical encoding sorts mapping keys, which is right for
+definition identity. A small supplementary projection retains only each
+term's argument and default key order. Sorting those keys would hide the
+failure mode this rule names: a schema assembled from a set or another
+unordered comprehension rebuilds in a different order in a fresh interpreter,
+because string hashing is seeded per process. That order is visible to
+`_bounds` in both prompt renderers and to `_check_args`'s error messages.
+Window rows sort by permanent name inside the production digest.
 
 The `spec_hash` half covers **one spec per grammar shape**, not one spec. A
 canonicalization that is unstable, or simply wrong, for `any`, for `not`, for a
@@ -35,12 +38,15 @@ error against the branch point, and the failure each test is written to see
 would never be watched.
 """
 
+from datetime import time
 import hashlib
 import json
 import multiprocessing as mp
 
+from nakagai.engine.registry import vocabulary_digest
 from nakagai.strategies.rules.canon import spec_hash
-from nakagai.strategies.rules.vocabulary import core_vocabulary
+from nakagai.strategies.rules.vocabulary import Term, core_vocabulary
+from nakagai.strategies.rules.windows import WindowSpec
 
 _RISK = {"stop": {"kind": "atr", "n": 14, "mult": 2.0},
          "target": {"kind": "rr", "rr": 2.0}}
@@ -73,19 +79,85 @@ SHAPE_CORPUS = {
 }
 
 
-def _term_tuple(t):
-    return (t.name, t.kind, tuple(t.args.items()), tuple(t.defaults.items()),
-            t.end_anchored, t.session_scoped, t.driving_frame_intraday)
+def _window_only(*_args):
+    raise RuntimeError("spawn fingerprint must not evaluate window-only terms")
 
 
-def vocabulary_fingerprint() -> str:
+def fingerprint_vocabulary():
+    """Module-level factory rebuilt by spawn-start workers."""
+    return core_vocabulary().with_terms(
+        Term("spawn_last", "series", {}, {}, _window_only,
+             window_reduce="last", window_required=True),
+    ).with_windows(
+        WindowSpec("spawn_london", "Europe/London", time(8), time(16, 30),
+                   "weekday", "low_iex"),
+    )
+
+
+def ordered_declarations_vocabulary():
+    return fingerprint_vocabulary().with_terms(
+        Term("spawn_order", "series",
+             {"alpha": (1, 2), "beta": (3, 4)},
+             {"alpha": 1, "beta": 3}, _window_only),
+    )
+
+
+def reversed_args_vocabulary():
+    return fingerprint_vocabulary().with_terms(
+        Term("spawn_order", "series",
+             {"beta": (3, 4), "alpha": (1, 2)},
+             {"alpha": 1, "beta": 3}, _window_only),
+    )
+
+
+def reversed_defaults_vocabulary():
+    return fingerprint_vocabulary().with_terms(
+        Term("spawn_order", "series",
+             {"alpha": (1, 2), "beta": (3, 4)},
+             {"beta": 3, "alpha": 1}, _window_only),
+    )
+
+
+def _term_declaration_order(vocabulary):
+    return [
+        [term.name, list(term.args), list(term.defaults)]
+        for term in sorted(vocabulary.all_terms(), key=lambda item: item.name)
+    ]
+
+
+def vocabulary_fingerprint(vocabulary_factory=fingerprint_vocabulary) -> str:
     """Module-level and picklable: a spawn-context worker imports it by
     qualified name, which a closure or a local function could not be."""
-    v = core_vocabulary()
-    terms = sorted(_term_tuple(t) for t in v.all_terms())
+    v = vocabulary_factory()
     hashes = [spec_hash(SHAPE_CORPUS[k], v) for k in sorted(SHAPE_CORPUS)]
-    blob = repr(terms) + "|" + "|".join(hashes)
+    blob = json.dumps({
+        "grammar": vocabulary_digest(vocabulary_factory),
+        "term_order": _term_declaration_order(v),
+        "spec_hashes": hashes,
+    }, separators=(",", ":"), sort_keys=True)
     return hashlib.sha256(blob.encode()).hexdigest()
+
+
+def test_spawn_factory_exercises_the_window_grammar_contract():
+    vocab = fingerprint_vocabulary()
+
+    assert set(vocab.windows) == {"spawn_london"}
+    term = vocab.indicators["spawn_last"]
+    assert term.window_reduce == "last"
+    assert term.window_required is True
+
+
+def test_fingerprint_preserves_term_argument_and_default_order():
+    factories = (
+        ordered_declarations_vocabulary,
+        reversed_args_vocabulary,
+        reversed_defaults_vocabulary,
+    )
+    assert len({vocabulary_digest(factory) for factory in factories}) == 1
+
+    ordered = vocabulary_fingerprint(ordered_declarations_vocabulary)
+    assert ordered != vocabulary_fingerprint(reversed_args_vocabulary)
+    assert ordered != vocabulary_fingerprint(reversed_defaults_vocabulary)
 
 
 def _key_counts(spec):

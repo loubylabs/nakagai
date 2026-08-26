@@ -1,4 +1,5 @@
 import json
+from datetime import time
 from pathlib import Path
 
 import numpy as np
@@ -9,10 +10,24 @@ from nakagai.strategies.rules.pine.lowerings import BARS_SINCE, emit_bars_since
 from nakagai.strategies.rules.pine.model import PineLowering
 from nakagai.strategies.rules.vocabulary import (
     CONDITION_ARG, Term, core_vocabulary)
+from nakagai.strategies.rules.windows import WindowSpec
 
 CATALOG_SPECS = (Path(__file__).resolve().parents[1]
                  / "nakagai" / "strategies" / "catalog" / "specs")
 RULE_SPECS = Path(__file__).resolve().parent / "fixtures" / "rules"
+
+
+@pytest.fixture(scope="session")
+def rule_fixture_vocabulary():
+    """The exact named window referenced by the frozen ORB RuleSpec."""
+    return core_vocabulary().with_windows(WindowSpec(
+        "ny_open_30",
+        "America/New_York",
+        time(9, 30),
+        time(10),
+        "xnys_session",
+        "standard",
+    ))
 
 
 @pytest.fixture

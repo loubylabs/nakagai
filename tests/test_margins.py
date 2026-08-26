@@ -5,6 +5,8 @@ left here is only what margins.py still owns, namely signed distances and the
 rank-then-combine step.
 """
 
+from datetime import time
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -15,6 +17,8 @@ from nakagai.strategies.rules import validate_spec
 from nakagai.strategies.rules.frame_eval import FrameEval
 from nakagai.strategies.rules.margins import (condition_margin, group_margin,
                                               spec_margin)
+from nakagai.strategies.rules.vocabulary import core_vocabulary
+from nakagai.strategies.rules.windows import WindowSpec
 
 
 def _bars(closes, start="2026-01-05 14:30", freq="15min"):
@@ -63,10 +67,16 @@ def test_scalar_rhs_broadcasts():
     assert m.iloc[-1] == pytest.approx(30 - expected_rsi.iloc[-1])
 
 
-def test_primitive_margin_is_a_series():
+def test_windowed_aggregate_margin_is_a_series():
     b = _bars(np.linspace(100, 110, 30))
+    vocabulary = core_vocabulary().with_windows(WindowSpec(
+        "ny_open_30", "America/New_York", time(9, 30), time(10),
+        "xnys_session", "standard"))
     m = condition_margin({"lhs": {"src": "close"}, "op": ">",
-                          "rhs": {"prim": "prev_session_high"}}, _fe(b), "15m")
+                          "rhs": {"ind": "highest", "of": {"src": "high"},
+                                  "window": "ny_open_30"}},
+                         FrameEval({"15m": b}, TFS, vocabulary=vocabulary),
+                         "15m")
     assert isinstance(m, pd.Series) and len(m) == len(b)
 
 

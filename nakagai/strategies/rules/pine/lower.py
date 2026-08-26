@@ -55,7 +55,7 @@ from dataclasses import replace
 
 from nakagai.strategies.rules.canon import canonical_expr, spec_hash
 from nakagai.strategies.rules.pine.lowerings import (
-    DAY_OF_WEEK, DIV, HELPERS, NEW_SESSION, SESSION_OPEN_BAR,
+    DAY_OF_WEEK, DIV, HELPERS, NEW_SESSION, SESSION_OPEN_BAR, emit_window,
 )
 from nakagai.strategies.rules.pine.model import (
     GENERATOR_VERSION, PineCompileError, PineExits, PineHelper, PineInput,
@@ -74,6 +74,7 @@ from nakagai.strategies.rules.spec import (
 from nakagai.strategies.rules.vocabulary import (
     Vocabulary, is_choice_rule, is_condition_rule, is_json_number,
     is_range_rule)
+from nakagai.strategies.rules.windows import PRIOR_DAY
 
 # The engine's timeframes in Pine's spelling. Every timeframe the grammar
 # admits needs an entry; one without would otherwise reach request.security as
@@ -107,6 +108,9 @@ GATE_HELPERS = (NEW_SESSION, SESSION_OPEN_BAR)
 # term's arg named "not" from a label that should have shown it.
 STRUCTURAL = ("all", "any")
 COMPARISONS = {"crosses_above": "ta.crossover", "crosses_below": "ta.crossunder"}
+LOW_IEX_WARNING = (
+    "Window {name!r} uses US-equity extended-hours IEX data, which can be "
+    "sparse.")
 
 
 def _tuple(names: list[str]) -> str:
@@ -1040,7 +1044,9 @@ class SpecLowerer:
         name = node[kind]
         term = self.vocabulary.resolve(
             "primitive" if kind == "prim" else "indicator", name)
-        if term.pine is None:
+        if term.pine is None and not (
+                node.get("window") is not None
+                and term.window_reduce is not None):
             raise PineCompileError(
                 "pine_unsupported",
                 f"{path.text}: {name} has no Pine lowering, so this spec "
@@ -1083,10 +1089,16 @@ class SpecLowerer:
         # wrote an empty call rather than refusing.
         condition_args = {a for a, rule in term.args.items()
                           if is_condition_rule(rule)}
+        window_name = node.get("window")
+        window = (self.vocabulary.windows[str(window_name)]
+                  if window_name is not None else
+                  PRIOR_DAY if term.name == "gap_pct" else None)
         args = {**term.defaults,
                 **{k: v for k, v in node.items()
-                   if k not in ("ind", "prim", "of", "tf")
+                   if k not in ("ind", "prim", "of", "tf", "window")
                    and k not in condition_args}}
+        if window_name is not None:
+            args.pop("n", None)
         source = ""
         if term.kind in ("series", "frame"):
             # A term's own operands inherit ITS timeframe and are emitted
@@ -1110,10 +1122,14 @@ class SpecLowerer:
             source = self._condition(node[arg], path.child(arg), frame, frame)
         call = TermCall(term=term, args=args, path=path,
                         slot=self.ctx.slot(f"nk_{term.name}", path),
-                        source=source, content=_content(node, self.vocabulary))
-        for helper_id in term.pine.helpers:
+                        source=source, content=_content(node, self.vocabulary),
+                        window=window)
+        if window is not None and window.confidence == "low_iex":
+            self.ctx.warn(LOW_IEX_WARNING.format(name=window.name))
+        for helper_id in (() if term.pine is None else term.pine.helpers):
             self.ctx.helper(helper_id, path, term.name)
-        expr = term.pine.emit(self.ctx, call)
+        expr = (emit_window(self.ctx, call) if window_name is not None else
+                term.pine.emit(self.ctx, call))
         return self.ctx.take_fields(call.slot) or {"": expr.text}
 
     # -- timeframes ----------------------------------------------------

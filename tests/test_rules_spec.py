@@ -1,4 +1,5 @@
 import inspect
+from datetime import time
 from pathlib import Path
 
 import numpy as np
@@ -8,18 +9,20 @@ from nakagai.data.schema import DEFAULT_TIMEFRAMES
 from nakagai.strategies.rules import (
     canonical_spec, describe_spec, spec_hash, validate_spec,
 )
+from nakagai.strategies.rules.canon import canonical_expr
 from nakagai.strategies.rules import spec as rules_spec
 from nakagai.strategies.rules.spec import (
     MAX_DEPTH, TIMEFRAMES, _expr_text, group_text, validate_condition_group)
 from nakagai.strategies.rules.vocabulary import (
-    CONDITION_ARG, Term, Vocabulary, core_vocabulary,
+    Term, core_vocabulary,
 )
+from nakagai.strategies.rules.windows import PRIOR_DAY, WindowSpec
 
 ORB = {
     "version": 2, "name": "orb-volume", "timeframe": "15m",
     "long": {"all": [
         {"lhs": {"src": "close"}, "op": "crosses_above",
-         "rhs": {"prim": "opening_range_high", "minutes": 30}},
+         "rhs": {"prim": "gap_pct"}},
         {"lhs": {"src": "volume"}, "op": ">",
          "rhs": {"op": "*", "args": [1.5, {"ind": "sma", "n": 20, "of": {"src": "volume"}}]}},
         {"lhs": {"src": "close", "tf": "1d"}, "op": ">", "rhs": {"ind": "sma", "n": 50}},
@@ -29,6 +32,110 @@ ORB = {
     "risk": {"stop": {"kind": "atr", "n": 14, "mult": 2.0},
              "target": {"kind": "rr", "rr": 2.0}},
 }
+
+LOW_IEX_DISCLOSURE = "US-equity extended-hours IEX data can be sparse."
+LONDON = WindowSpec(
+    "london", "Europe/London", time(8), time(16, 30), "weekday", "low_iex")
+NY_AM = WindowSpec(
+    "ny_am", "America/New_York", time(9, 30), time(12),
+    "xnys_session", "standard")
+NY_OPEN_15 = WindowSpec(
+    "ny_open_15", "America/New_York", time(9, 30), time(9, 45),
+    "xnys_session", "standard")
+NY_OPEN_30 = WindowSpec(
+    "ny_open_30", "America/New_York", time(9, 30), time(10),
+    "xnys_session", "standard")
+WINDOW_VOCABULARY = core_vocabulary().with_windows(
+    LONDON, NY_AM, NY_OPEN_15, NY_OPEN_30, PRIOR_DAY)
+
+
+def _rule_with(expr: dict, timeframe: str = "15m") -> dict:
+    return {
+        "version": 2,
+        "name": "window-contract",
+        "timeframe": timeframe,
+        "long": {"all": [
+            {"lhs": {"src": "close"}, "op": ">", "rhs": expr},
+        ]},
+        "risk": ORB["risk"],
+    }
+
+
+@pytest.mark.parametrize("expr,timeframe", [
+    ({"ind": "highest", "of": {"src": "high"}, "window": "london"},
+     "15m"),
+    ({"ind": "last", "of": {"src": "close"}, "window": "prior_day"},
+     "15m"),
+    ({"ind": "highest", "of": {"src": "high"}, "tf": "15m",
+      "window": "ny_open_15"}, "1h"),
+    ({"ind": "highest", "of": {"src": "high"},
+      "window": "ny_open_15"}, "15m"),
+    ({"ind": "highest", "of": {"src": "high"},
+      "window": "prior_day"}, "1d"),
+], ids=["current", "required", "own-tf", "equal-width", "daily-prior"])
+def test_rule_spec_accepts_every_window_contract(expr, timeframe):
+    assert validate_spec(
+        _rule_with(expr, timeframe), WINDOW_VOCABULARY) == []
+
+
+@pytest.mark.parametrize("expr,timeframe,expected", [
+    ({"ind": "highest", "of": {"src": "high"}, "window": "unknown"},
+     "15m", "unknown window 'unknown'"),
+    ({"src": "high", "window": "london"},
+     "15m", "window is only valid on an aggregate indicator"),
+    ({"op": "max", "args": [{"src": "high"}, 1], "window": "london"},
+     "15m", "window is only valid on an aggregate indicator"),
+    ({"prim": "gap_pct", "window": "london"},
+     "15m", "window is only valid on an aggregate indicator"),
+    ({"ind": "rsi", "window": "london"},
+     "15m", "rsi does not support window aggregation"),
+    ({"ind": "first", "of": {"src": "open"}},
+     "15m", "first requires window"),
+    ({"ind": "highest", "of": {"src": "high"}, "n": 20,
+      "window": "london"},
+     "15m", "highest cannot combine n with window"),
+    ({"ind": "highest", "of": {"src": "high"},
+      "window": "ny_open_30"},
+     "1h", "window 'ny_open_30' spans 30 minutes, narrower than '1h' bars "
+           "(60 minutes)"),
+    ({"ind": "highest", "of": {"src": "high"}, "window": "ny_am"},
+     "1d", "window 'ny_am' is intraday and cannot be resolved from "
+           "session-aligned '1d' bars"),
+], ids=[
+    "unknown", "source", "math", "primitive", "non-aggregate",
+    "required", "scope-conflict", "wide-fixed-frame", "daily-current",
+])
+def test_rule_spec_refuses_every_invalid_window_shape(expr, timeframe, expected):
+    errors = validate_spec(_rule_with(expr, timeframe), WINDOW_VOCABULARY)
+    assert errors == [f"long.all[0].rhs: {expected}"]
+
+
+def test_windowed_canonical_form_carries_scope_without_a_rolling_default():
+    node = {"ind": "highest", "of": {"src": "high"}, "window": "london"}
+    assert canonical_expr(node, WINDOW_VOCABULARY) == {
+        "ind": "highest", "of": {"src": "high"}, "window": "london",
+    }
+
+
+def test_adding_windows_does_not_move_an_unwindowed_spec_hash():
+    assert spec_hash(ORB, core_vocabulary()) == spec_hash(ORB, WINDOW_VOCABULARY)
+
+
+def test_window_readback_names_scope_and_discloses_only_low_iex_rows():
+    london = _rule_with(
+        {"ind": "highest", "of": {"src": "high"}, "window": "london"})
+    standard = _rule_with(
+        {"ind": "highest", "of": {"src": "high"}, "window": "ny_am"})
+
+    london_group = group_text(london["long"], WINDOW_VOCABULARY)
+    assert "highest(of=high) over london" in london_group
+    assert LOW_IEX_DISCLOSURE in london_group
+    assert LOW_IEX_DISCLOSURE in describe_spec(london, WINDOW_VOCABULARY)
+
+    standard_group = group_text(standard["long"], WINDOW_VOCABULARY)
+    assert "highest(of=high) over ny_am" in standard_group
+    assert LOW_IEX_DISCLOSURE not in standard_group
+    assert LOW_IEX_DISCLOSURE not in describe_spec(standard, WINDOW_VOCABULARY)
 
 
 def test_valid_v2_spec_passes():
@@ -44,90 +151,6 @@ def test_a_four_hour_spec_validates():
     on_a_leaf = {**ORB, "long": {"all": [{"lhs": {"src": "close", "tf": "4h"},
                                           "op": ">", "rhs": {"ind": "sma", "n": 20}}]}}
     assert validate_spec(on_a_leaf) == []
-
-
-def test_opening_range_refuses_a_bar_longer_than_its_window():
-    spec = {**ORB, "timeframe": "1h", "long": {"all": [
-        {"lhs": {"src": "close"}, "op": ">",
-         "rhs": {"prim": "opening_range_high", "minutes": 30}}]}}
-    errs = validate_spec(spec)
-    assert any("opening_range_high" in error and "30-minute" in error
-               and "'1h'" in error and "60 minutes" in error
-               for error in errs), errs
-
-
-def test_opening_range_uses_its_declared_default_for_the_width_guard():
-    spec = {**ORB, "timeframe": "4h", "long": {"all": [
-        {"lhs": {"src": "close"}, "op": ">",
-         "rhs": {"prim": "opening_range_low"}}]}}
-    errs = validate_spec(spec)
-    assert any("opening_range_low" in error and "30-minute" in error
-               and "'4h'" in error and "240 minutes" in error
-               for error in errs), errs
-
-
-def test_opening_range_accepts_a_window_equal_to_one_bar():
-    spec = {**ORB, "timeframe": "15m", "long": {"all": [
-        {"lhs": {"src": "close"}, "op": ">",
-         "rhs": {"prim": "opening_range_high", "minutes": 15}}]}}
-    assert validate_spec(spec) == []
-
-
-@pytest.mark.parametrize("minutes", [
-    1, 121, float("nan"), float("inf"), float("-inf"), True, "30", None,
-    10 ** 400, -(10 ** 400),
-])
-def test_opening_range_invalid_minutes_are_reported_only_by_argument_validation(minutes):
-    spec = {**ORB, "timeframe": "1h", "long": {"all": [
-        {"lhs": {"src": "close"}, "op": ">",
-         "rhs": {"prim": "opening_range_high", "minutes": minutes}}]}}
-    errs = validate_spec(spec)
-    assert len(errs) == 1, errs
-    assert "opening_range_high.minutes must be a number in [5, 120]" in errs[0]
-
-
-@pytest.mark.parametrize("replacement", [
-    Term("opening_range_high", "primitive", {}, {}, lambda *_args: None),
-    Term("opening_range_high", "primitive", {"minutes": ("short", "wide")},
-         {"minutes": "wide"}, lambda *_args: None),
-    Term("opening_range_high", "primitive", {"minutes": CONDITION_ARG},
-         {}, lambda *_args: None),
-], ids=["no-minutes-arg", "choice-minutes-arg", "condition-minutes-arg"])
-def test_opening_range_width_guard_ignores_non_numeric_injected_terms(replacement):
-    base = core_vocabulary()
-    vocabulary = Vocabulary(
-        base.indicators,
-        {**base.primitives, "opening_range_high": replacement},
-    )
-    spec = {**ORB, "timeframe": "1h", "long": {"all": [
-        {"lhs": {"src": "close"}, "op": ">",
-         "rhs": {"prim": "opening_range_high", "minutes": 30}}]}}
-    errs = validate_spec(spec, vocabulary=vocabulary)
-    assert all("asks for" not in error for error in errs), errs
-
-
-def _huge_default_opening_range_vocabulary():
-    base = core_vocabulary()
-    huge = -(10 ** 400)
-    replacement = Term(
-        "opening_range_high", "primitive",
-        {"minutes": (-(10 ** 401), 10 ** 401)},
-        {"minutes": huge}, lambda *_args: None,
-    )
-    return Vocabulary(
-        base.indicators,
-        {**base.primitives, "opening_range_high": replacement},
-    )
-
-
-def test_opening_range_huge_injected_default_is_rejected_by_canonical_validation():
-    vocabulary = _huge_default_opening_range_vocabulary()
-    spec = {**ORB, "timeframe": "1h", "long": {"all": [
-        {"lhs": {"src": "close"}, "op": ">",
-         "rhs": {"prim": "opening_range_high"}}]}}
-    errs = validate_spec(spec, vocabulary=vocabulary)
-    assert len(errs) == 1, errs
-    assert "opening_range_high.minutes has invalid argument rule" in errs[0]
 
 
 def _custom_numeric_vocabulary(*, default):
@@ -208,67 +231,6 @@ def test_a_non_numeric_argument_rule_is_reported_without_raising(rule):
          "rhs": {"prim": "bad_rule", "n": 1}}]}}
     errs = validate_spec(spec, vocabulary=vocabulary)
     assert len(errs) == 1 and "bad_rule.n" in errs[0], errs
-
-
-def test_opening_range_numpy_bounds_still_refuse_a_wide_hourly_bar():
-    base = core_vocabulary()
-    replacement = Term(
-        "opening_range_high", "primitive",
-        {"minutes": (np.int64(5), np.int64(120))}, {"minutes": 30},
-        lambda *_args: None,
-    )
-    vocabulary = Vocabulary(
-        base.indicators,
-        {**base.primitives, "opening_range_high": replacement},
-    )
-    spec = {**ORB, "timeframe": "1h", "long": {"all": [
-        {"lhs": {"src": "close"}, "op": ">",
-         "rhs": {"prim": "opening_range_high"}}]}}
-    errs = validate_spec(spec, vocabulary=vocabulary)
-    assert any("opening_range_high" in error and "30-minute" in error
-               and "60 minutes" in error for error in errs), errs
-
-
-@pytest.mark.parametrize("node", [
-    {"prim": "opening_range_high", "minutes": np.int64(30)},
-    {"prim": "opening_range_high"},
-], ids=["explicit", "default"])
-def test_numpy_opening_range_values_are_refused_as_non_json_numbers(node):
-    base = core_vocabulary()
-    replacement = Term(
-        "opening_range_high", "primitive", {"minutes": (5, 120)},
-        {"minutes": np.int64(30)}, lambda *_args: None,
-    )
-    vocabulary = Vocabulary(
-        base.indicators,
-        {**base.primitives, "opening_range_high": replacement},
-    )
-    spec = {**ORB, "long": {"all": [
-        {"lhs": {"src": "close"}, "op": ">", "rhs": node}]}}
-    errs = validate_spec(spec, vocabulary=vocabulary)
-    assert len(errs) == 1, errs
-    assert "opening_range_high.minutes must be a number" in errs[0]
-
-
-@pytest.mark.parametrize("node", [
-    {"prim": "opening_range_high", "minutes": np.float64(30.0)},
-    {"prim": "opening_range_high"},
-], ids=["explicit-float", "default-float"])
-def test_numpy_float_opening_range_values_are_refused(node):
-    base = core_vocabulary()
-    replacement = Term(
-        "opening_range_high", "primitive", {"minutes": (5, 120)},
-        {"minutes": np.float64(30.0)}, lambda *_args: None,
-    )
-    vocabulary = Vocabulary(
-        base.indicators,
-        {**base.primitives, "opening_range_high": replacement},
-    )
-    spec = {**ORB, "long": {"all": [
-        {"lhs": {"src": "close"}, "op": ">", "rhs": node}]}}
-    errs = validate_spec(spec, vocabulary=vocabulary)
-    assert len(errs) == 1, errs
-    assert "opening_range_high.minutes must be a number" in errs[0]
 
 
 @pytest.mark.parametrize("bounds", [
@@ -559,8 +521,6 @@ def test_the_session_aligned_refusal_covers_the_exit_group():
 
 DAILY = {"version": 2, "name": "daily", "timeframe": "1d", "risk": ORB["risk"]}
 INTRADAY_ONLY = [
-    {"prim": "opening_range_high", "minutes": 30},
-    {"prim": "opening_range_low", "minutes": 30},
     {"prim": "minutes_into_session"},
     {"prim": "rvol", "sessions": 20},
 ]
@@ -572,11 +532,11 @@ def _daily(node):
 
 @pytest.mark.parametrize("node", INTRADAY_ONLY, ids=lambda n: n["prim"])
 def test_an_intraday_only_primitive_is_refused_on_a_daily_driving_frame(node):
-    """One daily bar IS the whole session, so these read nothing: the opening
-    range never elapses (NaN forever), every bar sits 0 minutes into its
-    session, and rvol's same-clock-time bucket swallows the entire series. The
-    old rule only refused a foreign `tf`, so a 1d spec validated clean and then
-    read something that did not mean what its name says."""
+    """One daily bar IS the whole session, so these read the wrong shape.
+
+    Every bar sits 0 minutes into its session, and rvol's same-clock-time
+    bucket swallows the entire series.
+    """
     errs = validate_spec(_daily(node))
     assert any(e.startswith("long.all[0].lhs") and node["prim"] in e
                for e in errs), errs
@@ -611,17 +571,6 @@ def test_the_same_primitives_are_untouched_on_an_intraday_driving_frame(node, tf
 ], ids=lambda n: n["prim"])
 def test_unrelated_intraday_primitives_are_untouched_on_an_hourly_frame(node):
     assert validate_spec({**_daily(node), "timeframe": "1h"}) == []
-
-
-def test_opening_range_width_follows_an_inherited_effective_timeframe():
-    spec = {**DAILY, "timeframe": "15m", "long": {"all": [
-        {"lhs": {"ind": "sma", "n": 5, "tf": "1h",
-                  "of": {"prim": "opening_range_high", "minutes": 30}},
-         "op": ">", "rhs": 1}]}}
-    errs = validate_spec(spec)
-    assert any("opening_range_high" in error and "30-minute" in error
-               and "'1h'" in error and "60 minutes" in error
-               for error in errs), errs
 
 
 def test_the_refusal_follows_a_tf_that_moves_the_frame_under_a_subtree():
@@ -669,7 +618,7 @@ def test_a_daily_screen_refuses_an_intraday_only_primitive():
 def test_describe_mentions_the_pieces():
     text = describe_spec(ORB)
     assert "orb-volume" in text and "15m" in text
-    assert "opening_range_high" in text or "opening range high" in text
+    assert "gap_pct" in text
     assert "Stop:" in text and "Target:" in text
     assert "time stop" in text.lower()
 
