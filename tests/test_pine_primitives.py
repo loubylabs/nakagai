@@ -11,6 +11,7 @@ Everything reads a PineProgram or a helper's source, never a rendered artifact.
 """
 
 import dataclasses
+from datetime import time
 
 import pytest
 
@@ -18,6 +19,7 @@ from nakagai.strategies.rules import lower_pine
 from nakagai.strategies.rules.pine.lowerings import HELPERS
 from nakagai.strategies.rules.pine.model import PineLowering
 from nakagai.strategies.rules.vocabulary import core_vocabulary, is_choice_rule
+from nakagai.strategies.rules.windows import WindowSpec
 
 LHS = "nk_long_all_0_lhs"
 CLOSE_OVER_OPEN = {"lhs": {"src": "close"}, "op": ">", "rhs": {"src": "open"}}
@@ -36,26 +38,27 @@ def _source(helper_id):
     return HELPERS[helper_id].source
 
 
+NY_OPEN_30 = WindowSpec(
+    "ny_open_30", "America/New_York", time(9, 30), time(10),
+    "xnys_session", "standard")
+PRIOR_DAY = WindowSpec(
+    "prior_day", "America/New_York", time(9, 30), time(16),
+    "prior_session", "standard")
+
+
+def _window_program(node):
+    row = NY_OPEN_30 if node["window"] == "ny_open_30" else PRIOR_DAY
+    return lower_pine(
+        _spec(node), vocabulary=core_vocabulary().with_windows(row))
+
+
 # One row per primitive: the node, the calculations it owes, and the identifier
 # the condition reads. Asserted complete against the vocabulary below, so a
 # primitive without a Pine form fails here rather than silently.
 PRIMITIVES = [
-    ({"prim": "opening_range_high"},
-     [f"nk_opening_range_high_1 = nk_opening_range_high("
-      f"{LHS}_opening_range_high_minutes)"], "nk_opening_range_high_1"),
-    ({"prim": "opening_range_low"},
-     [f"nk_opening_range_low_1 = nk_opening_range_low("
-      f"{LHS}_opening_range_low_minutes)"], "nk_opening_range_low_1"),
-    ({"prim": "prev_session_high"},
-     ["nk_prev_session_high_1 = nk_prev_session_high()"],
-     "nk_prev_session_high_1"),
-    ({"prim": "prev_session_low"},
-     ["nk_prev_session_low_1 = nk_prev_session_low()"],
-     "nk_prev_session_low_1"),
-    ({"prim": "prev_session_close"},
-     ["nk_prev_session_close_1 = nk_prev_session_close()"],
-     "nk_prev_session_close_1"),
-    ({"prim": "gap_pct"}, ["nk_gap_pct_1 = nk_gap_pct()"], "nk_gap_pct_1"),
+    ({"prim": "gap_pct"},
+     ["nk_gap_pct_1 = nk_gap_pct(nk_gap_pct_1_prior_value)"],
+     "nk_gap_pct_1"),
     ({"prim": "rvol"}, [f"nk_rvol_1 = nk_rvol({LHS}_rvol_sessions)"],
      "nk_rvol_1"),
     ({"prim": "minutes_into_session"},
@@ -152,11 +155,6 @@ def test_two_readings_of_one_gap_share_one_scan():
 # argument and no timeframe, so their two readings are one node by
 # construction; the assertion below still holds, the memo does the work.
 TWICE = {
-    "opening_range_high": ({"minutes": 15}, {"minutes": 60}),
-    "opening_range_low": ({"minutes": 15}, {"minutes": 60}),
-    "prev_session_high": ({}, {"tf": "1h"}),
-    "prev_session_low": ({}, {"tf": "1h"}),
-    "prev_session_close": ({}, {"tf": "1h"}),
     "gap_pct": ({}, {"tf": "1h"}),
     "rvol": ({"sessions": 10}, {"sessions": 30}),
     "minutes_into_session": ({}, {}),
@@ -232,62 +230,45 @@ def test_the_state_and_direction_pair_chooses_the_gaps_the_scan_keeps():
 # (or the ICT module it calls) that the Pine mirrors.
 
 
-def test_the_opening_range_is_invisible_until_its_own_window_elapses():
-    # _opening_range: the level accumulates over `[start, edge)` and is
-    # returned only `where(ts >= edge)`, so a session that closes inside the
-    # range never gets one. Both halves have to be in the helper, or the level
-    # reads a bar early and every opening-range breakout fires on the range's
-    # own bars.
-    source = _source("nk_opening_range_high")
-    assert "if time >= start and time < edge" in source
-    assert "time >= edge ? level : na" in source
-    # The window opens at the BELL, from nk_session_open, not at the session's
-    # own first bar. Neither engine's first bar is the open: the caches are not
-    # RTH-only and a chart's extended session starts at 04:00, so measuring
-    # from it aggregated a pre-market band and called it the opening range.
-    assert "int start = nk_session_open()" in source
-    assert "edge = start + minutes * 60000" in source
+def test_a_current_window_clears_aggregates_and_hides_its_active_value():
+    program = _window_program({
+        "ind": "highest", "of": {"src": "high"},
+        "window": "ny_open_30",
+    })
+    source = "\n".join(program.calculations)
+    assert "nk_highest_1_window_completed := na" in source
+    assert "nk_highest_1_window_current := na" in source
+    assert ("nk_highest_1_window_active ? na : "
+            "nk_highest_1_window_completed" in source)
+    assert "nk_highest_1_window_completed := nk_highest_1_window_current" \
+        in source
 
 
-def test_the_opening_range_low_keeps_the_minimum_of_the_same_window():
-    source = _source("nk_opening_range_low")
-    assert "math.min(level, low)" in source
-    assert "time >= edge ? level : na" in source
+@pytest.mark.parametrize("term, update", [
+    ("highest", "math.max(nk_highest_1_window_current, high)"),
+    ("lowest", "math.min(nk_lowest_1_window_current, low)"),
+    ("first", "if na(nk_first_1_window_current)"),
+    ("last", "nk_last_1_window_current := close"),
+])
+def test_each_reducer_has_one_branch_in_the_generic_machine(term, update):
+    source_name = {"highest": "high", "lowest": "low",
+                   "first": "open", "last": "close"}[term]
+    source = "\n".join(_window_program({
+        "ind": term, "of": {"src": source_name},
+        "window": "ny_open_30",
+    }).calculations)
+    assert update in source
 
 
-def test_the_previous_session_levels_roll_only_when_the_session_changes():
-    # _prev_session: per_day.agg(...).shift(1), read back onto every bar of the
-    # current session. The roll happens on the session's first bar, so a bar
-    # never sees its own session's aggregate.
-    for helper_id, aggregate in (("nk_prev_session_high", "math.max(current, high)"),
-                                 ("nk_prev_session_low", "math.min(current, low)")):
-        source = _source(helper_id)
-        assert "if nk_new_session()" in source
-        assert "previous := current" in source
-        assert aggregate in source
-        # The value read out is the PREVIOUS session's, on every bar.
-        assert source.rstrip().endswith("previous")
-    close = _source("nk_prev_session_close")
-    assert "current := close" in close
-    assert close.rstrip().endswith("previous")
-
-
-def test_the_previous_session_levels_aggregate_regular_hours_only():
-    # _prev_session masks with data/schema.rth_mask before the groupby, so the
-    # extremes are the session's and not the widest off-hours print of its
-    # date. Both engines carry pre-market and post-market bars, so an
-    # unfiltered aggregate made "yesterday's high" a thin quote nothing
-    # defended, and "yesterday's close" the 19:45 print rather than the 15:45
-    # one every catalog play means by it.
-    for helper_id in ("nk_prev_session_high", "nk_prev_session_low",
-                      "nk_prev_session_close"):
-        source = _source(helper_id)
-        assert "if nk_in_session()" in source
-        # Reset to na rather than to this bar's price: a session with no
-        # regular bar at all answers na, which is what a masked pandas
-        # aggregate returns for an all-NaN group. Seeding from the first bar of
-        # the date would seed from a pre-market print instead.
-        assert "        current := na" in source
+def test_prior_session_uses_the_same_machine_and_only_shifts_nonempty_values():
+    source = "\n".join(_window_program({
+        "ind": "last", "of": {"src": "close"}, "window": "prior_day",
+    }).calculations)
+    assert "if nk_last_1_window_changed" in source
+    assert "if not na(nk_last_1_window_current)" in source
+    assert "nk_last_1_window_completed := nk_last_1_window_current" in source
+    assert ("nk_last_1_window_clock >= 570 and "
+            "nk_last_1_window_clock < 960" in source)
 
 
 def test_the_regular_session_is_the_wall_clock_window_the_engine_masks_on():
@@ -327,11 +308,16 @@ def test_the_session_open_is_the_bell_on_the_new_york_wall_clock():
 
 
 def test_the_gap_is_this_session_s_open_against_the_last_session_s_close():
-    # gap_pct: 100 * (session open - prev session close) / prev session close.
+    # gap_pct receives the generic prior-session last value as its input.
     source = _source("nk_gap_pct")
     assert "session_open := open" in source
-    assert "nk_prev_session_close()" in source
+    assert source.startswith("nk_gap_pct(previous) =>")
     assert "100 * (session_open - previous) / previous" in source
+    program = _program({"prim": "gap_pct"})
+    calculations = "\n".join(program.calculations)
+    assert "nk_gap_pct_1_prior_completed" in calculations
+    assert "nk_gap_pct_1 = nk_gap_pct(nk_gap_pct_1_prior_value)" \
+        in calculations
     # The open is the session's first REGULAR bar's, and it is na until that
     # bar has printed. Both halves are the fix for chrvsd/nakagai#276: the
     # first bar of the New York date is a pre-market print on a cache that is
@@ -551,7 +537,7 @@ def test_an_end_anchored_window_declares_the_history_it_scans():
 
 def test_a_primitive_with_a_fixed_reach_declares_no_history():
     assert _program({"prim": "day_of_week"}).max_bars_back == 0
-    assert _program({"prim": "prev_session_high"}).max_bars_back == 0
+    assert _program({"prim": "gap_pct"}).max_bars_back == 0
 
 
 @pytest.mark.parametrize("name", sorted(core_vocabulary().primitives))
@@ -598,8 +584,7 @@ def test_an_intraday_chart_does_not_carry_the_daily_bar_assumption():
     # primitive's intraday reading exactly, and the spec's timeframe is pinned
     # by the first assumption, so the daily premise can never apply there.
     assert DAILY_STAMP not in _program({"prim": "day_of_week"}).assumptions
-    assert DAILY_STAMP not in _program({"prim": "prev_session_high"}, ">", 0,
-                                       "1d").assumptions
+    assert DAILY_STAMP not in _program({"prim": "gap_pct"}).assumptions
 
 
 def test_a_cross_against_an_end_anchored_level_compares_both_bars_to_it():

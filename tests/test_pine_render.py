@@ -16,10 +16,13 @@ somewhere" would pass on a stop with the wrong geometry.
 """
 
 import pytest
+from datetime import time
 
 from nakagai.strategies.rules import PineCompileError, compile_pine, spec_hash
 from nakagai.strategies.rules.pine import render
 from nakagai.strategies.rules.spec import DRIVING, TIMEFRAMES
+from nakagai.strategies.rules.vocabulary import core_vocabulary
+from nakagai.strategies.rules.windows import WindowSpec
 # The golden set is the house-style guard's subject too, read from one place so
 # a play added there cannot quietly escape it. discount_pullback did.
 from tests.test_pine_golden import PLAYS as GOLDEN_PLAYS
@@ -238,6 +241,41 @@ def test_the_bundle_always_carries_every_fidelity_warning():
             assert text in header
 
 
+def test_a_low_iex_window_adds_one_sparse_data_warning_to_both_headers():
+    row = WindowSpec(
+        "london", "Europe/London", time(8), time(16, 30),
+        "weekday", "low_iex")
+    bundle = compile_pine(
+        _spec(long={"all": [{
+            "lhs": {"ind": "highest", "window": "london"},
+            "op": ">", "rhs": 0,
+        }]}, short={"all": [{
+            "lhs": {"ind": "lowest", "window": "london"},
+            "op": "<", "rhs": 0,
+        }]}),
+        vocabulary=core_vocabulary().with_windows(row),
+    )
+    warning = (
+        "Window 'london' uses US-equity extended-hours IEX data, which can "
+        "be sparse.")
+    assert bundle.warnings.count(warning) == 1
+    for source in (bundle.indicator, bundle.strategy):
+        assert _header(source).count(warning) == 1
+
+
+def test_window_artifacts_contain_no_retired_specialized_helper_name(
+        load_rule_spec, rule_fixture_vocabulary):
+    bundle = compile_pine(
+        load_rule_spec("orb"), vocabulary=rule_fixture_vocabulary)
+    retired = (
+        "opening_" "range_high", "opening_" "range_low",
+        "prev_" "session_high", "prev_" "session_low",
+        "prev_" "session_close",
+    )
+    for source in (bundle.indicator, bundle.strategy):
+        assert all(name not in source for name in retired)
+
+
 def test_a_conditional_exit_says_it_closes_one_bar_later_than_the_engine(
         load_rule_spec, rule_fixture_vocabulary):
     # The engine closes a manage() exit at the signal bar's own close;
@@ -299,10 +337,9 @@ def test_helpers_render_once_each_in_dependency_order(
         load_rule_spec, rule_fixture_vocabulary):
     source = compile_pine(
         load_rule_spec("orb"), vocabulary=rule_fixture_vocabulary).indicator
-    assert source.count("nk_new_session() =>") == 1
-    assert source.index("nk_session_key() =>") < source.index("nk_new_session() =>")
-    assert source.index("nk_new_session() =>") < \
-        source.index("nk_opening_range_high(minutes) =>")
+    assert source.count("var float nk_highest_1_window_current = na") == 1
+    assert source.count("var float nk_lowest_1_window_current = na") == 1
+    assert source.count("nk_session_open() =>") == 1
 
 
 def test_a_variable_history_offset_declares_max_bars_back(load_rule_spec):

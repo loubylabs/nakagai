@@ -116,7 +116,9 @@ def test_a_bare_threshold_becomes_an_unbounded_input():
         in program.inputs
 
 
-@pytest.mark.parametrize("name", sorted(core_vocabulary().indicators))
+@pytest.mark.parametrize("name", sorted(
+    name for name, term in core_vocabulary().indicators.items()
+    if not term.window_required))
 def test_every_numeric_argument_of_an_indicator_reaches_one_input(name):
     term = core_vocabulary().indicators[name]
     program = lower_pine(_spec({"ind": name}))

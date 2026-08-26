@@ -137,6 +137,7 @@ class TermCall:
     slot: str
     source: str = ""
     content: str = ""
+    window: "WindowSpec | None" = None
 
     @property
     def field(self) -> str:

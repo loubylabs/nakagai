@@ -92,6 +92,24 @@ def _pine_pair(entry: str, *args) -> tuple[pd.Series, pd.Series]:
             as_series([row[1] for row in rows], BARS))
 
 
+def _compiled_pine(node: dict, bars: pd.DataFrame = BARS) -> pd.Series:
+    """Run one emitted term calculation without the strategy risk block."""
+    spec = {"version": 2, "name": "term_probe", "timeframe": "15m",
+            "long": {"all": [{"lhs": node, "op": ">", "rhs": -1_000_000}]}}
+    program = lower_pine(spec)
+    target = f"nk_{node['prim']}_1"
+    lines = []
+    for calculation in program.calculations:
+        lines.extend(calculation.splitlines())
+        if any(line.startswith(f"{target} =")
+               for line in calculation.splitlines()):
+            break
+    sources = {helper.id: helper.source for helper in program.helpers}
+    rows = run_program(
+        sources, lines, bars, pd.Timedelta(hours=1))
+    return as_series([row[target] for row in rows], bars)
+
+
 def _end_anchored(fn, **args) -> pd.Series:
     """What the engine answers at each row: the scalar over bars[:i + 1]."""
     return pd.Series([float(fn(None, BARS.iloc[:i + 1], **args))
@@ -119,14 +137,6 @@ def _assert_same(pine: pd.Series, engine: pd.Series, where=None) -> None:
 
 
 # -- the session state machines --------------------------------------------
-
-
-@pytest.mark.parametrize("minutes", [60, 120, 240])
-def test_the_opening_range_becomes_readable_on_the_bar_the_engine_says(minutes):
-    _assert_same(_pine("nk_opening_range_high", minutes),
-                 prim.opening_range_high(None, BARS, minutes=minutes))
-    _assert_same(_pine("nk_opening_range_low", minutes),
-                 prim.opening_range_low(None, BARS, minutes=minutes))
 
 
 def _ragged() -> pd.DataFrame:
@@ -168,22 +178,6 @@ def _ragged() -> pd.DataFrame:
 RAGGED = _ragged()
 
 
-@pytest.mark.parametrize("minutes", [30, 60, 120])
-def test_the_opening_range_agrees_on_sessions_that_do_not_have_one(minutes):
-    for entry, engine_fn in (("nk_opening_range_high", prim.opening_range_high),
-                             ("nk_opening_range_low", prim.opening_range_low)):
-        pine = as_series(run_helper(SOURCES, entry, RAGGED, (minutes,)), RAGGED)
-        _assert_same(pine, engine_fn(None, RAGGED, minutes=minutes))
-    # Agreement alone would be satisfied by both engines being wrong the same
-    # way, so the session with no bars in its window is named: it must have no
-    # level, rather than the previous session's carried over.
-    ny = RAGGED.index.tz_convert("America/New_York")
-    late = ny.date == pd.Timestamp("2026-01-06").date()
-    assert late.sum() > 4, "the frame must still hold the late-opening session"
-    assert prim.opening_range_high(None, RAGGED,
-                                   minutes=minutes)[late].isna().all()
-
-
 def test_minutes_into_session_agrees_across_a_daylight_saving_change():
     # The 09:30 bar is 14:30 UTC in the first three sessions and 13:30 UTC in
     # the last one. Either engine reaching the bell by arithmetic on a UTC
@@ -197,14 +191,15 @@ def test_minutes_into_session_agrees_across_a_daylight_saving_change():
     assert (prim.minutes_into_session(None, RAGGED)[at_bell] == 0.0).all()
 
 
-def test_the_previous_session_levels_are_the_engine_s_on_every_bar():
-    # The roll and the running aggregate are two lines whose ORDER is the whole
-    # rule: swapped, every bar reads its own session's running high, which is a
-    # value the engine does not expose until the session is over.
-    _assert_same(_pine("nk_prev_session_high"), prim.prev_session_high(None, BARS))
-    _assert_same(_pine("nk_prev_session_low"), prim.prev_session_low(None, BARS))
-    _assert_same(_pine("nk_prev_session_close"),
-                 prim.prev_session_close(None, BARS))
+def test_the_interpreter_executes_emitted_timezone_week_numbers():
+    bars = _bars().iloc[:2].copy()
+    bars.index = pd.DatetimeIndex([
+        pd.Timestamp("2025-12-31 10:00", tz="America/New_York"),
+        pd.Timestamp("2026-01-05 10:00", tz="America/New_York"),
+    ]).tz_convert("UTC")
+    source = ('nk_week_probe() =>\n'
+              '    weekofyear(time, "America/New_York")')
+    assert run_helper({"nk_week_probe": source}, "nk_week_probe", bars) == [1, 2]
 
 
 def test_the_session_open_bar_is_the_one_the_engine_gates_a_daily_play_on():
@@ -228,7 +223,7 @@ def test_the_session_open_bar_is_the_one_the_engine_gates_a_daily_play_on():
 
 
 def test_the_gap_is_the_engine_s_gap():
-    _assert_same(_pine("nk_gap_pct"), prim.gap_pct(None, BARS))
+    _assert_same(_compiled_pine({"prim": "gap_pct"}), prim.gap_pct(None, BARS))
 
 
 def test_minutes_into_session_counts_the_engine_s_minutes():
@@ -321,21 +316,6 @@ MUTATIONS = [
     ("the swing's level stops carrying forward", "nk_swing_high",
      "var float level = na", "float level = na",
      lambda: (_pine("nk_swing_high", 3), prim.swing_high(None, BARS, k=3))),
-    ("the session rolls after the running high is reset",
-     "nk_prev_session_high",
-     "        previous := current\n        current := na",
-     "        current := na\n        previous := current",
-     lambda: (_pine("nk_prev_session_high"),
-              prim.prev_session_high(None, BARS))),
-    ("the previous session's high is taken over its whole extended span",
-     "nk_prev_session_high", "    if nk_in_session()\n", "    if true\n",
-     lambda: (_pine("nk_prev_session_high"),
-              prim.prev_session_high(None, BARS))),
-    ("the gap is measured from the session's first bar rather than its open",
-     "nk_gap_pct",
-     "    if nk_in_session() and na(session_open)\n        session_open := open",
-     "    if na(session_open)\n        session_open := open",
-     lambda: (_pine("nk_gap_pct"), prim.gap_pct(None, BARS))),
 ]
 
 

@@ -28,11 +28,6 @@ from nakagai.strategies.rules.vocabulary import core_vocabulary
 EVERY_PRIMITIVE = {
     "version": 2, "name": "every_primitive", "timeframe": "15m",
     "long": {"all": [
-        {"lhs": {"prim": "opening_range_high"}, "op": ">", "rhs": 0},
-        {"lhs": {"prim": "opening_range_low"}, "op": ">", "rhs": 0},
-        {"lhs": {"prim": "prev_session_high"}, "op": ">", "rhs": 0},
-        {"lhs": {"prim": "prev_session_low"}, "op": ">", "rhs": 0},
-        {"lhs": {"prim": "prev_session_close"}, "op": ">", "rhs": 0},
         {"lhs": {"prim": "gap_pct"}, "op": ">", "rhs": 0},
         {"lhs": {"prim": "rvol"}, "op": ">", "rhs": 1},
         {"lhs": {"prim": "minutes_into_session"}, "op": ">", "rhs": 30},
@@ -51,13 +46,15 @@ EVERY_PRIMITIVE = {
 
 def test_every_current_term_has_a_pine_lowering():
     missing = [term.name for term in core_vocabulary().all_terms()
-               if term.pine is None]
+               if term.pine is None and term.window_reduce is None]
     assert missing == []
+    assert {term.name for term in core_vocabulary().all_terms()
+            if term.pine is None} == {"first", "last"}
 
 
 def test_every_helper_a_term_names_is_registered():
     for term in core_vocabulary().all_terms():
-        for helper_id in term.pine.helpers:
+        for helper_id in (() if term.pine is None else term.pine.helpers):
             assert helper_id in HELPERS, \
                 f"{term.name} names the unregistered helper {helper_id!r}"
 
@@ -104,7 +101,8 @@ def test_every_registered_helper_is_reachable_from_a_term_or_a_gate():
     """
     reachable: set[str] = set()
     frontier = [helper_id for term in core_vocabulary().all_terms()
-                for helper_id in term.pine.helpers] + list(GATE_HELPERS)
+                for helper_id in (() if term.pine is None
+                                  else term.pine.helpers)] + list(GATE_HELPERS)
     while frontier:
         helper_id = frontier.pop()
         if helper_id in reachable:
