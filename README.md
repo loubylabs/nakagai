@@ -282,6 +282,16 @@ The hosted product at nakag.ai is built on top of this core.
 
 ## Release notes
 
+### 0.8.1 (2026-08-26)
+
+The window-axis parity gate now executes generated Pine through data gaps that
+cross both lifecycle boundaries. It also covers the prior-day high over a
+holiday gap and the prior-day low after an observed early-close session.
+Runtime output is unchanged; the executable parity tests characterize existing
+window lifecycle behavior.
+Current documentation describes the hard retirement in terms of the generic
+window model, without preserving obsolete grammar spellings.
+
 ### 0.8.0 (2026-08-26)
 
 RuleSpec now has one composable `window` axis. Immutable `WindowSpec` rows live
@@ -291,10 +301,10 @@ in canonical spec and vocabulary identity. A grammar that adds or changes rows
 therefore produces new definition, replay, and trade identifiers even when a
 spec body is untouched.
 
-**Breaking:** `opening_range_high`, `opening_range_low`, `prev_session_high`,
-`prev_session_low`, and `prev_session_close` are removed. Register immutable
-rows and use `highest(high)`, `lowest(low)`, or `last(close)` over the matching
-window. No alias, fallback, or compatibility path remains.
+**Breaking:** the five bespoke opening-range and previous-session primitives
+are removed. Register immutable rows and use `highest(high)`, `lowest(low)`,
+or `last(close)` over the matching window. No alias, fallback, or compatibility
+path remains.
 
 Low-confidence rows identify sparse US-equity extended-hours IEX coverage in
 natural-language prompts, spec readback, and generated Pine source. Confidence
@@ -669,17 +679,16 @@ count directly rather than by replaying the search on permuted bars.
 ### Session corrections (2026-08-06)
 
 **Behavior change: every session-scoped term is anchored on the 09:30 bell and
-scoped to regular hours.** Backtest output moves for any play reading
-`opening_range_high`, `opening_range_low`, `minutes_into_session`,
-`prev_session_high`, `prev_session_low`, `prev_session_close`, `gap_pct` or
+scoped to regular hours.** Backtest output moves for any play reading the
+opening range, elapsed session time, previous-session levels, `gap_pct`, or
 `vwap`; re-run anything that depends on them. The bar caches are not
-regular-hours-only, and these all grouped a New York calendar date and treated
+regular-hours-only, and these rules grouped a New York calendar date and treated
 its first row as the session's start, which is ordinarily an 08:00 pre-market
-print. So the opening range was a thin band nobody trades, `minutes_into_session`
-ran an hour and a half fast, the previous session's high and low were off-hours
-extremes and its "close" was the last post-market print, a gap was measured from
-19:45 to 08:00, and session VWAP was set by pre-market volume. A session now
-runs `[09:30, 16:00)` on the exchange wall clock, from
+print. The opening range was therefore a thin band nobody trades, elapsed
+session time ran an hour and a half fast, previous-session levels came from
+off-hours extremes, a gap was measured from 19:45 to 08:00, and session VWAP
+was set by pre-market volume. A session now runs `[09:30, 16:00)` on the
+exchange wall clock, from
 `nakagai/data/schema.py`, and a bar before the bell reads NaN rather than a
 value a condition would act on. A daily frame is unaffected: one row is its own
 whole session.
