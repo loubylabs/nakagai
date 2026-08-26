@@ -1,5 +1,7 @@
 """FrameEval: whole-frame node values that agree with prefix evaluation."""
 
+from datetime import time
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -7,9 +9,11 @@ import pytest
 from nakagai.data.cache import MemoryBars
 from nakagai.data.schema import DEFAULT_TIMEFRAMES as TFS
 from nakagai.engine.context import build_context, closed_before
+from nakagai.screen.runner import run_screen
 from nakagai.strategies.indicators import crossed_above
 from nakagai.strategies.rules.frame_eval import FrameEval
 from nakagai.strategies.rules.vocabulary import Term, core_vocabulary
+from nakagai.strategies.rules.windows import PRIOR_DAY, WindowSpec
 from tests.whole_frame_oracle import prefix_value
 
 NODES = [
@@ -21,9 +25,8 @@ NODES = [
     {"ind": "vwap"},
     {"ind": "bb", "n": 20, "k": 2.0, "field": "upper"},
     {"ind": "macd", "fast": 12, "slow": 26, "signal": 9, "field": "hist"},
-    {"prim": "opening_range_high", "minutes": 30},
     {"prim": "minutes_into_session"},
-    {"prim": "prev_session_high"},
+    {"prim": "gap_pct"},
     {"prim": "swing_high", "k": 3},
     {"op": "-", "args": [{"src": "close"}, {"ind": "sma", "n": 10}]},
 ]
@@ -324,6 +327,151 @@ def _hand_bars(closes, start, freq):
                          "close": c, "volume": 1000.0}, index=idx)
 
 
+LONDON = WindowSpec(
+    "london", "Europe/London", time(8), time(16, 30), "weekday", "low_iex")
+WINDOW_VOCABULARY = core_vocabulary().with_windows(LONDON, PRIOR_DAY)
+
+
+def _window_bars(index, *, opens, highs, lows, closes):
+    return pd.DataFrame(
+        {"open": opens, "high": highs, "low": lows, "close": closes,
+         "volume": 1000.0},
+        index=pd.DatetimeIndex(index),
+    )
+
+
+def test_london_high_needs_no_london_term_and_obeys_the_window_lifecycle():
+    idx = pd.DatetimeIndex([
+        "2026-01-05 08:00", "2026-01-05 08:15", "2026-01-05 16:30",
+        "2026-01-06 07:45", "2026-01-06 08:00", "2026-01-06 08:15",
+        "2026-01-06 16:30",
+    ], tz="UTC")
+    bars = _window_bars(
+        idx,
+        opens=[100, 101, 102, 103, 104, 105, 106],
+        highs=[101, 107, 999, 999, 109, 111, 999],
+        lows=[99, 100, 101, 102, 103, 104, 105],
+        closes=[100, 101, 102, 103, 104, 105, 106],
+    )
+    got = FrameEval({"15m": bars}, vocabulary=WINDOW_VOCABULARY).series(
+        {"ind": "highest", "of": {"src": "high"}, "window": "london"},
+        "15m",
+    )
+
+    assert got.loc[idx[2]] == 107.0
+    assert got.loc[idx[3]] == 107.0
+    assert pd.isna(got.loc[idx[4]]) and pd.isna(got.loc[idx[5]])
+    assert got.loc[idx[6]] == 111.0
+
+
+@pytest.mark.parametrize(("node", "expected"), [
+    ({"ind": "highest", "of": {"src": "high"}, "window": "london"}, 9.0),
+    ({"ind": "lowest", "of": {"src": "low"}, "window": "london"}, 1.0),
+    ({"ind": "first", "of": {"op": "+", "args": [{"src": "open"}, 1.0]},
+      "window": "london"}, 3.0),
+    ({"ind": "last", "of": 7.0, "window": "london"}, 7.0),
+], ids=["max-series", "min-series", "first-nested", "last-scalar"])
+def test_window_aggregates_support_every_reducer_and_expression_shape(node, expected):
+    idx = pd.DatetimeIndex([
+        "2026-01-05 08:00", "2026-01-05 12:00", "2026-01-05 16:15",
+        "2026-01-05 16:30",
+    ], tz="UTC")
+    bars = _window_bars(
+        idx,
+        opens=[2, 4, 6, 8],
+        highs=[5, 9, 7, 99],
+        lows=[4, 1, 3, -99],
+        closes=[3, 5, 8, 10],
+    )
+
+    got = FrameEval({"15m": bars}, vocabulary=WINDOW_VOCABULARY).series(
+        node, "15m")
+
+    assert got.loc[idx[-1]] == expected
+
+
+def test_window_aggregate_runs_on_its_selected_frame_then_aligns_to_the_host():
+    hourly_idx = pd.date_range(
+        "2026-01-05 08:00", "2026-01-05 17:00", freq="1h", tz="UTC")
+    hourly = _window_bars(
+        hourly_idx,
+        opens=np.arange(10, dtype=float),
+        highs=[4, 6, 11, 8, 7, 5, 9, 10, 3, 999],
+        lows=np.arange(10, dtype=float),
+        closes=np.arange(10, dtype=float),
+    )
+    host_idx = pd.DatetimeIndex(
+        ["2026-01-05 17:15", "2026-01-05 17:30", "2026-01-05 17:45"],
+        tz="UTC")
+    host = _window_bars(
+        host_idx,
+        opens=[100, 100, 100], highs=[101, 101, 101], lows=[99, 99, 99],
+        closes=[100, 100, 100],
+    )
+    got = FrameEval(
+        {"15m": host, "1h": hourly}, TFS, vocabulary=WINDOW_VOCABULARY,
+    ).series(
+        {"ind": "highest", "of": {"src": "high"}, "tf": "1h",
+         "window": "london"},
+        "15m",
+    )
+
+    assert got.index.equals(host.index)
+    assert got.iloc[:2].isna().all()
+    assert got.iloc[2] == 11.0
+
+
+def test_prior_day_aggregates_session_aligned_daily_rows():
+    idx = pd.date_range("2026-01-05", periods=4, freq="B", tz="UTC")
+    bars = _window_bars(
+        idx,
+        opens=[100, 110, 120, 130],
+        highs=[105, 115, 125, 135],
+        lows=[95, 105, 115, 125],
+        closes=[102, 112, 122, 132],
+    )
+    fe = FrameEval({"1d": bars}, TFS, vocabulary=WINDOW_VOCABULARY)
+
+    high = fe.series(
+        {"ind": "highest", "of": {"src": "high"}, "window": "prior_day"},
+        "1d",
+    )
+    close = fe.series(
+        {"ind": "last", "of": {"src": "close"}, "window": "prior_day"},
+        "1d",
+    )
+
+    assert list(high.iloc[1:]) == [105.0, 115.0, 125.0]
+    assert list(close.iloc[1:]) == [102.0, 112.0, 122.0]
+
+
+def test_screen_spec_evaluates_a_windowed_aggregate_with_its_vocabulary():
+    idx = pd.date_range("2026-01-05", periods=20, freq="B", tz="UTC")
+    bars = _window_bars(
+        idx,
+        opens=[100.0] * 20,
+        highs=list(range(101, 120)) + [200.0],
+        lows=[99.0] * 20,
+        closes=[100.0] * 19 + [125.0],
+    )
+    spec = {"version": 1, "tf": "1d", "conditions": {"all": [
+        {"lhs": {"src": "close"}, "op": ">",
+         "rhs": {"ind": "highest", "of": {"src": "high"},
+                 "window": "prior_day"}},
+    ]}}
+
+    result = run_screen(
+        spec,
+        ["SPY"],
+        MemoryBars({("SPY", "1d"): bars}),
+        now=pd.Timestamp("2026-02-02 22:00", tz="UTC"),
+        vocabulary=WINDOW_VOCABULARY,
+    )
+
+    assert result["errors"] == []
+    assert result["rows"][0]["matched"] is True
+
+
 def test_a_daily_bar_is_invisible_within_its_own_session():
     """Jan 6 rows see Jan 5's daily close, never Jan 6's own.
 
@@ -339,8 +487,8 @@ def test_a_daily_bar_is_invisible_within_its_own_session():
     assert (fe.series({"src": "close", "tf": "1d"}, "15m") == 95.0).all()
 
 
-def test_a_tf_qualified_primitive_evaluates_on_its_native_frame():
-    """prev_session_high[1h] reads the 1h frame, then lands by visibility.
+def test_a_tf_qualified_window_aggregate_evaluates_on_its_native_frame():
+    """A prior-day hourly high reads the 1h frame, then lands by visibility.
 
     The primitive has to see hourly bars to have an hourly answer; evaluating
     it against the driving frame and relabeling would give a 15m answer wearing
@@ -361,8 +509,12 @@ def test_a_tf_qualified_primitive_evaluates_on_its_native_frame():
     frames = {"15m": _hand_bars([100.0] * 8, "2026-01-06 14:30", "15min"),
               "1h": b1h,
               "1d": _hand_bars([95.0, 96.0], "2026-01-05 00:00", "1D")}
-    fe = FrameEval(frames, TFS)
-    out = fe.series({"prim": "prev_session_high", "tf": "1h"}, "15m")
+    fe = FrameEval(frames, TFS, vocabulary=WINDOW_VOCABULARY)
+    out = fe.series(
+        {"ind": "highest", "of": {"src": "high"}, "tf": "1h",
+         "window": "prior_day"},
+        "15m",
+    )
     assert out.index.equals(frames["15m"].index)
     assert (out == 202.0).all()
 

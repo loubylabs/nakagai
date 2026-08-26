@@ -23,13 +23,14 @@ import operator
 import numpy as np
 import pandas as pd
 
-from nakagai.data.schema import DEFAULT_TIMEFRAMES, TimeframeSet
+from nakagai.data.schema import DEFAULT_TIMEFRAMES, TimeframeSet, _is_session_frame
 from nakagai.engine.context import visible_counts
 from nakagai.strategies.rules.primitives import end_anchored_series
 from nakagai.strategies.rules.spec import is_group_node
 from nakagai.strategies.rules.vocabulary import (
     Vocabulary, is_condition_rule, resolve_vocabulary,
 )
+from nakagai.strategies.rules.windows import aggregate_window
 
 
 def _as_series(v, like):
@@ -251,15 +252,24 @@ class FrameEval:
             name = node["ind"]
             term = self.vocabulary.indicators[name]
             a = {**term.defaults,
-                 **{k: v for k, v in node.items() if k not in ("ind", "of", "tf")}}
+                 **{k: v for k, v in node.items()
+                    if k not in ("ind", "of", "tf", "window")}}
             if term.kind == "bar":
                 out = term.fn(frame, a)
             else:
                 of = node.get("of", {"src": "close"})
                 s = self.series(of, src_tf)
-                if isinstance(s, float):
-                    s = pd.Series(s, index=frame.index)
-                out = term.fn(s, a)
+                if not isinstance(s, pd.Series):
+                    s = pd.Series(s, index=frame.index, dtype="float64")
+                if "window" in node:
+                    out = aggregate_window(
+                        s,
+                        self.vocabulary.windows[node["window"]],
+                        term.window_reduce,
+                        session_aligned=_is_session_frame(frame.index),
+                    )
+                else:
+                    out = term.fn(s, a)
             if isinstance(out, pd.DataFrame):
                 out = out[a["field"]]
             return self._align(out, src_tf, tf)

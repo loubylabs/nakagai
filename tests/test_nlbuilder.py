@@ -65,7 +65,7 @@ class FakeClient:
 def test_prompt_renders_registries_and_is_deterministic():
     p1, p2 = render_system_prompt(), render_system_prompt()
     assert p1 == p2
-    for needle in ("crosses_above", "opening_range_high", "bars_since", "supertrend",
+    for needle in ("crosses_above", "gap_pct", "bars_since", "supertrend",
                    "time_stop", "not_expressible", '"version": 2'):
         assert needle in p1, needle
 
@@ -91,7 +91,6 @@ def test_rule_prompt_teaches_opening_range_through_the_window_axis():
         vocabulary=PROMPT_VOCABULARY).split("# Examples", 1)[1]
     assert ('"rhs": {"ind": "highest", "of": {"src": "high"}, '
             '"window": "ny_open_30"}' in examples)
-    assert "opening_range_high" not in examples
 
 
 def _advertised_replies(prompt: str) -> list[dict]:
@@ -150,8 +149,7 @@ def test_prompt_flags_the_primitives_a_daily_spec_cannot_use():
     up front rather than spending a retry on the refusal. day_of_week is not
     flagged: it takes no tf, but on daily bars its reading is exactly right."""
     lines = render_system_prompt().splitlines()
-    for name in ("opening_range_high", "opening_range_low",
-                 "minutes_into_session", "rvol"):
+    for name in ("minutes_into_session", "rvol"):
         line = next(ln for ln in lines if ln.startswith(f"- {name}("))
         assert "intraday spec timeframe" in line, line
     dow = next(ln for ln in lines if ln.startswith("- day_of_week("))

@@ -732,9 +732,8 @@ def reference_bars(sessions: int = 160) -> pd.DataFrame:
     ANCHORED IN EXCHANGE-LOCAL TIME, not at a fixed UTC hour. A frame pinned to
     14:30 UTC is the 09:30 bell only until daylight saving moves, and 160
     sessions from January crosses that boundary in March. Measured: the
-    UTC-pinned version leaves opening_range_high and opening_range_low NaN at
-    every probe row, because the bars no longer start at the open, and the gate
-    reports VACUOUS for terms that are perfectly causal.
+    UTC-pinned version moves the final 15-minute bars outside regular hours,
+    making session-shaped terms exercise a different frame than intended.
     """
     rng = np.random.default_rng(19)
     days = pd.bdate_range("2026-01-05", periods=sessions, tz=EXCHANGE_TZ)

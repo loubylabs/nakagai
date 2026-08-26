@@ -297,14 +297,7 @@ def _prims_in(node, names_allowed) -> set[str]:
 # What a one-bar session does to each primitive that cannot survive it. Said
 # per primitive because the NL compiler retries against this text, and "needs
 # intraday bars" alone gives it nothing to reason with.
-_OPENING_RANGE_PRIMS = frozenset({"opening_range_high", "opening_range_low"})
 _ONE_BAR_SESSION = {
-    "opening_range_high": "the opening-range window is the first few minutes "
-                          "after the 09:30 bell and a whole-session bar cannot "
-                          "sit inside it, so the level is NaN on every bar",
-    "opening_range_low": "the opening-range window is the first few minutes "
-                         "after the 09:30 bell and a whole-session bar cannot "
-                         "sit inside it, so the level is NaN on every bar",
     "minutes_into_session": "every bar sits 0 minutes into its own session",
     "rvol": "every bar shares one clock time, so the same-clock-time baseline "
             "becomes the whole series and this reads as a plain "
@@ -329,25 +322,6 @@ def _one_bar_session(prim: str) -> str:
               "whole-session bar has only one such position")
 
 
-def _check_opening_range_window(item: dict, prim: str, src_tf: str,
-                                path: str, errs: list[str], term) -> None:
-    if prim not in _OPENING_RANGE_PRIMS:
-        return
-    delta = DEFAULT_TIMEFRAMES.deltas.get(src_tf)
-    minutes = item.get("minutes", term.defaults.get("minutes"))
-    bounds = term.args.get("minutes")
-    if delta is None or not is_range_rule(bounds):
-        return
-    if _not_num(minutes, *bounds) or not _canonicalizable(minutes):
-        return
-    bar_minutes = delta.total_seconds() / 60
-    if bar_minutes > minutes:
-        errs.append(
-            f"{path}: {prim} asks for a {_num_text(minutes)}-minute opening range "
-            f"on {src_tf!r} bars, which are {_num_text(bar_minutes)} minutes wide; "
-            "use a finer timeframe or widen minutes")
-
-
 def _check_session_aligned_refs(node, eval_tf: str, path: str,
                                 errs: list[str], vocabulary: Vocabulary) -> None:
     """Refuse what a session-aligned frame cannot answer. Three rules live here.
@@ -365,18 +339,15 @@ def _check_session_aligned_refs(node, eval_tf: str, path: str,
 
     The second: an intraday-only primitive whose EFFECTIVE frame is session
     aligned. That fires whether or not a foreign timeframe is involved, so it
-    reads src_tf rather than comparing it to the parent's. A spec declaring
-    "timeframe": "1d" and using opening_range_high used to validate clean and
-    then read NaN forever; nothing raised, because the only primitive rule was
-    the foreign-`tf` one, which such a spec never trips.
+    reads src_tf rather than comparing it to the parent's.
 
     The first two rules run over two different sets, deliberately: see
     Term.driving_frame_intraday in vocabulary.py on why day_of_week is refused
     a foreign `tf` and welcome on daily bars.
 
-    The third: an opening-range primitive whose requested window is narrower
-    than a fixed intraday bar. Its level cannot be formed from a partial bar,
-    so the width guard reports the mismatch before evaluation.
+    The third: a current window narrower than a fixed intraday bar. Its value
+    cannot be formed from a partial bar, so the width guard reports the
+    mismatch before evaluation.
 
     `eval_tf` follows the evaluator: a node's own `tf` is the frame its
     children are computed on, which is how a bars_since with a tf, or an
@@ -409,8 +380,6 @@ def _check_session_aligned_refs(node, eval_tf: str, path: str,
         # `names` rather than a bare `.get`: an unhashable prim raises out of
         # the lookup, and this walk runs over the caller's whole condition tree.
         term = vocabulary.primitives[prim] if names(prim, vocabulary.primitives) else None
-        if term is not None:
-            _check_opening_range_window(item, prim, src_tf, at, errs, term)
         ind_name = item.get("ind")
         ind_term = (vocabulary.indicators[ind_name]
                     if names(ind_name, vocabulary.indicators) else None)

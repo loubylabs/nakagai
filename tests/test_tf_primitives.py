@@ -93,12 +93,6 @@ def test_describe_renders_tf_suffix():
                       core_vocabulary()) == "swing_high(3)[1h]"
 
 
-def test_validate_rejects_tf_on_session_scoped_prims():
-    errs = validate_spec(_spec({"lhs": {"prim": "opening_range_high", "tf": "1d"},
-                                "op": "<", "rhs": {"src": "close"}}))
-    assert any("opening_range_high is session-scoped and takes no tf" in e for e in errs)
-
-
 def test_validate_rejects_tf_on_rvol():
     """rvol's baseline is the bar's own place in ITS session's volume shape, so
     a foreign frame answers a different question under the same name."""

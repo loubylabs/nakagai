@@ -64,10 +64,7 @@ EVERY_NODE = [
     {"ind": "cci", "n": 20}, {"ind": "mfi", "n": 14}, {"ind": "wpr", "n": 14},
     # `of` routes a series indicator through another node instead of close.
     {"ind": "rsi", "n": 14, "of": {"src": "high"}},
-    {"prim": "opening_range_high", "minutes": 30},
-    {"prim": "opening_range_low", "minutes": 30},
-    {"prim": "prev_session_high"}, {"prim": "prev_session_low"},
-    {"prim": "prev_session_close"}, {"prim": "gap_pct"},
+    {"prim": "gap_pct"},
     {"prim": "swing_high", "k": 3}, {"prim": "swing_low", "k": 3},
     {"prim": "day_of_week"}, {"prim": "minutes_into_session"},
     # A 5-session window rather than the default 20: this frame is 40 sessions
@@ -103,7 +100,6 @@ EVERY_NODE = [
                                                 {"ind": "sma", "n": 10}]}]},
     {"src": "close", "tf": "1h"}, {"ind": "ema", "n": 20, "tf": "1h"},
     {"src": "close", "tf": "1d"}, {"ind": "sma", "n": 5, "tf": "1d"},
-    {"prim": "prev_session_high", "tf": "1h"},
 ]
 
 
@@ -152,7 +148,9 @@ def test_every_node_kind_in_the_grammar_is_covered():
     loud instead.
     """
     vocabulary = core_vocabulary()
-    assert {n["ind"] for n in _nodes_of("ind")} == set(vocabulary.indicators)
+    unwindowed = {name for name, term in vocabulary.indicators.items()
+                  if not term.window_required}
+    assert {n["ind"] for n in _nodes_of("ind")} == unwindowed
     assert {n["prim"] for n in _nodes_of("prim")} == set(vocabulary.primitives)
     assert {n["op"] for n in EVERY_NODE if "op" in n} == set(MATH_OPS)
 

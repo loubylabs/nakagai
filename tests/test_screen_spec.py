@@ -171,49 +171,6 @@ def test_an_intraday_screen_may_reference_a_higher_timeframe():
     assert validate_screen_spec(spec) == []
 
 
-def test_screen_spec_refuses_an_opening_range_shorter_than_its_bar():
-    spec = {"version": 1, "tf": "1h", "conditions": {"all": [
-        {"lhs": {"src": "close"}, "op": ">",
-         "rhs": {"prim": "opening_range_high", "minutes": 30}}]}}
-    errs = validate_screen_spec(spec)
-    assert any("opening_range_high" in error and "30-minute" in error
-               and "'1h'" in error and "60 minutes" in error
-               for error in errs), errs
-
-
-@pytest.mark.parametrize("minutes", [
-    1, 121, float("nan"), float("inf"), float("-inf"), True, "30", None,
-    10 ** 400, -(10 ** 400),
-])
-def test_screen_spec_reports_invalid_opening_range_minutes_only_once(minutes):
-    spec = {"version": 1, "tf": "1h", "conditions": {"all": [
-        {"lhs": {"src": "close"}, "op": ">",
-         "rhs": {"prim": "opening_range_high", "minutes": minutes}}]}}
-    errs = validate_screen_spec(spec)
-    assert len(errs) == 1, errs
-    assert "opening_range_high.minutes must be a number in [5, 120]" in errs[0]
-
-
-def test_screen_spec_rejects_a_huge_injected_opening_range_default():
-    base = core_vocabulary()
-    huge = -(10 ** 400)
-    replacement = Term(
-        "opening_range_high", "primitive",
-        {"minutes": (-(10 ** 401), 10 ** 401)},
-        {"minutes": huge}, lambda *_args: None,
-    )
-    vocabulary = Vocabulary(
-        base.indicators,
-        {**base.primitives, "opening_range_high": replacement},
-    )
-    spec = {"version": 1, "tf": "1h", "conditions": {"all": [
-        {"lhs": {"src": "close"}, "op": ">",
-         "rhs": {"prim": "opening_range_high"}}]}}
-    errs = validate_screen_spec(spec, vocabulary=vocabulary)
-    assert len(errs) == 1, errs
-    assert "opening_range_high.minutes has invalid argument rule" in errs[0]
-
-
 @pytest.mark.parametrize("node", [
     {"prim": "custom_numeric", "n": 10 ** 400},
     {"prim": "custom_numeric"},
@@ -262,67 +219,6 @@ def test_screen_spec_refuses_an_invalid_injected_choice_default():
          "rhs": {"prim": "invalid_choice"}}]}}
     errs = validate_screen_spec(spec, vocabulary=vocabulary)
     assert len(errs) == 1 and "invalid_choice.side default" in errs[0], errs
-
-
-def test_screen_spec_refuses_a_wide_hourly_bar_with_numpy_opening_bounds():
-    base = core_vocabulary()
-    replacement = Term(
-        "opening_range_high", "primitive",
-        {"minutes": (np.int64(5), np.int64(120))}, {"minutes": 30},
-        lambda *_args: None,
-    )
-    vocabulary = Vocabulary(
-        base.indicators,
-        {**base.primitives, "opening_range_high": replacement},
-    )
-    spec = {"version": 1, "tf": "1h", "conditions": {"all": [
-        {"lhs": {"src": "close"}, "op": ">",
-         "rhs": {"prim": "opening_range_high"}}]}}
-    errs = validate_screen_spec(spec, vocabulary=vocabulary)
-    assert any("opening_range_high" in error and "30-minute" in error
-               and "60 minutes" in error for error in errs), errs
-
-
-@pytest.mark.parametrize("node", [
-    {"prim": "opening_range_high", "minutes": np.int64(30)},
-    {"prim": "opening_range_high"},
-], ids=["explicit", "default"])
-def test_screen_spec_rejects_numpy_opening_range_values(node):
-    base = core_vocabulary()
-    replacement = Term(
-        "opening_range_high", "primitive", {"minutes": (5, 120)},
-        {"minutes": np.int64(30)}, lambda *_args: None,
-    )
-    vocabulary = Vocabulary(
-        base.indicators,
-        {**base.primitives, "opening_range_high": replacement},
-    )
-    spec = {"version": 1, "tf": "15m", "conditions": {"all": [
-        {"lhs": {"src": "close"}, "op": ">", "rhs": node}]}}
-    errs = validate_screen_spec(spec, vocabulary=vocabulary)
-    assert len(errs) == 1, errs
-    assert "opening_range_high.minutes must be a number" in errs[0]
-
-
-@pytest.mark.parametrize("node", [
-    {"prim": "opening_range_high", "minutes": np.float64(30.0)},
-    {"prim": "opening_range_high"},
-], ids=["explicit-float", "default-float"])
-def test_screen_spec_rejects_numpy_float_opening_range_values(node):
-    base = core_vocabulary()
-    replacement = Term(
-        "opening_range_high", "primitive", {"minutes": (5, 120)},
-        {"minutes": np.float64(30.0)}, lambda *_args: None,
-    )
-    vocabulary = Vocabulary(
-        base.indicators,
-        {**base.primitives, "opening_range_high": replacement},
-    )
-    spec = {"version": 1, "tf": "15m", "conditions": {"all": [
-        {"lhs": {"src": "close"}, "op": ">", "rhs": node}]}}
-    errs = validate_screen_spec(spec, vocabulary=vocabulary)
-    assert len(errs) == 1, errs
-    assert "opening_range_high.minutes must be a number" in errs[0]
 
 
 @pytest.mark.parametrize("bounds", [

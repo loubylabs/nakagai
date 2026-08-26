@@ -370,16 +370,12 @@ def core_vocabulary() -> Vocabulary:
              PineLowering(pine.emit_bar_call("ta.wpr", "n"))),
     )
     # session_scoped, on the terms below that carry it: these read the driving
-    # frame's own session or calendar structure (session-open windows, elapsed
+    # frame's own session or calendar structure (elapsed
     # session minutes, a bar's place in the session's volume shape, the bar's
     # calendar weekday) rather than plain OHLCV structure. Feeding them a `tf`
     # swaps in a different frame's bars, which silently degenerates:
-    # opening_range_* on "1d" bars (one bar per session) has no bar inside its
-    # window at all and is NaN forever, and on "1h" bars the window runs from
-    # the 09:30 bell while the labels run from the top of the hour, so a
-    # minutes=30 window holds nothing and a wider one holds a ragged part of
-    # what the spec asked for; minutes_into_session on "1d" bars is 0
-    # everywhere (one row is the whole session); rvol on "1d" bars has one bar
+    # minutes_into_session on "1d" bars is 0 everywhere (one row is the whole
+    # session); rvol on "1d" bars has one bar
     # per session, so its same-clock-time bucket is the whole series and the
     # primitive quietly becomes a plain trailing-median volume ratio, a
     # different measurement wearing the same name, while on "1h" bars the
@@ -392,34 +388,12 @@ def core_vocabulary() -> Vocabulary:
     #
     # driving_frame_intraday is the SECOND rule and a second set: what a
     # session-aligned driving frame cannot answer at all, because there one bar
-    # IS the whole session. The opening-range window is minutes wide and that
-    # one bar cannot sit inside it (NaN forever), minutes_into_session is 0 on
-    # every bar, and rvol's same-clock-time bucket becomes the entire series.
+    # IS the whole session. minutes_into_session is 0 on every bar, and rvol's
+    # same-clock-time bucket becomes the entire series.
     # session_scoped is the right set for the foreign-`tf` rule and the WRONG
     # set for this one, which is why the two flags do not track each other; see
     # day_of_week and rvol.
     primitives = (
-        _primitive("opening_range_high", {"minutes": (5, 120)}, {"minutes": 30},
-                   prim.opening_range_high,
-                   PineLowering(pine.emit_primitive(pine.OPENING_RANGE_HIGH,
-                                                    "minutes"),
-                                helpers=(pine.OPENING_RANGE_HIGH,)),
-                   session_scoped=True, driving_frame_intraday=True),
-        _primitive("opening_range_low", {"minutes": (5, 120)}, {"minutes": 30},
-                   prim.opening_range_low,
-                   PineLowering(pine.emit_primitive(pine.OPENING_RANGE_LOW,
-                                                    "minutes"),
-                                helpers=(pine.OPENING_RANGE_LOW,)),
-                   session_scoped=True, driving_frame_intraday=True),
-        _primitive("prev_session_high", {}, {}, prim.prev_session_high,
-                   PineLowering(pine.emit_primitive(pine.PREV_SESSION_HIGH),
-                                helpers=(pine.PREV_SESSION_HIGH,))),
-        _primitive("prev_session_low", {}, {}, prim.prev_session_low,
-                   PineLowering(pine.emit_primitive(pine.PREV_SESSION_LOW),
-                                helpers=(pine.PREV_SESSION_LOW,))),
-        _primitive("prev_session_close", {}, {}, prim.prev_session_close,
-                   PineLowering(pine.emit_primitive(pine.PREV_SESSION_CLOSE),
-                                helpers=(pine.PREV_SESSION_CLOSE,))),
         _primitive("gap_pct", {}, {}, prim.gap_pct,
                    PineLowering(pine.emit_primitive(pine.GAP_PCT),
                                 helpers=(pine.GAP_PCT,))),
