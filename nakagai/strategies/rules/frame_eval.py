@@ -19,6 +19,7 @@ Two node kinds need care and both are handled here rather than by the caller:
 import functools
 import json
 import operator
+from collections.abc import Mapping
 
 import numpy as np
 import pandas as pd
@@ -129,7 +130,8 @@ def _cross_prev(node, v: pd.Series, vocabulary: Vocabulary) -> pd.Series:
 class FrameEval:
     """Replay-scoped expression cache over pair-keyed market frames."""
 
-    def __init__(self, driving_symbol: str, frames: dict,
+    def __init__(self, driving_symbol: str,
+                 frames: Mapping[tuple[str, str], pd.DataFrame],
                  tfs: TimeframeSet = DEFAULT_TIMEFRAMES, *,
                  vocabulary: Vocabulary | None = None):
         bad = [key for key in frames
@@ -140,7 +142,7 @@ class FrameEval:
                 "FrameEval frames must be pair-keyed as (symbol, timeframe); "
                 f"invalid keys: {bad!r}")
         self.driving_symbol = driving_symbol
-        self._frames = dict(frames)
+        self._frames = frames
         self.tfs = tfs
         self.vocabulary = resolve_vocabulary(vocabulary)
         self._cache: dict = {}

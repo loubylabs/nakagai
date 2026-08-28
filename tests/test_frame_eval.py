@@ -1,5 +1,6 @@
 """FrameEval: whole-frame node values that agree with prefix evaluation."""
 
+from collections.abc import Iterator, Mapping
 from datetime import time
 
 import numpy as np
@@ -9,7 +10,7 @@ import pytest
 from nakagai.data.schema import DEFAULT_TIMEFRAMES as TFS
 from nakagai.engine.context import closed_before
 from nakagai.strategies.indicators import crossed_above
-from nakagai.strategies.rules.frame_eval import FrameEval as _FrameEval
+from nakagai.strategies.rules.frame_eval import FrameEval
 from nakagai.strategies.rules.vocabulary import Term, core_vocabulary
 from nakagai.strategies.rules.windows import PRIOR_DAY, WindowSpec
 from tests.whole_frame_oracle import prefix_value
@@ -30,16 +31,6 @@ NODES = [
 ]
 
 
-def FrameEval(frames, tfs=TFS, *, vocabulary=None, driving_symbol="SPY"):
-    """Build the pair-only evaluator for the legacy single-symbol fixtures."""
-    return _FrameEval(
-        driving_symbol,
-        {(driving_symbol, tf): frame for tf, frame in frames.items()},
-        tfs,
-        vocabulary=vocabulary,
-    )
-
-
 def _frames(n=400):
     rng = np.random.default_rng(11)
     idx = pd.date_range("2026-01-05 14:30", periods=n, freq="15min", tz="UTC")
@@ -50,28 +41,33 @@ def _frames(n=400):
                                   "close": "last", "volume": "sum"}).dropna()
     b1d = b15.resample("1D").agg({"open": "first", "high": "max", "low": "min",
                                   "close": "last", "volume": "sum"}).dropna()
-    return {"15m": b15, "1h": b1h, "1d": b1d}
+    return {
+        ("SPY", "15m"): b15,
+        ("SPY", "1h"): b1h,
+        ("SPY", "1d"): b1d,
+    }
 
 
 @pytest.mark.parametrize("node", NODES, ids=lambda n: str(n))
 def test_whole_frame_row_equals_prefix_last_row(node):
     frames = _frames()
-    fe = FrameEval(frames, TFS)
+    fe = FrameEval("SPY", frames, TFS)
     whole = fe.series(node, "15m")
-    driving = frames["15m"]
+    driving = frames[("SPY", "15m")]
     for i in (120, 200, 311, len(driving) - 1):
         now = driving.index[i] + TFS.step
-        want = prefix_value(node, frames, "15m", now, TFS)
+        want = prefix_value(node, frames, "SPY", "15m", now, TFS)
         got = float(whole.iloc[i]) if isinstance(whole, pd.Series) else float(whole)
         assert (pd.isna(got) and pd.isna(want)) or got == want, f"row {i}"
 
 
 def test_cross_timeframe_node_never_sees_an_unclosed_bar():
     frames = _frames()
-    fe = FrameEval(frames, TFS)
+    fe = FrameEval("SPY", frames, TFS)
     node = {"src": "close", "tf": "1h"}
     got = fe.series(node, "15m")
-    driving, hourly = frames["15m"], frames["1h"]
+    driving = frames[("SPY", "15m")]
+    hourly = frames[("SPY", "1h")]
     for i in range(80, len(driving)):
         now = driving.index[i] + TFS.step
         visible = hourly[hourly.index + TFS.deltas["1h"] <= now]
@@ -88,15 +84,16 @@ def test_nothing_visible_yet_is_nan_not_the_last_bar():
     That is the worst-shaped lookahead bug there is: silent, and profitable.
     """
     frames = _frames()
-    fe = FrameEval(frames, TFS)
+    fe = FrameEval("SPY", frames, TFS)
     got = fe.series({"src": "close", "tf": "1d"}, "15m")
-    driving = frames["15m"]
+    driving = frames[("SPY", "15m")]
     blind = [i for i in range(len(driving))
-             if not len(closed_before(frames["1d"], "1d",
+             if not len(closed_before(frames[("SPY", "1d")], "1d",
                                       driving.index[i] + TFS.step, TFS))]
     assert blind, "fixture must contain rows with no closed daily bar yet"
     assert got.iloc[blind].isna().all()
-    assert not (got.iloc[blind] == frames["1d"]["close"].iloc[-1]).any()
+    assert not (got.iloc[blind]
+                == frames[("SPY", "1d")]["close"].iloc[-1]).any()
     seeing = [i for i in range(len(driving)) if i not in set(blind)]
     assert got.iloc[seeing].notna().all(), "the visible rows must still carry a value"
 
@@ -114,12 +111,12 @@ def test_end_anchored_primitive_matches_prefix_over_its_span(node):
     is computed on its own full prefix, so the span needs no warm-up margin, and
     a margin would only cost calls no reader can reach."""
     frames = _frames()
-    fe = FrameEval(frames, TFS)
+    fe = FrameEval("SPY", frames, TFS)
     fe.set_span("SPY", "15m", 300, 340)
     got = fe.series(node, "15m")
     for i in range(300, 340):
-        now = frames["15m"].index[i] + TFS.step
-        want = prefix_value(node, frames, "15m", now, TFS)
+        now = frames[("SPY", "15m")].index[i] + TFS.step
+        want = prefix_value(node, frames, "SPY", "15m", now, TFS)
         assert (pd.isna(got.iloc[i]) and pd.isna(want)) or got.iloc[i] == want, f"row {i}"
     assert got.iloc[:300].isna().all()
     assert got.iloc[340:].isna().all()
@@ -139,9 +136,9 @@ def test_a_point_in_time_span_walks_one_row_not_the_whole_frame(monkeypatch):
     hundred rows, where the cost is invisible, so assert the row COUNT.
     """
     frames = _frames(900)
-    now = frames["15m"].index[-1] + TFS.step
+    now = frames[("SPY", "15m")].index[-1] + TFS.step
     node = {"prim": "fvg_nearest", "direction": "long", "field": "top"}
-    want = prefix_value(node, frames, "15m", now, TFS)
+    want = prefix_value(node, frames, "SPY", "15m", now, TFS)
 
     calls = []
     base = core_vocabulary()
@@ -156,20 +153,20 @@ def test_a_point_in_time_span_walks_one_row_not_the_whole_frame(monkeypatch):
     vocabulary = type(base)(
         {term.name: term for term in terms if term.kind != "primitive"},
         {term.name: term for term in terms if term.kind == "primitive"})
-    pair_frames = {("SPY", tf): frame for tf, frame in frames.items()}
-    fe = _FrameEval("SPY", pair_frames, TFS, vocabulary=vocabulary)
-    for (symbol, tf), frame in pair_frames.items():
+    fe = FrameEval("SPY", frames, TFS, vocabulary=vocabulary)
+    for (symbol, tf), frame in frames.items():
         fe.set_span(symbol, tf, max(len(frame) - 1, 0), len(frame))
     got = float(fe.series(node, "15m").iloc[-1])
 
     assert len(calls) == 1, (
-        f"walked {len(calls)} rows of a {len(frames['15m'])}-row frame; "
+        f"walked {len(calls)} rows of a "
+        f"{len(frames[('SPY', '15m')])}-row frame; "
         "a point-in-time context can only read the last one")
     assert (pd.isna(got) and pd.isna(want)) or got == want
 
 
 def test_series_is_memoized_per_node():
-    fe = FrameEval(_frames(), TFS)
+    fe = FrameEval("SPY", _frames(), TFS)
     a = fe.series({"ind": "sma", "n": 20}, "15m")
     b = fe.series({"ind": "sma", "n": 20}, "15m")
     assert a is b
@@ -185,7 +182,7 @@ def test_moving_the_span_after_a_node_is_cached_is_refused():
     built for a single span.
     """
     frames = _frames()
-    fe = FrameEval(frames, TFS)
+    fe = FrameEval("SPY", frames, TFS)
     fe.set_span("SPY", "15m", 300, 340)
     fe.series({"prim": "fvg_nearest", "direction": "long", "field": "top"}, "15m")
     with pytest.raises(ValueError, match="span moved"):
@@ -195,7 +192,7 @@ def test_moving_the_span_after_a_node_is_cached_is_refused():
 def test_declaring_a_span_after_the_default_was_used_is_refused():
     """The whole-frame default is a span too, and a node computed under it is
     just as stale once a real one is declared."""
-    fe = FrameEval(_frames(), TFS)
+    fe = FrameEval("SPY", _frames(), TFS)
     fe.series({"ind": "sma", "n": 20}, "15m")
     with pytest.raises(ValueError, match="span moved"):
         fe.set_span("SPY", "15m", 100, 200)
@@ -206,11 +203,11 @@ def test_restating_the_same_span_is_allowed():
     changes nothing, and refusing it would make set_span order-sensitive for no
     reason."""
     frames = _frames()
-    fe = FrameEval(frames, TFS)
+    fe = FrameEval("SPY", frames, TFS)
     fe.set_span("SPY", "15m", 300, 340)
     fe.series({"ind": "sma", "n": 20}, "15m")
     fe.set_span("SPY", "15m", 300, 340)
-    fe.set_span("SPY", "1h", 0, len(frames["1h"]))
+    fe.set_span("SPY", "1h", 0, len(frames[("SPY", "1h")]))
     assert fe._span(("SPY", "15m")) == (300, 340)
 
 
@@ -224,21 +221,22 @@ def test_memo_key_separates_evaluation_timeframes():
     be off by whatever the two indexes disagree about.
     """
     frames = _frames()
-    fe = FrameEval(frames, TFS)
+    fe = FrameEval("SPY", frames, TFS)
     node = {"src": "close"}
     at15, at1h = fe.series(node, "15m"), fe.series(node, "1h")
     assert at15 is not at1h
     assert not at15.index.equals(at1h.index)
-    assert at15.index.equals(frames["15m"].index)
-    assert at1h.index.equals(frames["1h"].index)
+    assert at15.index.equals(frames[("SPY", "15m")].index)
+    assert at1h.index.equals(frames[("SPY", "1h")].index)
 
 
 def _closes(values) -> dict:
     idx = pd.date_range("2026-01-05 14:30", periods=len(values), freq="15min",
                         tz="UTC")
     c = pd.Series(values, index=idx, dtype="float64")
-    return {"15m": pd.DataFrame({"open": c, "high": c + 0.5, "low": c - 0.5,
-                                 "close": c, "volume": 1000.0}, index=idx)}
+    return {("SPY", "15m"): pd.DataFrame(
+        {"open": c, "high": c + 0.5, "low": c - 0.5,
+         "close": c, "volume": 1000.0}, index=idx)}
 
 
 def test_cross_reads_the_bar_before_never_the_bar_after():
@@ -249,13 +247,13 @@ def test_cross_reads_the_bar_before_never_the_bar_after():
     NEXT bar, which is lookahead that no metric would flag.
     """
     frames = _closes([1.0, 2.0, 4.0, 5.0, 2.0, 6.0])
-    fe = FrameEval(frames, TFS)
+    fe = FrameEval("SPY", frames, TFS)
     cond = {"lhs": {"src": "close"}, "op": "crosses_above", "rhs": 3.0}
     got = fe.condition_series(cond, "15m")
     assert got.dtype == bool
     assert list(got) == [False, False, True, False, False, True]
 
-    close = frames["15m"]["close"]
+    close = frames[("SPY", "15m")]["close"]
     for i in range(len(close)):
         assert bool(got.iloc[i]) == crossed_above(close.iloc[: i + 1], 3.0), \
             f"row {i} disagrees with the prefix-and-iloc[-2] semantics"
@@ -263,7 +261,7 @@ def test_cross_reads_the_bar_before_never_the_bar_after():
 
 def test_cross_below_reads_the_bar_before():
     frames = _closes([6.0, 5.0, 2.0, 1.0, 4.0, 1.0])
-    fe = FrameEval(frames, TFS)
+    fe = FrameEval("SPY", frames, TFS)
     cond = {"lhs": {"src": "close"}, "op": "crosses_below", "rhs": 3.0}
     got = fe.condition_series(cond, "15m")
     assert list(got) == [False, False, True, False, False, True]
@@ -280,21 +278,23 @@ def test_cross_against_an_end_anchored_level_keeps_the_scalar_broadcast():
     give, and it must not match.
     """
     frames = _frames()
-    fe = FrameEval(frames, TFS)
+    fe = FrameEval("SPY", frames, TFS)
     lo, hi = 200, 400
     fe.set_span("SPY", "15m", lo, hi)
     node = {"prim": "fvg_nearest", "direction": "long", "field": "top"}
     got = fe.condition_series(
         {"lhs": {"src": "close"}, "op": "crosses_above", "rhs": node}, "15m")
 
-    driving, level = frames["15m"], fe.series(node, "15m")
+    driving = frames[("SPY", "15m")]
+    level = fe.series(node, "15m")
     close = driving["close"]
     want, shifted = [], []
     for i in range(lo, hi):
         now = driving.index[i] + TFS.step
         prefix = closed_before(driving, "15m", now, TFS)
         want.append(bool(crossed_above(
-            prefix["close"], prefix_value(node, frames, "15m", now, TFS))))
+            prefix["close"],
+            prefix_value(node, frames, "SPY", "15m", now, TFS))))
         shifted.append(bool(close.iloc[i - 1] <= level.iloc[i - 1]
                             and close.iloc[i] > level.iloc[i]))
     assert [bool(v) for v in got.iloc[lo:hi]] == want
@@ -312,15 +312,15 @@ def test_a_higher_timeframe_condition_is_false_until_its_bar_has_closed():
     for every row of the opening blind window.
     """
     frames = _frames()
-    frames["1h"] = frames["1h"].iloc[8:]
-    fe = FrameEval(frames, TFS)
+    frames[("SPY", "1h")] = frames[("SPY", "1h")].iloc[8:]
+    fe = FrameEval("SPY", frames, TFS)
     group = {"all": [{"lhs": {"src": "close"}, "op": ">", "rhs": 0.0},
                      {"lhs": {"src": "high"}, "op": ">=", "rhs": {"src": "low"}}]}
     out = fe.driving_group(group, "1h")
 
-    driving = frames["15m"]
+    driving = frames[("SPY", "15m")]
     blind = [i for i in range(len(driving))
-             if not len(closed_before(frames["1h"], "1h",
+             if not len(closed_before(frames[("SPY", "1h")], "1h",
                                       driving.index[i] + TFS.step, TFS))]
     assert len(blind) > 8, "fixture must open with a real blind window"
     assert out.dtype == bool
@@ -363,7 +363,9 @@ def test_london_high_needs_no_london_term_and_obeys_the_window_lifecycle():
         lows=[99, 100, 101, 102, 103, 104, 105],
         closes=[100, 101, 102, 103, 104, 105, 106],
     )
-    got = FrameEval({"15m": bars}, vocabulary=WINDOW_VOCABULARY).series(
+    got = FrameEval(
+        "SPY", {("SPY", "15m"): bars}, vocabulary=WINDOW_VOCABULARY,
+    ).series(
         {"ind": "highest", "of": {"src": "high"}, "window": "london"},
         "15m",
     )
@@ -394,7 +396,9 @@ def test_window_aggregates_support_every_reducer_and_expression_shape(node, expe
         closes=[3, 5, 8, 10],
     )
 
-    got = FrameEval({"15m": bars}, vocabulary=WINDOW_VOCABULARY).series(
+    got = FrameEval(
+        "SPY", {("SPY", "15m"): bars}, vocabulary=WINDOW_VOCABULARY,
+    ).series(
         node, "15m")
 
     assert got.loc[idx[-1]] == expected
@@ -419,7 +423,10 @@ def test_window_aggregate_runs_on_its_selected_frame_then_aligns_to_the_host():
         closes=[100, 100, 100],
     )
     got = FrameEval(
-        {"15m": host, "1h": hourly}, TFS, vocabulary=WINDOW_VOCABULARY,
+        "SPY",
+        {("SPY", "15m"): host, ("SPY", "1h"): hourly},
+        TFS,
+        vocabulary=WINDOW_VOCABULARY,
     ).series(
         {"ind": "highest", "of": {"src": "high"}, "tf": "1h",
          "window": "london"},
@@ -440,7 +447,10 @@ def test_prior_day_aggregates_session_aligned_daily_rows():
         lows=[95, 105, 115, 125],
         closes=[102, 112, 122, 132],
     )
-    fe = FrameEval({"1d": bars}, TFS, vocabulary=WINDOW_VOCABULARY)
+    fe = FrameEval(
+        "SPY", {("SPY", "1d"): bars}, TFS,
+        vocabulary=WINDOW_VOCABULARY,
+    )
 
     high = fe.series(
         {"ind": "highest", "of": {"src": "high"}, "window": "prior_day"},
@@ -469,7 +479,7 @@ def test_daily_group_evaluates_a_windowed_aggregate_with_its_vocabulary():
          "rhs": {"ind": "highest", "of": {"src": "high"},
                  "window": "prior_day"}},
     ]}
-    evaluator = _FrameEval(
+    evaluator = FrameEval(
         "SPY",
         {("SPY", "1d"): bars},
         TFS,
@@ -487,10 +497,15 @@ def test_a_daily_bar_is_invisible_within_its_own_session():
     it is still living through. That is the sharpest lookahead the grammar can
     express, and the one a session-aligned visibility rule exists to refuse.
     """
-    frames = {"15m": _hand_bars([100.0] * 26, "2026-01-06 14:30", "15min"),
-              "1h": _hand_bars([100.0] * 8, "2026-01-06 14:00", "1h"),
-              "1d": _hand_bars([95.0, 96.0], "2026-01-05 00:00", "1D")}
-    fe = FrameEval(frames, TFS)
+    frames = {
+        ("SPY", "15m"): _hand_bars(
+            [100.0] * 26, "2026-01-06 14:30", "15min"),
+        ("SPY", "1h"): _hand_bars(
+            [100.0] * 8, "2026-01-06 14:00", "1h"),
+        ("SPY", "1d"): _hand_bars(
+            [95.0, 96.0], "2026-01-05 00:00", "1D"),
+    }
+    fe = FrameEval("SPY", frames, TFS)
     assert (fe.series({"src": "close", "tf": "1d"}, "15m") == 95.0).all()
 
 
@@ -513,23 +528,27 @@ def test_a_tf_qualified_window_aggregate_evaluates_on_its_native_frame():
     """
     b1h = pd.concat([_hand_bars([199.5, 201.5], "2026-01-05 15:00", "1h"),
                      _hand_bars([190.0, 191.0], "2026-01-06 13:00", "1h")])
-    frames = {"15m": _hand_bars([100.0] * 8, "2026-01-06 14:30", "15min"),
-              "1h": b1h,
-              "1d": _hand_bars([95.0, 96.0], "2026-01-05 00:00", "1D")}
-    fe = FrameEval(frames, TFS, vocabulary=WINDOW_VOCABULARY)
+    frames = {
+        ("SPY", "15m"): _hand_bars(
+            [100.0] * 8, "2026-01-06 14:30", "15min"),
+        ("SPY", "1h"): b1h,
+        ("SPY", "1d"): _hand_bars(
+            [95.0, 96.0], "2026-01-05 00:00", "1D"),
+    }
+    fe = FrameEval("SPY", frames, TFS, vocabulary=WINDOW_VOCABULARY)
     out = fe.series(
         {"ind": "highest", "of": {"src": "high"}, "tf": "1h",
          "window": "prior_day"},
         "15m",
     )
-    assert out.index.equals(frames["15m"].index)
+    assert out.index.equals(frames[("SPY", "15m")].index)
     assert (out == 202.0).all()
 
 
 def test_session_aligned_destination_timeframe_is_refused():
     """A daily bar's label carries no close time, so its visibility cutoff
     would have to be guessed. _positions refuses rather than guess."""
-    fe = FrameEval(_frames(), TFS)
+    fe = FrameEval("SPY", _frames(), TFS)
     with pytest.raises(ValueError, match="session-aligned"):
         fe.series({"src": "close", "tf": "15m"}, "1d")
 
@@ -550,10 +569,14 @@ def _kleene_frames():
     """15m with one row, plus an EMPTY 1h frame. A reference to 1h is then
     unknown on every row, which is how pd.NA is manufactured for the table
     without a second code path."""
-    return {**_closes([1.0]),
-            "1h": pd.DataFrame({"open": [], "high": [], "low": [], "close": [],
-                                "volume": []},
-                               index=pd.DatetimeIndex([], tz="UTC"))}
+    return {
+        **_closes([1.0]),
+        ("SPY", "1h"): pd.DataFrame(
+            {"open": [], "high": [], "low": [], "close": [],
+             "volume": []},
+            index=pd.DatetimeIndex([], tz="UTC"),
+        ),
+    }
 
 
 def _kleene_group(key, operands):
@@ -571,7 +594,7 @@ def test_the_private_reducer_matches_the_eight_row_kleene_table(key, operands, w
     """D8's table, asserted against the private reducer, which is where Kleene
     lives (N3-D4). Asserting it against group_series would be a different and
     wrong test: that method resolves unknown to False."""
-    fe = FrameEval(_kleene_frames(), TFS)
+    fe = FrameEval("SPY", _kleene_frames(), TFS)
     got = fe._group_reduce_na(
         _kleene_group(key, operands), "SPY", "15m").iloc[0]
     if want is pd.NA:
@@ -585,7 +608,7 @@ def test_the_private_reducer_carries_the_nullable_dtype_not_plain_bool():
     """The representation itself (N3-D1). A reducer that resolved unknown
     early would still satisfy the two `all` rows above by accident on a
     single-row frame; this pins the dtype the table is read from."""
-    fe = FrameEval(_kleene_frames(), TFS)
+    fe = FrameEval("SPY", _kleene_frames(), TFS)
     out = fe._group_reduce_na(
         _kleene_group("all", [True, pd.NA]), "SPY", "15m")
     assert out.dtype == pd.BooleanDtype()
@@ -594,7 +617,7 @@ def test_the_private_reducer_carries_the_nullable_dtype_not_plain_bool():
 def test_group_series_resolves_an_unknown_reducer_result_to_false_and_bool():
     """Acceptance item 4's public half, and item 8. The SAME group whose
     reducer result is NA reads False, dtype bool, at the boundary."""
-    fe = FrameEval(_kleene_frames(), TFS)
+    fe = FrameEval("SPY", _kleene_frames(), TFS)
     group = _kleene_group("all", [True, pd.NA])
     assert pd.isna(fe._group_reduce_na(group, "SPY", "15m").iloc[0])
     out = fe.group_series(group, "15m")
@@ -606,8 +629,8 @@ def test_driving_group_stays_bool_over_an_unknown_group():
     """Acceptance item 8 for the other public reader. pd.NA reaching this
     return value raises TypeError in every one of its three call sites."""
     frames = _frames()
-    frames["1h"] = frames["1h"].iloc[8:]
-    fe = FrameEval(frames, TFS)
+    frames[("SPY", "1h")] = frames[("SPY", "1h")].iloc[8:]
+    fe = FrameEval("SPY", frames, TFS)
     group = {"all": [{"lhs": {"src": "close", "tf": "1h"}, "op": ">",
                       "rhs": -1.0}]}
     out = fe.driving_group(group, "15m")
@@ -623,8 +646,8 @@ def test_condition_series_resolves_an_unknown_operand_to_false_and_stays_bool():
     NA one level down and False here.
     """
     frames = _frames()
-    frames["1h"] = frames["1h"].iloc[8:]
-    fe = FrameEval(frames, TFS)
+    frames[("SPY", "1h")] = frames[("SPY", "1h")].iloc[8:]
+    fe = FrameEval("SPY", frames, TFS)
     cond = {"lhs": {"src": "close", "tf": "1h"}, "op": ">", "rhs": -1.0}
     blind = [i for i, v in enumerate(fe.series(cond["lhs"], "15m").isna()) if v]
     assert len(blind) > 8, "fixture must open with a real blind window"
@@ -651,7 +674,7 @@ def test_not_over_a_warming_indicator_does_not_fire_on_the_first_bars():
                       index=idx)
     bars = pd.DataFrame({"open": close, "high": close + 0.2, "low": close - 0.2,
                          "close": close, "volume": 1000.0}, index=idx)
-    fe = FrameEval({"15m": bars}, TFS)
+    fe = FrameEval("SPY", {("SPY", "15m"): bars}, TFS)
     sma = {"ind": "sma", "n": 20}
     assert fe.series(sma, "15m").iloc[:19].isna().all(), \
         "fixture must open with rows where the indicator is still warming"
@@ -695,7 +718,7 @@ def test_a_not_nested_as_an_item_of_a_list_is_recognized_as_a_group():
     everywhere would make this test fail for that reason instead of for its
     own.
     """
-    fe = FrameEval(_frames(), TFS)
+    fe = FrameEval("SPY", _frames(), TFS)
     x = {"lhs": {"src": "close"}, "op": ">", "rhs": {"ind": "sma", "n": 5}}
     y = {"lhs": {"src": "close"}, "op": ">", "rhs": {"ind": "sma", "n": 20}}
     nested = {"all": [x, {"not": {"all": [y]}}]}
@@ -727,8 +750,8 @@ def test_not_over_a_not_yet_closed_higher_timeframe_operand_does_not_fire():
     explicitly not what this is aimed at.
     """
     frames = _frames()
-    frames["1h"] = frames["1h"].iloc[8:]
-    fe = FrameEval(frames, TFS)
+    frames[("SPY", "1h")] = frames[("SPY", "1h")].iloc[8:]
+    fe = FrameEval("SPY", frames, TFS)
     operand = {"src": "close", "tf": "1h"}
     blind = [i for i, v in enumerate(fe.series(operand, "15m").isna()) if v]
     assert len(blind) > 8, "fixture must open with a real blind window"
@@ -743,7 +766,7 @@ def test_not_over_a_not_yet_closed_higher_timeframe_operand_does_not_fire():
 
 def test_not_evaluates_to_kleene_negation():
     frames = _closes([1.0, 2.0, 4.0, 5.0, 2.0, 6.0])
-    fe = FrameEval(frames, TFS)
+    fe = FrameEval("SPY", frames, TFS)
     group = {"not": {"any": [
         {"lhs": {"src": "close"}, "op": ">", "rhs": 1000.0},
         {"lhs": {"src": "close"}, "op": "<", "rhs": -1000.0}]}}
@@ -772,7 +795,7 @@ def test_double_negation_evaluates_to_the_original_group():
     collapsed NA to False anywhere in the pair round-trips True and False
     correctly and fails only here.
     """
-    fe = FrameEval(_frames(), TFS)
+    fe = FrameEval("SPY", _frames(), TFS)
     inner = {"all": [_WARMING]}
     base = fe._group_reduce_na(inner, "SPY", "15m")
     once = fe._group_reduce_na({"not": inner}, "SPY", "15m")
@@ -792,7 +815,7 @@ def test_double_negation_evaluates_to_the_original_group():
 def test_double_negation_is_bool_at_the_public_boundary():
     """N3-D4 still holds through a nested negation: the private reducer is
     nullable, group_series is not."""
-    fe = FrameEval(_frames(), TFS)
+    fe = FrameEval("SPY", _frames(), TFS)
     out = fe.group_series({"not": {"not": {"all": [_WARMING]}}}, "15m")
     assert out.dtype == bool
 
@@ -815,7 +838,7 @@ def _pair_frame(values, *, start="2026-01-05 14:30", freq="15min"):
 def test_pair_constructor_refuses_timeframe_only_keys():
     bars = _pair_frame([1.0, 2.0])
     with pytest.raises(TypeError, match="pair-keyed"):
-        _FrameEval("AAPL", {"15m": bars}, TFS)
+        FrameEval("AAPL", {"15m": bars}, TFS)
 
 
 def test_symbol_scope_is_lexical_for_sources_indicators_primitives_and_math():
@@ -829,7 +852,7 @@ def test_symbol_scope_is_lexical_for_sources_indicators_primitives_and_math():
         ("SPY", "15m"): spy,
         ("QQQ", "15m"): qqq,
     }
-    fe = _FrameEval("AAPL", frames, TFS)
+    fe = FrameEval("AAPL", frames, TFS)
 
     source = fe.series({"src": "close", "sym": "SPY"}, "15m")
     indicator = fe.series(
@@ -865,7 +888,7 @@ def test_pair_cache_keeps_same_implicit_child_isolated_by_host_symbol():
     aapl = _pair_frame([10, 11, 12, 13])
     spy = _pair_frame([20, 21, 22, 23])
     qqq = _pair_frame([2, 4, 6, 8])
-    fe = _FrameEval(
+    fe = FrameEval(
         "AAPL",
         {
             ("AAPL", "15m"): aapl,
@@ -892,7 +915,7 @@ def test_symbol_timeframe_and_window_select_one_native_pair_before_lifting():
         start="2026-01-05 08:00",
         freq="1h",
     )
-    fe = _FrameEval(
+    fe = FrameEval(
         "AAPL",
         {("AAPL", "15m"): aapl, ("QQQ", "1h"): qqq},
         TFS,
@@ -915,10 +938,10 @@ def test_symbol_timeframe_and_window_select_one_native_pair_before_lifting():
 
 
 def test_outer_ema_masks_a_missing_descendant_then_recovers():
-    aapl = _pair_frame([100, 101, 102, 103, 104, 105])
-    spy = _pair_frame([10, 11, 12, 13, 14, 15])
-    qqq = _pair_frame([1, 2, np.nan, 4, 5, 6])
-    fe = _FrameEval(
+    aapl = _pair_frame([100, 101, 102, 103, 104])
+    spy = _pair_frame([10, 11, 12, 13, 14])
+    qqq = _pair_frame([1.0, 2.0, 3.0, np.nan, 5.0])
+    fe = FrameEval(
         "AAPL",
         {
             ("AAPL", "15m"): aapl,
@@ -935,14 +958,15 @@ def test_outer_ema_masks_a_missing_descendant_then_recovers():
     }
 
     out = fe.series(node, "15m")
-    term = core_vocabulary().indicators["ema"]
-    calculated = term.fn(qqq["close"], {"n": 2})
-    want = calculated.mask(qqq.isna().all(axis=1))
+    want = np.array([
+        np.nan,
+        1.6666666666666665,
+        2.5555555555555554,
+        np.nan,
+        4.65079365079365,
+    ])
 
-    assert out.equals(want)
-    assert pd.isna(out.iloc[2])
-    assert out.iloc[3] == calculated.iloc[3]
-    assert pd.notna(out.iloc[3])
+    np.testing.assert_array_equal(out.to_numpy(), want)
 
 
 @pytest.mark.parametrize("node", [
@@ -954,7 +978,7 @@ def test_outer_ema_masks_a_missing_descendant_then_recovers():
 def test_every_expression_kind_masks_an_absent_pair_observation(node):
     aapl = _pair_frame([10, 11, 12, 13, 14])
     spy = _pair_frame([20, 21, np.nan, 23, 24])
-    fe = _FrameEval(
+    fe = FrameEval(
         "AAPL",
         {("AAPL", "15m"): aapl, ("SPY", "15m"): spy},
         TFS,
@@ -970,7 +994,7 @@ def test_condition_typed_primitive_inherits_and_overrides_symbol_scope():
     aapl = _pair_frame([10, 11, 12, 13])
     spy = _pair_frame([20, 21, 22, 23])
     qqq = _pair_frame([1, 3, 2, 4])
-    fe = _FrameEval(
+    fe = FrameEval(
         "AAPL",
         {
             ("AAPL", "15m"): aapl,
@@ -998,7 +1022,7 @@ def test_condition_typed_primitive_inherits_and_overrides_symbol_scope():
 def test_missing_pair_observation_is_private_unknown_and_public_false():
     aapl = _pair_frame([10, 11, 12, 13])
     qqq = _pair_frame([1, np.nan, 3, 4])
-    fe = _FrameEval(
+    fe = FrameEval(
         "AAPL",
         {("AAPL", "15m"): aapl, ("QQQ", "15m"): qqq},
         TFS,
@@ -1023,7 +1047,7 @@ def test_missing_pair_observation_is_private_unknown_and_public_false():
 
 def test_indicator_warmup_is_unknown_without_becoming_observation_absence():
     aapl = _pair_frame([10, 11, 12, 13])
-    fe = _FrameEval("AAPL", {("AAPL", "15m"): aapl}, TFS)
+    fe = FrameEval("AAPL", {("AAPL", "15m"): aapl}, TFS)
     condition = {
         "lhs": {"ind": "sma", "n": 3},
         "op": ">",
@@ -1037,15 +1061,45 @@ def test_indicator_warmup_is_unknown_without_becoming_observation_absence():
     assert not missing_observation.any()
 
 
-def test_pair_loading_order_does_not_change_evaluation():
+class _LazyPairFrames(Mapping):
+    """Known pair keys whose frame values hydrate only when requested."""
+
+    def __init__(self, loaders):
+        self._loaders = dict(loaders)
+        self._loaded = {}
+
+    @property
+    def loaded(self):
+        return tuple(self._loaded)
+
+    def __getitem__(self, key):
+        if key not in self._loaded:
+            self._loaded[key] = self._loaders[key]()
+        return self._loaded[key]
+
+    def __iter__(self) -> Iterator:
+        return iter(self._loaders)
+
+    def __len__(self):
+        return len(self._loaders)
+
+
+def test_eager_and_lazy_pair_lookup_publish_identical_values():
     aapl = _pair_frame([10, 11, 12, 13])
     spy = _pair_frame([20, 21, 22, 23])
-    frames = [("AAPL", "15m", aapl), ("SPY", "15m", spy)]
+    frames = {("AAPL", "15m"): aapl, ("SPY", "15m"): spy}
+    lazy_frames = _LazyPairFrames({
+        ("AAPL", "15m"): lambda: aapl,
+        ("SPY", "15m"): lambda: spy,
+    })
     node = {"ind": "sma", "n": 2, "sym": "SPY"}
 
-    eager = _FrameEval(
-        "AAPL", {(sym, tf): frame for sym, tf, frame in frames}, TFS)
-    reverse = _FrameEval(
-        "AAPL", {(sym, tf): frame for sym, tf, frame in reversed(frames)}, TFS)
+    eager = FrameEval("AAPL", frames, TFS)
+    lazy = FrameEval("AAPL", lazy_frames, TFS)
 
-    assert eager.series(node, "15m").equals(reverse.series(node, "15m"))
+    assert lazy_frames.loaded == ()
+    eager_result = eager.series(node, "15m")
+    lazy_result = lazy.series(node, "15m")
+
+    assert lazy_result.equals(eager_result)
+    assert lazy_frames.loaded == (("SPY", "15m"), ("AAPL", "15m"))
