@@ -10,10 +10,12 @@ answers the same two questions from its schedule instead, and
 
 import numpy as np
 import pandas as pd
+import pytest
 
-from nakagai.data.cache import BarCache
+from nakagai.data.cache import BarCache, MemoryBars
 from nakagai.data.schema import DEFAULT_TIMEFRAMES, TimeframeSet
 from nakagai.engine.context import build_context
+from nakagai.engine.portfolio_types import ReplayInputError
 from nakagai.strategies.rules import RuleStrategy
 
 
@@ -200,3 +202,55 @@ def test_point_in_time_reference_visibility_uses_its_own_close_time(tmp_path):
 
     assert before.fe.on("QQQ", "1h").empty
     assert after.fe.on("QQQ", "1h")["close"].tolist() == [200.0]
+
+
+@pytest.mark.parametrize(
+    ("defect", "field"),
+    [
+        ("nonfinite", "close"),
+        ("invalid high", "high"),
+        ("negative volume", "volume"),
+        ("surplus label", "labels"),
+    ],
+)
+def test_point_in_time_context_refuses_malformed_supplied_external_rows(
+        defect, field):
+    index = pd.date_range(
+        "2026-06-01 13:30", periods=4, freq="15min", tz="UTC", name="ts")
+
+    def frame(labels, base):
+        close = pd.Series(np.arange(len(labels), dtype=float) + base, index=labels)
+        return pd.DataFrame({
+            "open": close, "high": close + 1.0, "low": close - 1.0,
+            "close": close, "volume": 1_000.0,
+        }, index=labels)
+
+    driving = frame(index, 100.0)
+    external = frame(index, 200.0)
+    if defect == "nonfinite":
+        external.iloc[1, external.columns.get_loc("close")] = np.nan
+    elif defect == "invalid high":
+        external.iloc[1, external.columns.get_loc("high")] = 0.0
+    elif defect == "negative volume":
+        external.iloc[1, external.columns.get_loc("volume")] = -1.0
+    else:
+        surplus = pd.DatetimeIndex(
+            [pd.Timestamp("2026-06-01 14:30", tz="UTC")], name="ts")
+        external = pd.concat([external, frame(surplus, 300.0)])
+    cache = MemoryBars({
+        ("SPY", "15m"): driving,
+        ("QQQ", "15m"): external,
+    })
+    tfs = TimeframeSet(
+        driving="15m", higher=(), deltas=DEFAULT_TIMEFRAMES.deltas,
+        session_aligned=DEFAULT_TIMEFRAMES.session_aligned,
+    )
+
+    with pytest.raises(ReplayInputError) as raised:
+        build_context(
+            cache, "SPY", index[-1] + pd.Timedelta(minutes=15), tfs,
+            reference_pairs=(("QQQ", "15m"),),
+        )
+
+    assert raised.value.code == "missing_required_bar"
+    assert raised.value.details["field"] == field

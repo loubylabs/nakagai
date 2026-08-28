@@ -47,7 +47,7 @@ from nakagai.engine.bars import (
     prepare_portfolio_bars,
 )
 from nakagai.engine.context import build_scheduled_context
-from nakagai.engine.portfolio_types import StrategyOutputError
+from nakagai.engine.portfolio_types import ReplayInputError, StrategyOutputError
 from nakagai.engine.schedule import validate_schedule
 from nakagai.strategies.base import MarketContext, Strategy
 from nakagai.strategies.composite.strategy import CompositeStrategy
@@ -212,6 +212,28 @@ def test_scheduled_sparse_reference_matches_point_in_time_assembly(tmp_path):
 
     pd.testing.assert_frame_equal(
         scheduled.fe.on("IWM", "15m"), point.fe.on("IWM", "15m"))
+
+
+@pytest.mark.parametrize(
+    "reference_pairs",
+    [(), (("QQQ", "15m"),)],
+)
+def test_scheduled_context_refuses_a_different_prepared_reference_closure(
+        reference_pairs):
+    prepared_dependencies = ReplayDependencies(
+        timeframes=("15m",), reference_pairs=(("IWM", "15m"),))
+    validated, prepared = prepared_for(
+        base_request(), base_schedule(), prepared_dependencies)
+    supplied_dependencies = ReplayDependencies(
+        timeframes=("15m",), reference_pairs=reference_pairs)
+
+    with pytest.raises(ReplayInputError) as raised:
+        build_scheduled_context(
+            prepared, "SPY", ts("2026-11-27T15:00:00Z"), validated,
+            supplied_dependencies, vocabulary=core_vocabulary())
+
+    assert raised.value.code == "mismatched_dependencies"
+    assert raised.value.details["field"] == "prepared"
 
 
 def test_a_replay_builds_a_context_only_for_the_symbols_it_trades():

@@ -177,17 +177,55 @@ class _ValidatedPortfolioBars:
     slice handed to a strategy cannot write back through into one of them.
     """
 
-    def __init__(self, frames: dict[tuple[str, str], pd.DataFrame]) -> None:
+    def __init__(
+        self, frames: dict[tuple[str, str], pd.DataFrame],
+        reference_pairs: tuple[tuple[str, str], ...],
+    ) -> None:
         self._frames = MappingProxyType(frames)
+        self._reference_pairs = reference_pairs
 
     @property
     def pairs(self) -> tuple[tuple[str, str], ...]:
         return tuple(self._frames)
 
+    @property
+    def reference_pairs(self) -> tuple[tuple[str, str], ...]:
+        return self._reference_pairs
+
     def frame(self, symbol: str, timeframe: str) -> pd.DataFrame:
         """One prepared frame, or `KeyError` for a pair nobody declared."""
         return self._frames[(_require_symbol(symbol, "symbol"),
                              _require_timeframe(timeframe, "timeframe"))]
+
+
+def _require_prepared_closure(
+    prepared: _ValidatedPortfolioBars, request: PortfolioReplayRequest,
+    dependencies: ReplayDependencies,
+) -> None:
+    """Refuse missing traded frames or a different external pair closure."""
+    if prepared.reference_pairs != dependencies.reference_pairs:
+        different = sorted(
+            set(prepared.reference_pairs) ^ set(dependencies.reference_pairs),
+            key=_key_order,
+        )
+        symbol, timeframe = different[0]
+        raise _fail(
+            "mismatched_dependencies",
+            "the bars were prepared under another dependency closure",
+            field="prepared", symbol=symbol, timeframe=timeframe,
+        )
+    pairs = frozenset(prepared.pairs)
+    absent = tuple(
+        (symbol, timeframe)
+        for symbol in request.symbols for timeframe in dependencies.timeframes
+        if (symbol, timeframe) not in pairs
+    )
+    if absent:
+        raise _fail(
+            "mismatched_dependencies",
+            "the bars were prepared under another dependency closure",
+            field="prepared", symbol=absent[0][0], timeframe=absent[0][1],
+        )
 
 
 def prepare_portfolio_bars(
@@ -248,7 +286,7 @@ def prepare_portfolio_bars(
             "a frame was supplied that this replay never declared",
             "unexpected_frame", symbol=surplus[0][0], timeframe=surplus[0][1],
         )
-    return _ValidatedPortfolioBars(prepared)
+    return _ValidatedPortfolioBars(prepared, dependencies.reference_pairs)
 
 
 def _required_labels(

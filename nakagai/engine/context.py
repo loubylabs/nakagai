@@ -26,6 +26,9 @@ from nakagai.engine.bars import (
     BASE_TIMEFRAME,
     ReplayDependencies,
     _ValidatedPortfolioBars,
+    _normalized_frame,
+    _reindex_external,
+    _require_prepared_closure,
 )
 from nakagai.engine.portfolio_types import (
     ReplayInputError,
@@ -121,7 +124,9 @@ def build_context(cache: BarCache, symbol: str, now: pd.Timestamp,
             continue
         loaded = cache.load(*pair)
         expected = driving_frames[(symbol, pair[1])].index
-        pair_frames[pair] = loaded.reindex(expected)
+        normalized = _normalized_frame(loaded, pair)
+        pair_frames[pair] = _reindex_external(
+            normalized, pair, tuple(expected))
     visible = {
         pair: closed_before(frame, pair[1], now, tfs)
         for pair, frame in pair_frames.items()
@@ -210,6 +215,7 @@ def build_scheduled_context(prepared: _ValidatedPortfolioBars, symbol: str,
     _require_instance(schedule, "schedule", ValidatedSchedule)
     _require_instance(dependencies, "dependencies", ReplayDependencies)
     _require_instance(vocabulary, "vocabulary", Vocabulary)
+    _require_prepared_closure(prepared, schedule.request, dependencies)
     symbol = _require_symbol(symbol, "symbol")
     now = _require_timestamp(now, "now")
     closed = schedule.closed_base_count(now)
