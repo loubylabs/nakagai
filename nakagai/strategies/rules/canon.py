@@ -29,7 +29,11 @@ def canonical_expr(node, vocabulary: Vocabulary):
     if is_json_number(node):
         return float(node)
     if "src" in node:
-        return {"src": node["src"], **({"tf": node["tf"]} if "tf" in node else {})}
+        return {
+            "src": node["src"],
+            **({"sym": node["sym"]} if "sym" in node else {}),
+            **({"tf": node["tf"]} if "tf" in node else {}),
+        }
     if "op" in node:
         return {"op": node["op"],
                 "args": [canonical_expr(a, vocabulary) for a in node["args"]]}
@@ -40,7 +44,7 @@ def canonical_expr(node, vocabulary: Vocabulary):
             args = {
                 **{k: v for k, v in term.defaults.items() if k != "n"},
                 **{k: v for k, v in node.items()
-                   if k not in ("ind", "of", "tf", "window", "n")},
+                   if k not in ("ind", "of", "tf", "window", "n", "sym")},
             }
             out = {"ind": name, **{k: _num(v) for k, v in args.items()}}
             if term.kind != "bar":
@@ -49,14 +53,19 @@ def canonical_expr(node, vocabulary: Vocabulary):
             out["window"] = node["window"]
             if "tf" in node:
                 out["tf"] = node["tf"]
+            if "sym" in node:
+                out["sym"] = node["sym"]
             return out
         args = {**term.defaults,
-                **{k: v for k, v in node.items() if k not in ("ind", "of", "tf")}}
+                **{k: v for k, v in node.items()
+                   if k not in ("ind", "of", "tf", "sym")}}
         out = {"ind": name, **{k: _num(v) for k, v in args.items()}}
         if term.kind != "bar":
             out["of"] = canonical_expr(node.get("of", {"src": "close"}), vocabulary)
         if "tf" in node:
             out["tf"] = node["tf"]
+        if "sym" in node:
+            out["sym"] = node["sym"]
         return out
     name = node["prim"]
     term = vocabulary.primitives[name]
@@ -71,11 +80,16 @@ def canonical_expr(node, vocabulary: Vocabulary):
     # hashed apart.
     condition_args = {a for a, rule in term.args.items() if is_condition_rule(rule)}
     args = {**term.defaults,
-            **{k: v for k, v in node.items() if k not in ("prim", *condition_args)}}
+            **{k: v for k, v in node.items()
+               if k not in ("prim", "tf", "sym", *condition_args)}}
     out = {"prim": name, **{k: _num(v) for k, v in args.items()}}
     for a in sorted(condition_args):
         if a in node:
             out[a] = _canon_cond(node[a], vocabulary)
+    if "tf" in node:
+        out["tf"] = node["tf"]
+    if "sym" in node:
+        out["sym"] = node["sym"]
     return out
 
 

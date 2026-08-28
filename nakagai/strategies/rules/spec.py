@@ -8,6 +8,8 @@ compiler's retry loop feeds on them); describe_spec renders the trust-step
 readback; canon.py owns identity hashing.
 """
 
+import re
+
 from nakagai.data.schema import DEFAULT_TIMEFRAMES
 from nakagai.strategies.rules.vocabulary import (
     Vocabulary, is_choice_rule, is_condition_rule, is_json_number,
@@ -17,6 +19,9 @@ from nakagai.strategies.rules.vocabulary import (
 from nakagai.strategies.rules.windows import window_duration
 
 VERSION = 2
+_SPEC_KEYS = {"version", "name", "timeframe", "long", "short", "exits", "risk"}
+_SYMBOL_PATTERN = r"[A-Z][A-Z0-9.-]{0,9}"
+_SYMBOL_RE = re.compile(_SYMBOL_PATTERN, re.ASCII)
 SESSION_ALIGNED = DEFAULT_TIMEFRAMES.session_aligned
 # The cadence the engine replays on. A spec's `timeframe` says which bars its
 # CONDITIONS are computed on; it never says which bars the play decides on,
@@ -422,6 +427,16 @@ def _check_tf(node: dict, path: str, errs: list[str],
             errs.append(f"{path}: unknown keys {sorted(unknown)}")
 
 
+def _check_sym(node: dict, path: str, errs: list[str]) -> None:
+    value = node.get("sym")
+    if "sym" in node and (
+        not isinstance(value, str) or _SYMBOL_RE.fullmatch(value) is None
+    ):
+        errs.append(
+            f"{path}: sym must match {_SYMBOL_PATTERN}, got {value!r}"
+        )
+
+
 def _check_expr(node, path: str, errs: list[str], budget: _Budget,
                 vocabulary: Vocabulary, depth: int = 0,
                 series_required: bool = False) -> None:
@@ -445,7 +460,8 @@ def _check_expr(node, path: str, errs: list[str], budget: _Budget,
             errs.append(f"{path}: unknown source {node['src']!r} (valid: {SOURCES})")
         if "window" in node:
             errs.append(f"{path}: window is only valid on an aggregate indicator")
-        _check_tf(node, path, errs, allowed_extra=("src", "window"))
+        _check_tf(node, path, errs, allowed_extra=("src", "window", "sym"))
+        _check_sym(node, path, errs)
         return
     if "op" in node:
         op = node["op"]
@@ -490,9 +506,10 @@ def _check_expr(node, path: str, errs: list[str], budget: _Budget,
                 _check_expr(node["of"], f"{path}.of", errs, budget,
                             vocabulary, depth + 1)
         _check_args(name, node, term, path, errs, budget, vocabulary,
-                    depth, skip=("ind", "of", "tf", "window",
+                    depth, skip=("ind", "of", "tf", "window", "sym",
                                  *(('n',) if has_window else ())))
         _check_tf(node, path, errs)
+        _check_sym(node, path, errs)
         return
     if "prim" in node:
         budget.nodes += 1
@@ -514,10 +531,11 @@ def _check_expr(node, path: str, errs: list[str], budget: _Budget,
             errs.append(f"{path}: the left side of a cross must be a series; "
                         f"{name} is a level read from the end of the frame")
         _check_args(name, node, term, path, errs, budget, vocabulary,
-                    depth, skip=("prim", "tf", "window"))
+                    depth, skip=("prim", "tf", "window", "sym"))
         if "tf" in node and term.session_scoped:
             errs.append(f"{path}: {name} is session-scoped and takes no tf")
         _check_tf(node, path, errs)
+        _check_sym(node, path, errs)
         return
     errs.append(f"{path}: expression object needs one of src/ind/op/prim")
 
@@ -725,6 +743,9 @@ def validate_spec(spec, vocabulary: Vocabulary | None = None) -> list[str]:
     if not isinstance(spec, dict):
         return ["spec must be a JSON object"]
     errs: list[str] = []
+    unknown = set(spec) - _SPEC_KEYS
+    if unknown:
+        errs.append(f"unknown keys {sorted(unknown)}")
     if spec.get("version") != VERSION:
         errs.append(f"spec version must be {VERSION} (got {spec.get('version')!r})")
     if not str(spec.get("name", "")).strip():
@@ -786,7 +807,8 @@ def _expr_text(node, vocabulary: Vocabulary) -> str:
     if isinstance(node, (int, float)):
         return _num_text(node)
     if "src" in node:
-        return node["src"] if "tf" not in node else f"{node['src']}[{node['tf']}]"
+        text = node["src"] if "tf" not in node else f"{node['src']}[{node['tf']}]"
+        return f"{node['sym']}:{text}" if "sym" in node else text
     if "op" in node:
         op, args = node["op"], node["args"]
         if op == "abs":
@@ -807,7 +829,7 @@ def _expr_text(node, vocabulary: Vocabulary) -> str:
                     if window_mode else term.defaults)
         args = {**defaults,
                 **{k: v for k, v in node.items()
-                   if k not in ("ind", "of", "tf", "window")
+                   if k not in ("ind", "of", "tf", "window", "sym")
                    and not (window_mode and k == "n")}}
         field = args.pop("field", None)
         parts = [f"{v}" for v in args.values()]
@@ -824,7 +846,8 @@ def _expr_text(node, vocabulary: Vocabulary) -> str:
                 text += f" ({LOW_IEX_DISCLOSURE})"
         if "tf" in node:
             text += f"[{node['tf']}]"
-        return f"{text}.{field}" if field else text
+        text = f"{text}.{field}" if field else text
+        return f"{node['sym']}:{text}" if "sym" in node else text
     name = node["prim"]
     if not names(name, vocabulary.primitives):
         return repr(name)
@@ -832,7 +855,7 @@ def _expr_text(node, vocabulary: Vocabulary) -> str:
     condition_args = {a for a, rule in term.args.items() if is_condition_rule(rule)}
     args = {**term.defaults,
             **{k: v for k, v in node.items()
-               if k not in ("prim", "tf", *condition_args)}}
+               if k not in ("prim", "tf", "sym", *condition_args)}}
     if "minutes" in args:
         minutes = args.pop("minutes")
         parts = [f"{minutes}m"] + [f"{v}" for v in args.values()]
@@ -848,7 +871,7 @@ def _expr_text(node, vocabulary: Vocabulary) -> str:
     text = f"{name}({inner})" if inner else name
     if "tf" in node:
         text += f"[{node['tf']}]"
-    return text
+    return f"{node['sym']}:{text}" if "sym" in node else text
 
 
 _OP_TEXT = {">": "is above", "<": "is below", ">=": "is at or above",

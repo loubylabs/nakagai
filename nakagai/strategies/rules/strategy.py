@@ -6,6 +6,7 @@ With no spec it is inert; the scanner can instantiate it harmlessly.
 """
 
 from collections.abc import Mapping
+from typing import TypeAlias
 
 import pandas as pd
 
@@ -25,6 +26,7 @@ from nakagai.strategies.util import rr_signal
 # spec reads: a walk that guessed a different default would declare a frame
 # nobody hydrates, or omit one the evaluator then asks for.
 SPEC_TIMEFRAME_DEFAULT = "1h"
+ReferencePair: TypeAlias = tuple[str, str]
 
 
 def spec_timeframes(spec: Mapping) -> tuple:
@@ -53,6 +55,50 @@ def spec_timeframes(spec: Mapping) -> tuple:
         elif isinstance(node, (tuple, list)):
             stack.extend(node)
     return tuple(found)
+
+
+def expression_reference_pairs(
+    node: object,
+    host_timeframe: str,
+) -> tuple[ReferencePair, ...]:
+    """Every explicit symbol pair reached through lexical expression scope.
+
+    A missing symbol means the driving symbol, which is known only at replay
+    time and therefore contributes no static reference pair. Once a symbol is
+    explicit, descendants inherit it until another scoped node replaces it.
+    Timeframe inheritance follows the same walk independently.
+    """
+    found: set[ReferencePair] = set()
+    stack: list[tuple[object, str | None, str]] = [
+        (node, None, host_timeframe)
+    ]
+    while stack:
+        item, inherited_symbol, inherited_timeframe = stack.pop()
+        if isinstance(item, Mapping):
+            symbol = item.get("sym", inherited_symbol)
+            timeframe = item.get("tf", inherited_timeframe)
+            if isinstance(symbol, str) and isinstance(timeframe, str):
+                found.add((symbol, timeframe))
+            stack.extend(
+                (value, symbol if isinstance(symbol, str) else inherited_symbol,
+                 timeframe if isinstance(timeframe, str) else inherited_timeframe)
+                for value in item.values()
+            )
+        elif isinstance(item, (tuple, list)):
+            stack.extend(
+                (value, inherited_symbol, inherited_timeframe) for value in item
+            )
+    return tuple(sorted(found))
+
+
+def spec_reference_pairs(spec: Mapping) -> tuple[ReferencePair, ...]:
+    """Exact reference pairs declared by one RuleSpec."""
+    if not isinstance(spec, Mapping) or not spec:
+        return ()
+    host_timeframe = spec.get("timeframe", SPEC_TIMEFRAME_DEFAULT)
+    if not isinstance(host_timeframe, str):
+        host_timeframe = SPEC_TIMEFRAME_DEFAULT
+    return expression_reference_pairs(spec, host_timeframe)
 
 
 class RuleStrategy(Strategy):

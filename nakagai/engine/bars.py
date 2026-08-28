@@ -133,29 +133,39 @@ class ReplayDependencies:
 
     `timeframes` is the union every play declares, and it always contains the
     base timeframe: the account fills, marks, and settles on the base clock
-    whatever a strategy chooses to read. `external_symbols` are the symbols a
-    play reads without trading them.
+    whatever a strategy chooses to read. `reference_pairs` are the exact
+    symbol and timeframe pairs a play reads without trading them.
     """
 
     timeframes: tuple[str, ...]
-    external_symbols: tuple[str, ...]
+    reference_pairs: tuple[tuple[str, str], ...]
 
     def __post_init__(self) -> None:
         if not isinstance(self.timeframes, tuple):
             raise _fail("invalid_type", "value must be a tuple", field="timeframes")
-        if not isinstance(self.external_symbols, tuple):
-            raise _fail("invalid_type", "value must be a tuple", field="external_symbols")
+        if not isinstance(self.reference_pairs, tuple):
+            raise _fail("invalid_type", "value must be a tuple", field="reference_pairs")
         declared = {_require_timeframe(value, "timeframes") for value in self.timeframes}
         if BASE_TIMEFRAME not in declared:
             raise _fail(
                 "invalid_value", "every replay depends on the base timeframe",
                 field="timeframes", required=BASE_TIMEFRAME,
             )
-        symbols = {_require_symbol(value, "external_symbols")
-                   for value in self.external_symbols}
+        pairs: set[tuple[str, str]] = set()
+        for pair in self.reference_pairs:
+            if not isinstance(pair, tuple) or len(pair) != 2:
+                raise _fail(
+                    "invalid_type", "each value must be a (symbol, timeframe) tuple",
+                    field="reference_pairs",
+                )
+            symbol, timeframe = pair
+            pairs.add((
+                _require_symbol(symbol, "reference_pairs"),
+                _require_timeframe(timeframe, "reference_pairs"),
+            ))
         object.__setattr__(self, "timeframes", tuple(
             value for value in BAR_TIMEFRAMES if value in declared))
-        object.__setattr__(self, "external_symbols", tuple(sorted(symbols)))
+        object.__setattr__(self, "reference_pairs", tuple(sorted(pairs)))
 
 
 class _ValidatedPortfolioBars:
@@ -247,10 +257,9 @@ def _required_labels(
             required[(symbol, timeframe)] = _scheduled_labels(
                 schedule, timeframe, request.ic_tail_end)
     context_boundary = request.window.test_end
-    for symbol in dependencies.external_symbols:
-        for timeframe in dependencies.timeframes:
-            required.setdefault((symbol, timeframe), _scheduled_labels(
-                schedule, timeframe, context_boundary))
+    for symbol, timeframe in dependencies.reference_pairs:
+        required.setdefault((symbol, timeframe), _scheduled_labels(
+            schedule, timeframe, context_boundary))
     benchmark = request.benchmark.symbol
     if benchmark is not None:
         required.setdefault((benchmark, BASE_TIMEFRAME), _scheduled_labels(

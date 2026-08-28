@@ -721,7 +721,7 @@ def fall_bucket_request() -> PortfolioReplayRequest:
 
 def bucket_dependencies() -> ReplayDependencies:
     """The base timeframe and the four-hour bucket, and nothing else."""
-    return ReplayDependencies(timeframes=("15m", "4h"), external_symbols=())
+    return ReplayDependencies(timeframes=("15m", "4h"), reference_pairs=())
 
 
 # ------------------------------------------------------------- bar fixtures
@@ -730,7 +730,7 @@ def bucket_dependencies() -> ReplayDependencies:
 def base_dependencies() -> ReplayDependencies:
     """Every supported timeframe and no external symbol."""
     return ReplayDependencies(
-        timeframes=("15m", "1h", "4h", "1d"), external_symbols=(),
+        timeframes=("15m", "1h", "4h", "1d"), reference_pairs=(),
     )
 
 
@@ -1169,7 +1169,7 @@ FIRST_CLOSE = ts("2026-11-27T14:45:00Z")
 
 # Only the base timeframe, which is what a replay reads to fill, mark, and
 # settle. A test that needs a context timeframe asks for one.
-BASE_ONLY = ReplayDependencies(timeframes=("15m",), external_symbols=())
+BASE_ONLY = ReplayDependencies(timeframes=("15m",), reference_pairs=())
 
 # Two plays under ONE priority, so the two canonical orders are genuinely
 # different: signal ordinals run play-major and funding runs symbol-major.

@@ -111,10 +111,36 @@ def test_group_text_renders_a_bare_group():
 
 from nakagai.screen.spec import (
     describe_screen, is_intraday, max_lookback, referenced_timeframes,
-    validate_screen_spec,
+    screen_reference_pairs, validate_screen_spec,
 )
 
 GOOD = {"version": 1, "tf": "1d", "conditions": {"all": [RSI_LT_30]}}
+
+RELATIVE_SCOPE_SCREEN = {
+    "version": 1,
+    "tf": "15m",
+    "conditions": {
+        "all": [
+            {
+                "lhs": {"src": "close"},
+                "op": ">",
+                "rhs": {"src": "close", "sym": "SPY"},
+            },
+            {
+                "lhs": {
+                    "ind": "sma", "n": 20, "of": {"src": "close"},
+                    "sym": "SPY", "tf": "15m",
+                },
+                "op": ">",
+                "rhs": {
+                    "ind": "sma", "n": 20,
+                    "of": {"src": "close", "sym": "QQQ", "tf": "1d"},
+                    "sym": "SPY", "tf": "15m",
+                },
+            },
+        ],
+    },
+}
 
 
 def test_validate_screen_spec_accepts_a_good_spec():
@@ -247,6 +273,24 @@ def test_describe_screen_renders_the_readback():
     text = describe_screen(GOOD)
     assert text.startswith("Screen on 1d bars")
     assert "rsi(14) is below 30" in text
+
+
+def test_relative_scope_screen_description_matches_the_frozen_readback():
+    assert validate_screen_spec(RELATIVE_SCOPE_SCREEN) == []
+    assert describe_screen(RELATIVE_SCOPE_SCREEN) == (
+        "Screen on 15m bars, matching symbols where ALL of:\n"
+        "  - close is above SPY:close\n"
+        "  - SPY:sma(20)[15m] is above "
+        "SPY:sma(20, of=QQQ:close[1d])[15m]"
+    )
+
+
+def test_screen_reference_pairs_are_exact_instead_of_a_cross_product():
+    assert screen_reference_pairs(RELATIVE_SCOPE_SCREEN) == (
+        ("QQQ", "1d"), ("SPY", "15m"),
+    )
+    assert ("SPY", "1d") not in screen_reference_pairs(RELATIVE_SCOPE_SCREEN)
+    assert ("QQQ", "15m") not in screen_reference_pairs(RELATIVE_SCOPE_SCREEN)
 
 
 def test_windowed_screen_readback_discloses_only_low_iex_rows():

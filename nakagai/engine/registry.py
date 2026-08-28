@@ -56,8 +56,10 @@ from nakagai.strategies.base import Strategy, strategy_operation
 from nakagai.strategies.composite.strategy import CompositeStrategy, member_blocks
 from nakagai.strategies.rules.margins import spec_margin
 from nakagai.strategies.rules.strategy import (
+    ReferencePair,
     SPEC_TIMEFRAME_DEFAULT,
     RuleStrategy,
+    spec_reference_pairs,
     spec_timeframes,
 )
 from nakagai.strategies.rules.vocabulary import (
@@ -94,10 +96,10 @@ class StrategyDependencies:
     declare it whatever a spec names, because `on_bar` decides on the driving
     frame however the conditions were evaluated.
 
-    Timeframes deduplicate into the fixed order `15m`, `1h`, `4h`, `1d`, and
-    external symbols uppercase, deduplicate, and sort lexically, so two
-    declarations of one data closure are one value. A blank or unsupported
-    entry is refused here, which is before a manifest could publish it.
+    Timeframes deduplicate into the fixed order `15m`, `1h`, `4h`, `1d`.
+    Reference pairs uppercase symbols, validate both members, deduplicate, and
+    sort lexically, so two declarations of one data closure are one value. A
+    blank or unsupported entry is refused before a manifest could publish it.
 
     Normalization runs through the same `_require_timeframe`, `_require_symbol`
     and `BAR_TIMEFRAMES` the bar boundary uses. Two independent spellings of
@@ -105,14 +107,14 @@ class StrategyDependencies:
     """
 
     timeframes: tuple[str, ...]
-    external_symbols: tuple[str, ...]
+    reference_pairs: tuple[ReferencePair, ...]
     vocabulary_digest: str
 
     def __post_init__(self) -> None:
         if not isinstance(self.timeframes, tuple):
             raise _fail("invalid_type", "value must be a tuple", field="timeframes")
-        if not isinstance(self.external_symbols, tuple):
-            raise _fail("invalid_type", "value must be a tuple", field="external_symbols")
+        if not isinstance(self.reference_pairs, tuple):
+            raise _fail("invalid_type", "value must be a tuple", field="reference_pairs")
         declared = {_require_timeframe(value, "timeframes") for value in self.timeframes}
         if not declared:
             # A definition that declares no frame at all reads nothing, so
@@ -123,11 +125,21 @@ class StrategyDependencies:
                 "invalid_value", "a definition declares at least one timeframe",
                 field="timeframes",
             )
-        symbols = {_require_symbol(value, "external_symbols")
-                   for value in self.external_symbols}
+        pairs: set[ReferencePair] = set()
+        for pair in self.reference_pairs:
+            if not isinstance(pair, tuple) or len(pair) != 2:
+                raise _fail(
+                    "invalid_type", "each value must be a (symbol, timeframe) tuple",
+                    field="reference_pairs",
+                )
+            symbol, timeframe = pair
+            pairs.add((
+                _require_symbol(symbol, "reference_pairs"),
+                _require_timeframe(timeframe, "reference_pairs"),
+            ))
         _set(self, "timeframes",
              tuple(value for value in BAR_TIMEFRAMES if value in declared))
-        _set(self, "external_symbols", tuple(sorted(symbols)))
+        _set(self, "reference_pairs", tuple(sorted(pairs)))
         _set(self, "vocabulary_digest",
              _require_digest(self.vocabulary_digest, "vocabulary_digest"))
 
@@ -305,12 +317,12 @@ def dependencies_for(
     contract error rather than run.
 
     Ordering and deduplication belong to `ReplayDependencies`, which puts the
-    timeframes into the fixed `15m, 1h, 4h, 1d` order and sorts the symbols, so
-    the closure cannot depend on which play was asked first.
+    timeframes into fixed order and sorts exact reference pairs, so the closure
+    cannot depend on which play was asked first.
     """
     _require_instance(request, "request", PortfolioReplayRequest)
     timeframes: list[str] = [BASE_TIMEFRAME]
-    symbols: list[str] = []
+    reference_pairs: list[ReferencePair] = []
     for play in request.plays:
         definition = registry.resolve(play.strategy)
         with strategy_operation("dependencies", strategy=definition.name,
@@ -318,9 +330,9 @@ def dependencies_for(
             declared = definition.dependencies(play.params)
         _require_instance(declared, "dependencies", StrategyDependencies)
         timeframes.extend(declared.timeframes)
-        symbols.extend(declared.external_symbols)
+        reference_pairs.extend(declared.reference_pairs)
     return ReplayDependencies(timeframes=tuple(timeframes),
-                              external_symbols=tuple(symbols))
+                              reference_pairs=tuple(reference_pairs))
 
 
 def _require_definitions(value: object) -> tuple[StrategyDefinition, ...]:
@@ -472,6 +484,7 @@ def vocabulary_digest(vocabulary_factory: VocabularyFactory) -> str:
     """
     vocabulary = vocabulary_factory()
     return _digest({
+        "expression_scopes": ["sym", "tf", "window"],
         "indicators": [_term_projection(term)
                        for term in sorted(vocabulary.indicators.values(),
                                           key=lambda item: item.name)],
@@ -555,7 +568,9 @@ def rules_definition(
         # frame whatever frame the spec's conditions are evaluated on.
         declared = (BASE_TIMEFRAME, *spec_timeframes(effective.get("spec") or {}))
         return StrategyDependencies(
-            timeframes=declared, external_symbols=(), vocabulary_digest=digest,
+            timeframes=declared,
+            reference_pairs=spec_reference_pairs(effective.get("spec") or {}),
+            vocabulary_digest=digest,
         )
 
     def factory(params: Mapping[str, JSONValue]) -> Strategy:
@@ -665,7 +680,7 @@ def composite_definition(
     def dependencies(params: Mapping[str, JSONValue]) -> StrategyDependencies:
         spec = _plain(_require_params(params, "params")).get("spec") or {}
         timeframes: list[object] = [BASE_TIMEFRAME]
-        symbols: list[object] = []
+        reference_pairs: list[ReferencePair] = []
         for block, strategy, block_params in member_blocks(spec):
             # The block id identifies the offender, never the value it holds:
             # an unbound `strategy` is whatever the params carried, and a
@@ -684,9 +699,9 @@ def composite_definition(
                     field="vocabulary_digest", name=name, member=member.name,
                 )
             timeframes.extend(declared.timeframes)
-            symbols.extend(declared.external_symbols)
+            reference_pairs.extend(declared.reference_pairs)
         return StrategyDependencies(
-            timeframes=tuple(timeframes), external_symbols=tuple(symbols),
+            timeframes=tuple(timeframes), reference_pairs=tuple(reference_pairs),
             vocabulary_digest=digest,
         )
 
