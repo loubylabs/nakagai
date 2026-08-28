@@ -66,6 +66,15 @@ def test_compile_screen_happy_path():
     assert r.attempts == 1 and r.error == ""
 
 
+def test_screen_clarifications_accept_only_a_list():
+    for sent in (None, "assumed daily"):
+        client = _FakeClient([
+            json.dumps({"spec": GOOD_SPEC, "clarifications": sent})])
+        result = compile_screen("oversold", client=client)
+        assert result.spec == GOOD_SPEC
+        assert result.clarifications == []
+
+
 def test_blank_prompt_policy_keeps_the_screen_prompt_byte_identical():
     expected = render_screen_prompt().encode("utf-8")
     for policy in ("", " \n\t "):
@@ -213,6 +222,27 @@ def test_compile_screen_retries_on_validator_errors_and_feeds_them_back():
     assert r.spec == GOOD_SPEC and r.attempts == 2
     retry_user = client.calls[1]["messages"][-1]["content"]
     assert "failed validation" in retry_user and "conditions.all[0]" in retry_user
+
+
+def test_screen_reply_with_an_integer_past_the_decoder_limit_retries():
+    huge = '{"spec": ' + "9" * 5000 + "}"
+    client = _FakeClient([huge, json.dumps({"spec": GOOD_SPEC})])
+    result = compile_screen("oversold", client=client)
+    assert result.spec == GOOD_SPEC
+    assert result.attempts == 2
+    assert "not parseable JSON" in client.calls[1]["messages"][-1]["content"]
+
+
+def test_screen_reply_nested_past_the_decoder_limit_retries():
+    nested = "[" * 10_000 + "]" * 10_000
+    client = _FakeClient([
+        '{"spec": ' + nested + "}",
+        json.dumps({"spec": GOOD_SPEC}),
+    ])
+    result = compile_screen("oversold", client=client)
+    assert result.spec == GOOD_SPEC
+    assert result.attempts == 2
+    assert "not parseable JSON" in client.calls[1]["messages"][-1]["content"]
 
 
 def test_compile_screen_not_expressible_passes_through():

@@ -20,6 +20,7 @@ from nakagai.strategies.catalog import load_entries
 from nakagai.strategies.rules import spec_hash, validate_spec
 from nakagai.strategies.rules.canon import canonical_expr, canonical_spec
 from nakagai.strategies.rules.frame_eval import FrameEval
+from nakagai.strategies.rules.pine.model import PineLowering
 from nakagai.strategies.rules.spec import validate_condition_group
 from nakagai.strategies.rules.vocabulary import (
     CONDITION_ARG, Term, core_vocabulary, is_condition_rule, is_json_number,
@@ -149,6 +150,16 @@ def test_term_refuses_an_unknown_kind():
 def test_term_refuses_a_non_callable_fn():
     with pytest.raises(TypeError, match="term 'broken' needs a callable fn"):
         Term("broken", "series", {}, {}, None)
+
+
+def test_new_readback_metadata_preserves_the_existing_positional_pine_slot():
+    lowering = PineLowering(lambda *_args: None)
+    term = Term(
+        "positional_pine", "series", {}, {}, lambda series, _args: series,
+        "documented", False, False, False, lowering,
+    )
+    assert term.pine is lowering
+    assert term.render_explicit_source is False
 
 
 def test_term_refuses_invalid_window_reducer_metadata():

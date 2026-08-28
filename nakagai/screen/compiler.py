@@ -4,8 +4,6 @@ the CompileResult shape are shared with nlbuilder; the loop itself is a thin
 copy because the two prompts' contracts differ (extract a common core only if
 a third compiler ever appears)."""
 
-import json
-
 from nakagai.nlbuilder.compiler import (
     CandidateNormalizer, CandidateValidator, CompileResult, _add_usage,
     _client_or_default, _parse, _text,
@@ -55,7 +53,7 @@ def compile_screen(description: str, client=None, model: str = MODEL,
         try:
             raw = _text(resp)
             doc = _parse(raw)
-        except (json.JSONDecodeError, StopIteration):
+        except (ValueError, RecursionError, StopIteration):
             last_errors = ["reply was not a single JSON object"]
             messages = messages + [
                 {"role": "assistant", "content": raw},
@@ -77,7 +75,9 @@ def compile_screen(description: str, client=None, model: str = MODEL,
         if not errors:
             result.spec = spec
             result.readback = describe_screen(spec, vocabulary=vocabulary)
-            result.clarifications = [str(c) for c in doc.get("clarifications", [])]
+            clarifications = doc.get("clarifications")
+            result.clarifications = ([str(c) for c in clarifications]
+                                     if isinstance(clarifications, list) else [])
             return result
         last_errors = errors
         messages = messages + [

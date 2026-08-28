@@ -102,7 +102,7 @@ class Term:
     end_anchored: bool = False
     session_scoped: bool = False
     driving_frame_intraday: bool = False
-    render_explicit_source: bool = False
+    render_explicit_source: bool = field(default=False, kw_only=True)
     pine: PineLowering | None = None
     window_reduce: WindowReducer | None = None
     window_required: bool = False
