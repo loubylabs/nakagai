@@ -157,7 +157,8 @@ def test_an_external_dependency_joins_only_after_its_own_availability():
     `available_at` and not at the traded symbols'.
     """
     dependencies = ReplayDependencies(
-        timeframes=("15m", "1h"), external_symbols=("IWM",))
+        timeframes=("15m", "1h"),
+        reference_pairs=(("IWM", "15m"), ("IWM", "1h")))
     validated, prepared = prepared_for(base_request(), base_schedule(), dependencies)
     before = build_scheduled_context(
         prepared, "IWM", ts("2026-11-27T14:45:00Z"), validated, dependencies,
@@ -180,7 +181,7 @@ def test_a_replay_builds_a_context_only_for_the_symbols_it_trades():
     replay_fixture(
         calls=calls,
         dependencies=ReplayDependencies(
-            timeframes=("15m",), external_symbols=("IWM",)),
+            timeframes=("15m",), reference_pairs=(("IWM", "15m"),)),
     )
     assert {call.symbol for call in calls} == {"QQQ", "SPY"}
 
@@ -210,7 +211,7 @@ def test_a_context_carries_only_the_frames_its_replay_declared():
     spec asking for data this replay never had. It raises rather than reading
     empty, which would look to a play like a market with no history.
     """
-    dependencies = ReplayDependencies(timeframes=("15m", "1h"), external_symbols=())
+    dependencies = ReplayDependencies(timeframes=("15m", "1h"), reference_pairs=())
     validated, prepared = prepared_for(base_request(), base_schedule(), dependencies)
     context = build_scheduled_context(
         prepared, "SPY", ts("2026-11-27T15:00:00Z"), validated, dependencies,
@@ -241,7 +242,7 @@ def test_the_cursor_indexes_the_newest_row_each_frame_has_released():
     cursor is 27; both hourly bars have been released, so the hourly cursor
     is 1.
     """
-    dependencies = ReplayDependencies(timeframes=("15m", "1h"), external_symbols=())
+    dependencies = ReplayDependencies(timeframes=("15m", "1h"), reference_pairs=())
     validated, prepared = prepared_for(base_request(), base_schedule(), dependencies)
 
     context = build_scheduled_context(

@@ -249,9 +249,9 @@ def test_a_close_landing_exactly_on_test_start_is_never_an_observation():
 # ------------------------------------------ membership on a higher timeframe
 
 
-HOURLY = ReplayDependencies(timeframes=("15m", "1h"), external_symbols=())
-FOUR_HOURLY = ReplayDependencies(timeframes=("15m", "4h"), external_symbols=())
-DAILY = ReplayDependencies(timeframes=("15m", "1d"), external_symbols=())
+HOURLY = ReplayDependencies(timeframes=("15m", "1h"), reference_pairs=())
+FOUR_HOURLY = ReplayDependencies(timeframes=("15m", "4h"), reference_pairs=())
+DAILY = ReplayDependencies(timeframes=("15m", "1d"), reference_pairs=())
 
 
 def test_an_hourly_play_observes_its_own_freshness_and_not_a_base_close():

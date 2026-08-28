@@ -821,11 +821,10 @@ def frames_for(request: PortfolioReplayRequest, schedule: ReplaySchedule,
             built[(symbol, timeframe)] = build(
                 scheduled_labels(schedule, timeframe, request.ic_tail_end),
             )
-    for symbol in dependencies.external_symbols:
-        for timeframe in dependencies.timeframes:
-            built.setdefault((symbol, timeframe), build(
-                scheduled_labels(schedule, timeframe, request.window.test_end),
-            ))
+    for symbol, timeframe in dependencies.reference_pairs:
+        built.setdefault((symbol, timeframe), build(
+            scheduled_labels(schedule, timeframe, request.window.test_end),
+        ))
     benchmark = request.benchmark.symbol
     if benchmark is not None:
         built.setdefault((benchmark, "15m"), build(
@@ -1389,7 +1388,7 @@ class FactorCall:
 
 
 def scripted_definition(play: ScriptedPlay, *, timeframes: tuple[str, ...] = ("15m",),
-                        external_symbols: tuple[str, ...] = (),
+                        reference_pairs: tuple[tuple[str, str], ...] = (),
                         calls: list | None = None,
                         factor_calls: list | None = None) -> StrategyDefinition:
     """One definition per scripted play, built the way a real one is.
@@ -1410,7 +1409,7 @@ def scripted_definition(play: ScriptedPlay, *, timeframes: tuple[str, ...] = ("1
 
     def dependencies(params: Mapping) -> StrategyDependencies:
         return StrategyDependencies(timeframes=tuple(timeframes),
-                                    external_symbols=tuple(external_symbols),
+                                    reference_pairs=tuple(reference_pairs),
                                     vocabulary_digest=digest)
 
     def factory(params: Mapping) -> Strategy:
@@ -1609,7 +1608,7 @@ def replay_inputs(
     registry = FrozenStrategyRegistry.from_definitions(tuple(
         hook(scripted_definition(
             play, timeframes=declared.timeframes,
-            external_symbols=declared.external_symbols, calls=calls,
+            reference_pairs=declared.reference_pairs, calls=calls,
             factor_calls=factor_calls))
         for play in supplied
     ))

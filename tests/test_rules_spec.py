@@ -745,6 +745,24 @@ def test_expression_reference_pairs_follow_lexical_symbol_and_timeframe_scope():
     )
 
 
+def test_child_symbol_override_inherits_its_parent_timeframe():
+    node = {
+        "ind": "sma", "n": 20, "tf": "1d",
+        "of": {"src": "close", "sym": "QQQ"},
+    }
+    assert expression_reference_pairs(node, "15m") == (("QQQ", "1d"),)
+
+
+def test_child_timeframe_override_inherits_its_parent_symbol():
+    node = {
+        "ind": "sma", "n": 20, "sym": "SPY",
+        "of": {"src": "close", "tf": "1d"},
+    }
+    assert expression_reference_pairs(node, "15m") == (
+        ("SPY", "15m"), ("SPY", "1d"),
+    )
+
+
 def test_spec_reference_pairs_cover_entries_exits_and_condition_arguments():
     spec = {
         **RELATIVE_SCOPE_SPEC,
