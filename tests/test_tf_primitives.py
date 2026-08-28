@@ -18,7 +18,8 @@ def _frame(vals, freq, start="2026-01-05 14:30"):
 
 
 def _fe(f15, f1h):
-    return FrameEval({"15m": f15, "1h": f1h}, TFS)
+    return FrameEval(
+        "SPY", {("SPY", "15m"): f15, ("SPY", "1h"): f1h}, TFS)
 
 
 H1 = [100, 104, 108, 104, 100, 98, 96, 98, 100, 102, 104, 106]

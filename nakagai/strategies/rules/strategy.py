@@ -6,6 +6,7 @@ With no spec it is inert; the scanner can instantiate it harmlessly.
 """
 
 from collections.abc import Mapping
+from typing import TypeAlias
 
 import pandas as pd
 
@@ -25,34 +26,90 @@ from nakagai.strategies.util import rr_signal
 # spec reads: a walk that guessed a different default would declare a frame
 # nobody hydrates, or omit one the evaluator then asks for.
 SPEC_TIMEFRAME_DEFAULT = "1h"
+ReferencePair: TypeAlias = tuple[str, str]
 
 
 def spec_timeframes(spec: Mapping) -> tuple:
-    """Every timeframe a RuleSpec reads, unvalidated and possibly repeated.
+    """Every driving-symbol timeframe a RuleSpec reads.
 
-    Two sources, and both are frames the replay has to prepare: the spec's own
-    `timeframe`, which its conditions are evaluated on, and any node's `tf`,
-    which moves that node's children onto another frame. An empty spec reads
-    neither, because an inert strategy returns before it touches a frame.
+    The spec's own `timeframe` is always a driving frame. A node-level `tf`
+    contributes only while lexical `sym` scope is still omitted. Once a node
+    names a symbol, that pair and every inherited descendant belong to
+    `spec_reference_pairs` instead. An empty spec reads neither, because an
+    inert strategy returns before it touches a frame.
 
     Values travel out exactly as the spec spelled them, so a caller building
     `StrategyDependencies` refuses an unsupported one through the same door
-    every other timeframe goes through. Keep this in step with `_bars_for` and
-    `_group_at`: a frame this misses is a frame nobody hydrates.
+    every other timeframe goes through. The two dependency walks stay
+    disjoint by role: this one never reconstructs references by crossing
+    symbols with timeframes.
     """
     if not isinstance(spec, Mapping) or not spec:
         return ()
-    found = [spec.get("timeframe", SPEC_TIMEFRAME_DEFAULT)]
-    stack: list = [spec]
+    host_timeframe = spec.get("timeframe", SPEC_TIMEFRAME_DEFAULT)
+    found = [host_timeframe]
+    stack: list[tuple[object, str | None, object]] = [
+        (spec, None, host_timeframe)
+    ]
     while stack:
-        node = stack.pop()
+        node, inherited_symbol, inherited_timeframe = stack.pop()
         if isinstance(node, Mapping):
-            if "tf" in node:
-                found.append(node["tf"])
-            stack.extend(node.values())
+            symbol = node.get("sym", inherited_symbol)
+            timeframe = node.get("tf", inherited_timeframe)
+            if symbol is None and "tf" in node:
+                found.append(timeframe)
+            stack.extend(
+                (value, symbol, timeframe) for value in node.values()
+            )
         elif isinstance(node, (tuple, list)):
-            stack.extend(node)
+            stack.extend(
+                (value, inherited_symbol, inherited_timeframe) for value in node
+            )
     return tuple(found)
+
+
+def expression_reference_pairs(
+    node: object,
+    host_timeframe: str,
+) -> tuple[ReferencePair, ...]:
+    """Every explicit symbol pair reached through lexical expression scope.
+
+    A missing symbol means the driving symbol, which is known only at replay
+    time and therefore contributes no static reference pair. Once a symbol is
+    explicit, descendants inherit it until another scoped node replaces it.
+    Timeframe inheritance follows the same walk independently.
+    """
+    found: set[ReferencePair] = set()
+    stack: list[tuple[object, str | None, str]] = [
+        (node, None, host_timeframe)
+    ]
+    while stack:
+        item, inherited_symbol, inherited_timeframe = stack.pop()
+        if isinstance(item, Mapping):
+            symbol = item.get("sym", inherited_symbol)
+            timeframe = item.get("tf", inherited_timeframe)
+            if isinstance(symbol, str) and isinstance(timeframe, str):
+                found.add((symbol, timeframe))
+            stack.extend(
+                (value, symbol if isinstance(symbol, str) else inherited_symbol,
+                 timeframe if isinstance(timeframe, str) else inherited_timeframe)
+                for value in item.values()
+            )
+        elif isinstance(item, (tuple, list)):
+            stack.extend(
+                (value, inherited_symbol, inherited_timeframe) for value in item
+            )
+    return tuple(sorted(found))
+
+
+def spec_reference_pairs(spec: Mapping) -> tuple[ReferencePair, ...]:
+    """Exact reference pairs declared by one RuleSpec."""
+    if not isinstance(spec, Mapping) or not spec:
+        return ()
+    host_timeframe = spec.get("timeframe", SPEC_TIMEFRAME_DEFAULT)
+    if not isinstance(host_timeframe, str):
+        host_timeframe = SPEC_TIMEFRAME_DEFAULT
+    return expression_reference_pairs(spec, host_timeframe)
 
 
 class RuleStrategy(Strategy):
@@ -119,7 +176,9 @@ class RuleStrategy(Strategy):
         The tree is evaluated on the SPEC's timeframe (so `crosses_above`
         compares consecutive spec-timeframe bars, as the per-bar path did) and
         the resulting boolean is lifted onto the driving index, where the
-        cursor reads it.
+        cursor reads it. `driving_group` begins lexical symbol scope at the
+        traded symbol owned by the evaluator. An explicit `sym` may replace
+        that scope below this boundary, but it never changes the emitted trade.
         """
         tf = self.spec.get("timeframe", SPEC_TIMEFRAME_DEFAULT)
         i = ctx.cursor.get(ctx.tfs.driving, -1)

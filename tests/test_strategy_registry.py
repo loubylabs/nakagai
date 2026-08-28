@@ -66,10 +66,10 @@ class _Stub(Strategy):
 
 
 def stub_definition(name: str, digest: str, *, timeframes=("1h",),
-                    external_symbols=(), members=()) -> StrategyDefinition:
+                    reference_pairs=(), members=()) -> StrategyDefinition:
     def dependencies(params):
         return StrategyDependencies(
-            timeframes=timeframes, external_symbols=external_symbols,
+            timeframes=timeframes, reference_pairs=reference_pairs,
             vocabulary_digest=CORE_DIGEST,
         )
 
@@ -273,7 +273,7 @@ def test_a_rules_definition_declares_every_timeframe_its_spec_reads():
     # 1h is the spec's own timeframe, 4h is reached only through a node `tf`,
     # and 15m is the base clock every strategy is evaluated on.
     assert declared.timeframes == ("15m", "1h", "4h")
-    assert declared.external_symbols == ()
+    assert declared.reference_pairs == ()
     assert declared.vocabulary_digest == CORE_DIGEST
 
 
@@ -283,16 +283,46 @@ def test_a_composite_unions_every_member_dependency():
     assert declared.timeframes == ("15m", "1h", "4h")
 
 
-def test_a_composite_unions_a_member_external_symbol():
+def test_a_composite_unions_exact_member_reference_pairs():
     leaf = stub_definition("leaf", "3c" * 32, timeframes=("1d",),
-                           external_symbols=("spy",))
+                           reference_pairs=(("spy", "1d"),))
     combo = composite_definition("combo", DEFINITION_BASE_C, members={"leaf": leaf})
     params = {"spec": {"version": 1, "name": "combo",
                        "blocks": {"a": {"strategy": "leaf", "params": {}}},
                        "long": {"all": ["a"]}}}
     declared = registry((leaf, combo)).resolve("combo").dependencies(params)
     assert declared.timeframes == ("15m", "1d")
-    assert declared.external_symbols == ("SPY",)
+    assert declared.reference_pairs == (("SPY", "1d"),)
+
+
+def test_a_rules_definition_declares_exact_symbol_timeframe_pairs():
+    spec = {
+        "version": 2,
+        "name": "relative_scope",
+        "timeframe": "15m",
+        "long": {"all": [
+            {
+                "lhs": {"src": "close"},
+                "op": ">",
+                "rhs": {"src": "close", "sym": "SPY", "tf": "15m"},
+            },
+            {
+                "lhs": {"src": "close"},
+                "op": ">",
+                "rhs": {"src": "close", "sym": "QQQ", "tf": "1d"},
+            },
+        ]},
+        "risk": {
+            "stop": {"kind": "atr", "n": 14, "mult": 2.0},
+            "target": {"kind": "rr", "rr": 2.0},
+        },
+    }
+    definition = rules_definition("relative_scope", "8a" * 32, spec=spec)
+    declared = definition.dependencies({})
+    assert declared.timeframes == ("15m",)
+    assert declared.reference_pairs == (("QQQ", "1d"), ("SPY", "15m"))
+    assert ("SPY", "1d") not in declared.reference_pairs
+    assert ("QQQ", "15m") not in declared.reference_pairs
 
 
 def test_a_composite_refuses_a_block_naming_an_unregistered_member():
@@ -307,29 +337,30 @@ def test_a_composite_refuses_a_block_naming_an_unregistered_member():
 
 def test_declared_timeframes_take_the_fixed_order_and_deduplicate():
     declared = StrategyDependencies(
-        timeframes=("1d", "1h", "1d", "15m"), external_symbols=(),
+        timeframes=("1d", "1h", "1d", "15m"), reference_pairs=(),
         vocabulary_digest=CORE_DIGEST)
     assert declared.timeframes == ("15m", "1h", "1d")
 
 
-def test_declared_symbols_uppercase_deduplicate_and_sort():
+def test_declared_reference_pairs_normalize_deduplicate_and_sort():
     declared = StrategyDependencies(
-        timeframes=("1h",), external_symbols=("qqq", "SPY", "spy"),
+        timeframes=("1h",),
+        reference_pairs=(("spy", "15m"), ("QQQ", "1d"), ("SPY", "15m")),
         vocabulary_digest=CORE_DIGEST)
-    assert declared.external_symbols == ("QQQ", "SPY")
+    assert declared.reference_pairs == (("QQQ", "1d"), ("SPY", "15m"))
 
 
 @pytest.mark.parametrize("timeframes", [("30m",), ("",), (), ("1h", "5m")])
 def test_an_unsupported_or_blank_timeframe_is_refused(timeframes):
     with pytest.raises(ReplayInputError) as caught:
-        StrategyDependencies(timeframes=timeframes, external_symbols=(),
+        StrategyDependencies(timeframes=timeframes, reference_pairs=(),
                              vocabulary_digest=CORE_DIGEST)
     assert caught.value.code == "invalid_value"
 
 
-def test_a_blank_external_symbol_is_refused():
+def test_a_malformed_reference_pair_is_refused():
     with pytest.raises(ReplayInputError) as caught:
-        StrategyDependencies(timeframes=("1h",), external_symbols=("",),
+        StrategyDependencies(timeframes=("1h",), reference_pairs=(("", "1d"),),
                              vocabulary_digest=CORE_DIGEST)
     assert caught.value.code == "invalid_value"
 

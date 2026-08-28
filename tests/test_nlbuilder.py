@@ -20,6 +20,44 @@ GOOD_SPEC = {"version": 2, "name": "dip", "timeframe": "1h",
              "risk": {"stop": {"kind": "atr", "n": 14, "mult": 2.0},
                       "target": {"kind": "rr", "rr": 2.0}}}
 
+RELATIVE_SCOPE_SPEC = {
+    "version": 2,
+    "name": "relative_scope",
+    "timeframe": "15m",
+    "long": {"all": [
+        {
+            "lhs": {"src": "close"},
+            "op": ">",
+            "rhs": {"src": "close", "sym": "SPY"},
+        },
+        {
+            "lhs": {
+                "ind": "sma", "n": 20, "of": {"src": "close"},
+                "sym": "SPY", "tf": "15m",
+            },
+            "op": ">",
+            "rhs": {
+                "ind": "sma", "n": 20,
+                "of": {"src": "close", "sym": "QQQ", "tf": "1d"},
+                "sym": "SPY", "tf": "15m",
+            },
+        },
+    ]},
+    "risk": {
+        "stop": {"kind": "atr", "n": 14, "mult": 2.0},
+        "target": {"kind": "rr", "rr": 2.0},
+    },
+}
+
+RELATIVE_SCOPE_READBACK = (
+    'Strategy "relative_scope" on 15m bars.\n'
+    "Enter long when ALL of:\n"
+    "  - close is above SPY:close\n"
+    "  - SPY:sma(20)[15m] is above "
+    "SPY:sma(20, of=QQQ:close[1d])[15m]\n"
+    "Stop: 2x ATR(14) from entry. Target: 2x the risked distance."
+)
+
 LOW_IEX_DISCLOSURE = "US-equity extended-hours IEX data can be sparse."
 PROMPT_VOCABULARY = core_vocabulary().with_windows(
     WindowSpec("london", "Europe/London", time(8), time(16, 30),
@@ -68,6 +106,8 @@ def test_prompt_renders_registries_and_is_deterministic():
     for needle in ("crosses_above", "gap_pct", "bars_since", "supertrend",
                    "time_stop", "not_expressible", '"version": 2'):
         assert needle in p1, needle
+    assert '"sym"?: <SYMBOL>' in p1
+    assert "[A-Z][A-Z0-9.-]{0,9}" in p1
 
 
 def test_rule_prompt_renders_window_rows_from_the_supplied_vocabulary():
@@ -337,6 +377,148 @@ def test_happy_path_returns_spec_and_readback():
     assert res.clarifications == ["defaulted timeframe to 1h"]
     assert res.attempts == 1
     assert client.requests[0]["system"][0]["cache_control"] == {"type": "ephemeral"}
+
+
+def test_blank_prompt_policy_keeps_the_strategy_prompt_byte_identical():
+    expected = render_system_prompt().encode("utf-8")
+    for policy in ("", " \n\t "):
+        client = FakeClient([json.dumps({"spec": GOOD_SPEC})])
+        compile_strategy("buy rsi dips", client=client, prompt_policy=policy)
+        assert client.requests[0]["system"][0]["text"].encode("utf-8") == expected
+
+
+def test_prompt_policy_is_appended_once_before_the_first_strategy_call():
+    policy = "# House policy\n- one rule"
+    bad = {**GOOD_SPEC, "timeframe": "2h"}
+    client = FakeClient([
+        json.dumps({"spec": bad}),
+        json.dumps({"spec": GOOD_SPEC}),
+    ])
+    result = compile_strategy(
+        "buy rsi dips", client=client, prompt_policy=f"  {policy}\n")
+    expected = render_system_prompt() + "\n\n" + policy
+    assert result.attempts == 2
+    assert [call["system"][0]["text"] for call in client.requests] == [
+        expected, expected,
+    ]
+    assert expected.count(policy) == 1
+
+
+def test_plain_string_candidate_validator_is_one_complete_error():
+    seen = 0
+
+    def retry_validator(kind, spec):
+        nonlocal seen
+        seen += 1
+        assert kind == "rules"
+        assert spec == GOOD_SPEC
+        return "house policy failed" if seen == 1 else []
+
+    client = FakeClient([
+        json.dumps({"spec": GOOD_SPEC}),
+        json.dumps({"spec": GOOD_SPEC}),
+    ])
+    result = compile_strategy(
+        "buy rsi dips", client=client, max_retries=1,
+        candidate_validator=retry_validator)
+    assert result.spec == GOOD_SPEC
+    assert client.requests[1]["messages"][-1]["content"] == (
+        "The spec failed validation. Fix exactly these errors and resend the "
+        "full JSON object:\n- house policy failed"
+    )
+
+    terminal = compile_strategy(
+        "buy rsi dips",
+        client=FakeClient([json.dumps({"spec": GOOD_SPEC})]),
+        max_retries=0,
+        candidate_validator=lambda kind, spec: "house policy failed",
+    )
+    assert terminal.not_expressible == (
+        "could not produce a valid spec; last errors: house policy failed"
+    )
+    assert "h; o; u; s; e" not in terminal.not_expressible
+
+    ordered = compile_strategy(
+        "buy rsi dips",
+        client=FakeClient([json.dumps({"spec": GOOD_SPEC})]),
+        max_retries=0,
+        candidate_validator=lambda kind, spec: ("first error", "second error"),
+    )
+    assert ordered.not_expressible == (
+        "could not produce a valid spec; last errors: first error; second error"
+    )
+
+
+def test_strategy_normalizer_is_revalidated_before_the_caller_validator():
+    validator_calls = []
+    invalid = {"version": 2, "name": "normalized-invalid", "timeframe": "2h"}
+    client = FakeClient([
+        json.dumps({"spec": GOOD_SPEC}),
+        json.dumps({"spec": GOOD_SPEC}),
+    ])
+    calls = 0
+
+    def normalize(kind, spec):
+        nonlocal calls
+        calls += 1
+        assert kind == "rules"
+        return invalid if calls == 1 else GOOD_SPEC
+
+    result = compile_strategy(
+        "buy rsi dips", client=client, max_retries=1,
+        candidate_normalizer=normalize,
+        candidate_validator=lambda kind, spec: validator_calls.append((kind, spec)) or [],
+    )
+    assert result.spec == GOOD_SPEC
+    assert result.attempts == 2
+    assert "timeframe" in client.requests[1]["messages"][-1]["content"]
+    assert validator_calls == [("rules", GOOD_SPEC)]
+
+
+def test_strategy_caller_channels_share_the_default_three_attempt_stream():
+    bad = {**GOOD_SPEC, "timeframe": "2h"}
+    replies = [
+        json.dumps({"spec": bad}),
+        json.dumps({"spec": GOOD_SPEC}),
+        json.dumps({"spec": GOOD_SPEC}),
+    ]
+    normalized = []
+
+    def normalize(kind, spec):
+        normalized.append((kind, spec))
+        return spec
+
+    result = compile_strategy(
+        "buy rsi dips", client=FakeClient(replies),
+        candidate_normalizer=normalize,
+        candidate_validator=lambda kind, spec: (
+            "integer policy failed", "symbol policy failed"),
+    )
+    assert result.attempts == 3
+    assert result.usage == {
+        "input_tokens": 300,
+        "output_tokens": 150,
+        "cache_read_tokens": 30,
+        "cache_write_tokens": 15,
+    }
+    assert normalized == [("rules", GOOD_SPEC), ("rules", GOOD_SPEC)]
+    assert result.not_expressible == (
+        "could not produce a valid spec; last errors: "
+        "integer policy failed; symbol policy failed"
+    )
+
+
+def test_strategy_readback_uses_the_native_valid_normalized_candidate():
+    seen = []
+    client = FakeClient([json.dumps({"spec": GOOD_SPEC})])
+    result = compile_strategy(
+        "compare the market", client=client,
+        candidate_normalizer=lambda kind, spec: RELATIVE_SCOPE_SPEC,
+        candidate_validator=lambda kind, spec: seen.append((kind, spec)) or [],
+    )
+    assert seen == [("rules", RELATIVE_SCOPE_SPEC)]
+    assert result.spec == RELATIVE_SCOPE_SPEC
+    assert result.readback == RELATIVE_SCOPE_READBACK
 
 
 def test_validation_errors_trigger_retry_with_error_feedback():

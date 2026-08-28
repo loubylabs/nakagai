@@ -22,7 +22,8 @@ _CMP = {">": operator.gt, "<": operator.lt,
         ">=": operator.ge, "<=": operator.le}
 
 
-def _condition_mask(cond: dict, bars: pd.DataFrame, frames: dict, tf: str,
+def _condition_mask(cond: dict, bars: pd.DataFrame, frames: dict,
+                    symbol: str, tf: str,
                     tfs: TimeframeSet, vocabulary: Vocabulary) -> pd.Series:
     """The condition row by row, every row under the same prefix rule.
 
@@ -40,28 +41,33 @@ def _condition_mask(cond: dict, bars: pd.DataFrame, frames: dict, tf: str,
         raise ValueError("the oracle evaluates bars_since on intraday frames only")
     delta = tfs.deltas[tf]
     cmp = _CMP[cond["op"]]
-    vals = [(prefix_value(cond["lhs"], frames, tf, ts + delta, tfs, vocabulary),
-             prefix_value(cond["rhs"], frames, tf, ts + delta, tfs, vocabulary))
+    vals = [(prefix_value(
+                cond["lhs"], frames, symbol, tf, ts + delta, tfs, vocabulary),
+             prefix_value(
+                cond["rhs"], frames, symbol, tf, ts + delta, tfs, vocabulary))
             for ts in bars.index]
     return pd.Series([bool(cmp(a, b)) for a, b in vals], index=bars.index)
 
 
-def prefix_value(node, frames: dict, eval_tf: str, now: pd.Timestamp,
+def prefix_value(node, frames: dict, eval_symbol: str, eval_tf: str,
+                 now: pd.Timestamp,
                  tfs: TimeframeSet = DEFAULT_TIMEFRAMES,
                  vocabulary: Vocabulary | None = None) -> float:
-    """The node's value at `now` under the old prefix-and-iloc[-1] semantics."""
+    """One pair-keyed node value under old prefix-and-iloc[-1] semantics."""
     vocabulary = resolve_vocabulary(vocabulary)
     if isinstance(node, (int, float)):
         return float(node)
-    cut = {tf: closed_before(f, tf, now, tfs) for tf, f in frames.items()}
+    src_symbol = node.get("sym", eval_symbol)
     src_tf = node.get("tf", eval_tf)
-    bars = cut[src_tf]
+    frame = frames[(src_symbol, src_tf)]
+    bars = closed_before(frame, src_tf, now, tfs)
     if not len(bars):
         return float("nan")
     if "src" in node:
         return float(bars[node["src"]].iloc[-1])
     if "op" in node:
-        vals = [prefix_value(a, frames, eval_tf, now, tfs, vocabulary)
+        vals = [prefix_value(
+                    a, frames, src_symbol, src_tf, now, tfs, vocabulary)
                 for a in node["args"]]
         if node["op"] == "abs":
             return abs(vals[0])
@@ -75,7 +81,8 @@ def prefix_value(node, frames: dict, eval_tf: str, now: pd.Timestamp,
         name = node["ind"]
         term = vocabulary.indicators[name]
         a = {**term.defaults,
-             **{k: v for k, v in node.items() if k not in ("ind", "of", "tf")}}
+             **{k: v for k, v in node.items()
+                if k not in ("ind", "of", "tf", "sym")}}
         if term.kind == "bar":
             out = term.fn(bars, a)
         else:
@@ -90,9 +97,10 @@ def prefix_value(node, frames: dict, eval_tf: str, now: pd.Timestamp,
     name = node["prim"]
     term = vocabulary.primitives[name]
     a = {**term.defaults,
-         **{k: v for k, v in node.items() if k not in ("prim", "tf")}}
+         **{k: v for k, v in node.items()
+            if k not in ("prim", "tf", "sym")}}
     if name == "bars_since":
         a["eval_fn"] = lambda cond, b: _condition_mask(
-            cond, b, frames, src_tf, tfs, vocabulary)
+            cond, b, frames, src_symbol, src_tf, tfs, vocabulary)
     out = term.fn(None, bars, **a)
     return float(out.iloc[-1]) if isinstance(out, pd.Series) else float(out)

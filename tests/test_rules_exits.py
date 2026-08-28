@@ -207,7 +207,11 @@ def test_a_rule_exit_comes_back_as_an_exit_decision():
     exits = {"exit": {"any": [{"lhs": {"src": "close"}, "op": ">", "rhs": 105.0}]}}
     strategy = RuleStrategy({"spec": _spec(exits)})
     ctx = _manage_ctx([110.0] * 20)
-    ctx.fe = FrameEval(ctx.bars, vocabulary=core_vocabulary())
+    ctx.fe = FrameEval(
+        ctx.symbol,
+        {(ctx.symbol, tf): frame for tf, frame in ctx.bars.items()},
+        vocabulary=core_vocabulary(),
+    )
     ctx.cursor = {"15m": len(ctx.bars["15m"]) - 1}
     assert strategy.manage(_view(), ctx).action == "exit"
 

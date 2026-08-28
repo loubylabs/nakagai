@@ -7,8 +7,9 @@ retries always survives."""
 
 import json
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from typing import TypeAlias
 
 from nakagai.nlbuilder.prompt import render_system_prompt
 from nakagai.strategies.composite import (
@@ -18,6 +19,9 @@ from nakagai.strategies.rules.vocabulary import Vocabulary, resolve_vocabulary
 
 MODEL = "claude-opus-4-8"
 MAX_TOKENS = 8000
+
+CandidateNormalizer: TypeAlias = Callable[[str, dict], dict]
+CandidateValidator: TypeAlias = Callable[[str, dict], Sequence[str]]
 
 
 @dataclass
@@ -102,11 +106,18 @@ def compile_strategy(description: str, current_spec: dict | None = None,
                      client=None, model: str = MODEL,
                      max_retries: int = 2,
                      plays: Mapping[str, Mapping] | None = None, *,
-                     vocabulary: Vocabulary | None = None) -> CompileResult:
+                     vocabulary: Vocabulary | None = None,
+                     prompt_policy: str = "",
+                     candidate_normalizer: CandidateNormalizer | None = None,
+                     candidate_validator: CandidateValidator | None = None,
+                     ) -> CompileResult:
     vocabulary = resolve_vocabulary(vocabulary)
     client = _client_or_default(client)
+    prompt = render_system_prompt(plays, vocabulary=vocabulary)
+    if prompt_policy.strip():
+        prompt += "\n\n" + prompt_policy.strip()
     system = [{"type": "text",
-               "text": render_system_prompt(plays, vocabulary=vocabulary),
+               "text": prompt,
                "cache_control": {"type": "ephemeral"}}]
     user = description.strip()
     if current_spec is not None:
@@ -151,6 +162,13 @@ def compile_strategy(description: str, current_spec: dict | None = None,
         if kind not in ("rules", "composite"):
             kind = "rules"
         errors, describe = _check(kind, spec, plays, vocabulary)
+        if not errors and candidate_normalizer is not None:
+            spec = candidate_normalizer(kind, spec)
+            errors, describe = _check(kind, spec, plays, vocabulary)
+        if not errors and candidate_validator is not None:
+            callback_errors = candidate_validator(kind, spec)
+            errors = ([callback_errors] if isinstance(callback_errors, str)
+                      else list(callback_errors))
         if not errors:
             result.spec = spec
             result.kind = kind

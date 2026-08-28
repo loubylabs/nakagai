@@ -176,6 +176,12 @@ def test_window_rows_participate_in_the_vocabulary_digest():
             != vocabulary_digest(shortened_london_vocabulary))
 
 
+def test_expression_scope_contract_participates_in_the_vocabulary_digest():
+    assert vocabulary_digest(core_vocabulary) != (
+        "7a76c0722a0bfa5f8553d10ed586366f899b1327769f751fd13d748643248c15"
+    )
+
+
 def test_equivalent_fresh_window_factories_have_one_digest():
     assert (vocabulary_digest(london_vocabulary)
             == vocabulary_digest(rebuilt_london_vocabulary))

@@ -13,6 +13,9 @@ from nakagai.strategies.rules.canon import canonical_expr
 from nakagai.strategies.rules import spec as rules_spec
 from nakagai.strategies.rules.spec import (
     MAX_DEPTH, TIMEFRAMES, _expr_text, group_text, validate_condition_group)
+from nakagai.strategies.rules.strategy import (
+    expression_reference_pairs, spec_reference_pairs,
+)
 from nakagai.strategies.rules.vocabulary import (
     Term, core_vocabulary,
 )
@@ -31,6 +34,39 @@ ORB = {
               "trailing": {"kind": "atr", "n": 14, "mult": 2.5}},
     "risk": {"stop": {"kind": "atr", "n": 14, "mult": 2.0},
              "target": {"kind": "rr", "rr": 2.0}},
+}
+
+RELATIVE_SCOPE_GROUP = {
+    "all": [
+        {
+            "lhs": {"src": "close"},
+            "op": ">",
+            "rhs": {"src": "close", "sym": "SPY"},
+        },
+        {
+            "lhs": {
+                "ind": "sma", "n": 20, "of": {"src": "close"},
+                "sym": "SPY", "tf": "15m",
+            },
+            "op": ">",
+            "rhs": {
+                "ind": "sma", "n": 20,
+                "of": {"src": "close", "sym": "QQQ", "tf": "1d"},
+                "sym": "SPY", "tf": "15m",
+            },
+        },
+    ],
+}
+
+RELATIVE_SCOPE_SPEC = {
+    "version": 2,
+    "name": "relative_scope",
+    "timeframe": "15m",
+    "long": RELATIVE_SCOPE_GROUP,
+    "risk": {
+        "stop": {"kind": "atr", "n": 14, "mult": 2.0},
+        "target": {"kind": "rr", "rr": 2.0},
+    },
 }
 
 LOW_IEX_DISCLOSURE = "US-equity extended-hours IEX data can be sparse."
@@ -623,6 +659,173 @@ def test_describe_mentions_the_pieces():
     assert "time stop" in text.lower()
 
 
+@pytest.mark.parametrize("node", [
+    {"src": "close", "sym": "SPY"},
+    {"ind": "sma", "n": 20, "sym": "SPY"},
+    {"prim": "gap_pct", "sym": "SPY"},
+    {"op": "+", "args": [
+        {"src": "close", "sym": "SPY"},
+        {"src": "close", "sym": "QQQ"},
+    ]},
+], ids=["source", "indicator", "primitive", "math-children"])
+def test_symbol_scope_is_accepted_on_scoped_expressions(node):
+    assert validate_spec(_rule_with(node)) == []
+
+
+@pytest.mark.parametrize("value", [
+    "spy", " SPY", "", "123", "ABCDEFGHIJK", "BRK/B", "NASDAQ:QQQ",
+    "SP'Y", "ÅBC", None, 7,
+], ids=[
+    "lowercase", "whitespace", "empty", "leading-digit", "too-long",
+    "slash", "colon", "quote", "non-ascii", "none", "number",
+])
+def test_symbol_scope_rejects_noncanonical_shapes(value):
+    errors = validate_spec(_rule_with({"src": "close", "sym": value}))
+    assert errors == [
+        "long.all[0].rhs: sym must match [A-Z][A-Z0-9.-]{0,9}, "
+        f"got {value!r}"
+    ]
+
+
+def test_math_and_rule_roots_refuse_symbol_scope():
+    math_errors = validate_spec(_rule_with(
+        {"op": "+", "args": [{"src": "close"}, 1], "sym": "SPY"}))
+    assert math_errors == ["long.all[0].rhs: math nodes take only op/args"]
+    root_errors = validate_spec({**ORB, "sym": "SPY"})
+    assert root_errors == ["unknown keys ['sym']"]
+
+
+@pytest.mark.parametrize(("node", "text"), [
+    ({"src": "close"}, "close"),
+    ({"src": "close", "sym": "SPY"}, "SPY:close"),
+    ({"src": "close", "sym": "QQQ", "tf": "1d"}, "QQQ:close[1d]"),
+    ({"ind": "sma", "n": 20, "sym": "SPY", "tf": "15m"},
+     "SPY:sma(20)[15m]"),
+    ({"ind": "sma", "n": 20, "sym": "SPY", "tf": "15m",
+      "of": {"src": "close", "sym": "QQQ", "tf": "1d"}},
+     "SPY:sma(20, of=QQQ:close[1d])[15m]"),
+    ({"op": "+", "args": [
+        {"src": "close", "sym": "SPY"},
+        {"src": "close", "sym": "QQQ", "tf": "1d"},
+     ]}, "(SPY:close + QQQ:close[1d])"),
+    ({"prim": "gap_pct", "sym": "SPY", "tf": "15m"},
+     "SPY:gap_pct[15m]"),
+], ids=[
+    "driving-source", "source", "source-timeframe", "indicator",
+    "nested-symbol-and-timeframe", "math", "primitive",
+])
+def test_symbol_scope_readback_is_explicit(node, text):
+    assert _expr_text(node, core_vocabulary()) == text
+
+
+def test_explicit_default_source_readback_is_controlled_by_term_metadata():
+    explicit_source = Term(
+        "kama", "series",
+        {"n": (1, 100), "fast": (1, 100), "slow": (1, 100)}, {},
+        lambda series, args: series,
+        render_explicit_source=True,
+    )
+    vocabulary = core_vocabulary().with_terms(explicit_source)
+
+    assert _expr_text(
+        {"ind": "sma", "n": 20, "of": {"src": "close"}},
+        vocabulary,
+    ) == "sma(20)"
+    assert _expr_text(
+        {"ind": "kama", "n": 10, "fast": 2, "slow": 30,
+         "of": {"src": "close"}},
+        vocabulary,
+    ) == "kama(10, 2, 30, of=close)"
+    assert _expr_text(
+        {"ind": "kama", "n": 10, "fast": 2, "slow": 30},
+        vocabulary,
+    ) == "kama(10, 2, 30)"
+
+
+def test_explicit_source_rendering_is_core_neutral_term_metadata():
+    arbitrary = Term(
+        "external_series", "series", {"n": (1, 100)}, {},
+        lambda series, args: series,
+        render_explicit_source=True,
+    )
+    vocabulary = core_vocabulary().with_terms(arbitrary)
+    assert _expr_text(
+        {"ind": "external_series", "n": 7, "of": {"src": "close"}},
+        vocabulary,
+    ) == "external_series(7, of=close)"
+
+    renderer_source = inspect.getsource(rules_spec._expr_text)
+    assert "nakagai_platform" not in renderer_source
+    assert "'kama'" not in renderer_source
+    assert '"kama"' not in renderer_source
+    assert "adapter" not in renderer_source
+
+
+def test_relative_scope_description_matches_the_frozen_readback():
+    assert validate_spec(RELATIVE_SCOPE_SPEC) == []
+    assert describe_spec(RELATIVE_SCOPE_SPEC) == (
+        'Strategy "relative_scope" on 15m bars.\n'
+        "Enter long when ALL of:\n"
+        "  - close is above SPY:close\n"
+        "  - SPY:sma(20)[15m] is above "
+        "SPY:sma(20, of=QQQ:close[1d])[15m]\n"
+        "Stop: 2x ATR(14) from entry. Target: 2x the risked distance."
+    )
+
+
+def test_expression_reference_pairs_follow_lexical_symbol_and_timeframe_scope():
+    node = {
+        "ind": "sma", "n": 20, "sym": "SPY", "tf": "15m",
+        "of": {
+            "op": "+", "args": [
+                {"src": "close"},
+                {"src": "close", "sym": "QQQ", "tf": "1d"},
+            ],
+        },
+    }
+    assert expression_reference_pairs(node, "1h") == (
+        ("QQQ", "1d"), ("SPY", "15m"),
+    )
+
+
+def test_child_symbol_override_inherits_its_parent_timeframe():
+    node = {
+        "ind": "sma", "n": 20, "tf": "1d",
+        "of": {"src": "close", "sym": "QQQ"},
+    }
+    assert expression_reference_pairs(node, "15m") == (("QQQ", "1d"),)
+
+
+def test_child_timeframe_override_inherits_its_parent_symbol():
+    node = {
+        "ind": "sma", "n": 20, "sym": "SPY",
+        "of": {"src": "close", "tf": "1d"},
+    }
+    assert expression_reference_pairs(node, "15m") == (
+        ("SPY", "15m"), ("SPY", "1d"),
+    )
+
+
+def test_spec_reference_pairs_cover_entries_exits_and_condition_arguments():
+    spec = {
+        **RELATIVE_SCOPE_SPEC,
+        "exits": {"exit": {"all": [{
+            "lhs": {
+                "prim": "bars_since",
+                "cond": {
+                    "lhs": {"src": "close", "sym": "SPY", "tf": "15m"},
+                    "op": ">",
+                    "rhs": {"src": "open"},
+                },
+            },
+            "op": ">",
+            "rhs": 2,
+        }]}},
+    }
+    assert validate_spec(spec) == []
+    assert spec_reference_pairs(spec) == (("QQQ", "1d"), ("SPY", "15m"))
+
+
 def test_canonical_hash_stable_and_name_free():
     import copy
     a, b = copy.deepcopy(ORB), copy.deepcopy(ORB)
@@ -631,6 +834,25 @@ def test_canonical_hash_stable_and_name_free():
     assert spec_hash(a) == spec_hash(b)
     assert len(spec_hash(a)) == 64
     assert "name" not in canonical_spec(a)
+
+
+def test_no_symbol_scope_keeps_the_existing_canonical_identity():
+    assert spec_hash(ORB) == (
+        "591450193c6785a71b7cd369ab7ddad38ddbb428c3f8bcae75ab19e2fd6563ec"
+    )
+    assert "sym" not in repr(canonical_spec(ORB))
+
+
+def test_explicit_symbol_scope_is_canonical_and_identity_bearing():
+    left = _rule_with({"src": "close", "sym": "SPY"})
+    right = _rule_with({"sym": "SPY", "src": "close"})
+    driving = _rule_with({"src": "close"})
+    assert validate_spec(left) == []
+    assert canonical_expr(left["long"]["all"][0]["rhs"], core_vocabulary()) == {
+        "src": "close", "sym": "SPY",
+    }
+    assert spec_hash(left) == spec_hash(right)
+    assert spec_hash(left) != spec_hash(driving)
 
 
 def test_hash_changes_when_logic_changes():

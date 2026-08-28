@@ -18,6 +18,7 @@ after the source timeframe lands.
 import pandas as pd
 
 from nakagai.data.base import DataProvider
+from nakagai.data.alpaca import AlpacaBarBatchResult, _frame_from_rows
 from nakagai.data.cache import BarCache
 from nakagai.data.resample import DERIVED, resample_bars
 
@@ -138,10 +139,38 @@ def fetch_incremental_multi(cache: BarCache, provider, symbols: list[str],
         if cold:
             groups.append((start, cold))
     written: dict[str, int] = dict.fromkeys(wanted, 0)
+    step = max(1, int(provider.max_symbols_per_request))
     for group_start, group in groups:
-        frames = provider.fetch_bars_multi(group, timeframe, group_start, end)
-        for sym in group:
-            df = frames.get(sym)
-            if df is not None and not df.empty:
-                written[sym] = cache.upsert(sym, timeframe, df)
+        for offset in range(0, len(group), step):
+            chunk = group[offset:offset + step]
+            result = provider.fetch_bars_multi(
+                chunk, timeframe, group_start, end)
+            _commit_batch(cache, timeframe, chunk, result, written)
     return written
+
+
+def _commit_batch(cache: BarCache, timeframe: str, requested: list[str],
+                  result: AlpacaBarBatchResult,
+                  written: dict[str, int]) -> None:
+    """Validate and commit one completed logical provider request."""
+    expected = tuple(requested)
+    if result.requested != expected:
+        raise ValueError(
+            f"provider returned requested={result.requested!r}, expected {expected!r}")
+    symbols = tuple(member.symbol for member in result.members)
+    if symbols != expected:
+        raise ValueError(
+            f"provider returned members={symbols!r}, expected {expected!r}")
+    omitted = tuple(
+        member.symbol for member in result.members if not member.present)
+    if omitted:
+        if len(omitted) == 1:
+            detail = f"symbol {omitted[0]!r}"
+        else:
+            detail = f"symbols {omitted!r}"
+        raise ValueError(f"provider omitted requested {detail}")
+    for member in result.members:
+        frame = _frame_from_rows(list(member.rows))
+        if not frame.empty:
+            written[member.symbol] = cache.upsert(
+                member.symbol, timeframe, frame)

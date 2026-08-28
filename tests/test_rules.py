@@ -27,7 +27,9 @@ def _frames(b15, b1h=None, b1d=None) -> dict:
 
 
 def _fe(b15, b1h=None, b1d=None) -> FrameEval:
-    return FrameEval(_frames(b15, b1h, b1d), TFS)
+    frames = _frames(b15, b1h, b1d)
+    return FrameEval(
+        "SPY", {("SPY", tf): frame for tf, frame in frames.items()}, TFS)
 
 
 def _ctx(b15, b1h=None, b1d=None, *, vocabulary=None) -> MarketContext:
@@ -36,7 +38,11 @@ def _ctx(b15, b1h=None, b1d=None, *, vocabulary=None) -> MarketContext:
     frames = _frames(b15, b1h, b1d)
     return MarketContext("SPY", b15.index[-1] + pd.Timedelta(minutes=15),
                          bars=frames, tfs=TFS,
-                         fe=FrameEval(frames, TFS, vocabulary=vocabulary),
+                         fe=FrameEval(
+                             "SPY",
+                             {("SPY", tf): frame for tf, frame in frames.items()},
+                             TFS, vocabulary=vocabulary,
+                         ),
                          cursor={tf: len(f) - 1 for tf, f in frames.items()})
 
 

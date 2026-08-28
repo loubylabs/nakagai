@@ -3,7 +3,7 @@
 // Artifact: indicator. It marks the bars Nakagai would signal on, draws the
 // levels that signal froze, and raises one alert for each one. It places no
 // orders.
-// Generator version: 1
+// Generator version: 2
 // Spec hash: f41b415366d225bdb2c7a4319b1137df8c08ad83704ecd4647546420619b4a20
 //
 // Chart: a standard 15-minute candle chart. Heikin Ashi, Renko, Line Break,

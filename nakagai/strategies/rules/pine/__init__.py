@@ -8,13 +8,13 @@ lower_pine, is exported from nakagai.strategies.rules instead.
 """
 
 from nakagai.strategies.rules.pine.model import (
-    GENERATOR_VERSION, PineBundle, PineCompileError, PineExits, PineExpr,
-    PineHelper, PineInput, PineLowering, PineProgram, PineRisk, RulePath,
-    TermCall,
+    GENERATOR_VERSION, MAX_PINE_REQUEST_PAIRS, PineBundle, PineCompileError,
+    PineExits, PineExpr, PineHelper, PineInput, PineLowering, PineProgram,
+    PineRisk, RulePath, TermCall,
 )
 
 __all__ = [
-    "GENERATOR_VERSION", "PineBundle", "PineCompileError", "PineExits",
-    "PineExpr", "PineHelper", "PineInput", "PineLowering", "PineProgram",
-    "PineRisk", "RulePath", "TermCall",
+    "GENERATOR_VERSION", "MAX_PINE_REQUEST_PAIRS", "PineBundle",
+    "PineCompileError", "PineExits", "PineExpr", "PineHelper", "PineInput",
+    "PineLowering", "PineProgram", "PineRisk", "RulePath", "TermCall",
 ]

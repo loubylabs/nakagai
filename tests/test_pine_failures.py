@@ -12,9 +12,12 @@ import pytest
 
 import nakagai
 from nakagai.strategies.rules import (
-    PineCompileError, PineExpr, PineHelper, PineLowering, lower_pine,
+    PineCompileError, PineExpr, PineHelper, PineLowering, compile_pine,
+    lower_pine,
     validate_spec,
 )
+from nakagai.strategies.rules.pine import compiler as pine_compiler
+from nakagai.strategies.rules.pine.model import MAX_PINE_REQUEST_PAIRS
 from nakagai.strategies.rules.pine.lowerings import HELPERS
 from nakagai.strategies.rules.vocabulary import Term, core_vocabulary
 
@@ -277,17 +280,65 @@ def _codes_the_compiler_can_raise() -> set[str]:
     return out
 
 
-def test_the_whole_refusal_vocabulary_is_exactly_these_six_codes():
+def test_the_whole_refusal_vocabulary_is_exactly_these_seven_codes():
     # The platform pins this core by SHA and maps the codes to HTTP status, so
     # the set is a published contract rather than an implementation detail. A
-    # seventh code added without a caller taught about it lands in that
+    # new code added without a caller taught about it lands in that
     # caller's 500 bucket, whatever it actually means, and the caller cannot
-    # fix a name from its side. Only invalid_spec and pine_unsupported are
-    # things a user did; the other four are the compiler admitting a hole.
+    # fix a name from its side. invalid_spec, pine_unsupported, and the request
+    # limit are user-actionable. The other four admit compiler holes.
     assert _codes_the_compiler_can_raise() == {
         "invalid_spec", "pine_unsupported", "pine_bad_input",
         "pine_identifier_collision", "pine_unknown_helper",
-        "pine_generation_failed"}
+        "pine_generation_failed", "pine_request_limit"}
+
+
+def _pair_limit_spec(count: int) -> dict:
+    conditions = []
+    for index in range(0, count, 2):
+        lhs = {"src": "close", "sym": f"S{index:02d}"}
+        rhs = ({"src": "close", "sym": f"S{index + 1:02d}"}
+               if index + 1 < count else 0)
+        conditions.append({"lhs": lhs, "op": ">", "rhs": rhs})
+    return {"version": 2, "name": "pair_limit", "timeframe": "15m",
+            "long": {"all": conditions}}
+
+
+def test_exactly_forty_unique_reference_pairs_compile():
+    bundle = compile_pine(_pair_limit_spec(MAX_PINE_REQUEST_PAIRS))
+    assert bundle.indicator.count("request.security(") == 40
+    assert bundle.strategy.count("request.security(") == 40
+
+
+def test_forty_one_unique_reference_pairs_refuse_before_render(monkeypatch):
+    rendered = []
+    monkeypatch.setattr(pine_compiler, "render",
+                        lambda program: rendered.append(program))
+    count = MAX_PINE_REQUEST_PAIRS + 1
+    with pytest.raises(PineCompileError) as exc:
+        pine_compiler.compile_pine(_pair_limit_spec(count))
+    assert exc.value.code == "pine_request_limit"
+    assert str(exc.value) == (
+        f"the spec requires {count} unique request.security pairs; "
+        "Pine allows at most 40")
+    assert exc.value.path == ""
+    assert exc.value.term == ""
+    assert rendered == []
+
+
+def test_nested_symbol_pair_request_refuses_with_the_exact_pair_message():
+    spec = _spec_using(
+        "sma", tf="1h", sym="SPY",
+        of={"ind": "ema", "n": 5, "tf": "4h", "sym": "QQQ"})
+    with pytest.raises(PineCompileError) as exc:
+        lower_pine(spec)
+    assert exc.value.code == "pine_unsupported"
+    assert str(exc.value) == (
+        "long.all[0].lhs.of: (QQQ, 4h) is read inside (SPY, 1h), and "
+        "request.security does not nest; move the reference up to the "
+        "spec's own scope")
+    assert exc.value.path == "long.all[0].lhs.of"
+    assert exc.value.term == "ema"
 
 
 def test_a_term_whose_pine_slot_is_not_a_lowering_is_refused_where_it_is_built():

@@ -721,7 +721,7 @@ def fall_bucket_request() -> PortfolioReplayRequest:
 
 def bucket_dependencies() -> ReplayDependencies:
     """The base timeframe and the four-hour bucket, and nothing else."""
-    return ReplayDependencies(timeframes=("15m", "4h"), external_symbols=())
+    return ReplayDependencies(timeframes=("15m", "4h"), reference_pairs=())
 
 
 # ------------------------------------------------------------- bar fixtures
@@ -730,7 +730,7 @@ def bucket_dependencies() -> ReplayDependencies:
 def base_dependencies() -> ReplayDependencies:
     """Every supported timeframe and no external symbol."""
     return ReplayDependencies(
-        timeframes=("15m", "1h", "4h", "1d"), external_symbols=(),
+        timeframes=("15m", "1h", "4h", "1d"), reference_pairs=(),
     )
 
 
@@ -821,11 +821,10 @@ def frames_for(request: PortfolioReplayRequest, schedule: ReplaySchedule,
             built[(symbol, timeframe)] = build(
                 scheduled_labels(schedule, timeframe, request.ic_tail_end),
             )
-    for symbol in dependencies.external_symbols:
-        for timeframe in dependencies.timeframes:
-            built.setdefault((symbol, timeframe), build(
-                scheduled_labels(schedule, timeframe, request.window.test_end),
-            ))
+    for symbol, timeframe in dependencies.reference_pairs:
+        built.setdefault((symbol, timeframe), build(
+            scheduled_labels(schedule, timeframe, request.window.test_end),
+        ))
     benchmark = request.benchmark.symbol
     if benchmark is not None:
         built.setdefault((benchmark, "15m"), build(
@@ -1169,7 +1168,7 @@ FIRST_CLOSE = ts("2026-11-27T14:45:00Z")
 
 # Only the base timeframe, which is what a replay reads to fill, mark, and
 # settle. A test that needs a context timeframe asks for one.
-BASE_ONLY = ReplayDependencies(timeframes=("15m",), external_symbols=())
+BASE_ONLY = ReplayDependencies(timeframes=("15m",), reference_pairs=())
 
 # Two plays under ONE priority, so the two canonical orders are genuinely
 # different: signal ordinals run play-major and funding runs symbol-major.
@@ -1389,7 +1388,7 @@ class FactorCall:
 
 
 def scripted_definition(play: ScriptedPlay, *, timeframes: tuple[str, ...] = ("15m",),
-                        external_symbols: tuple[str, ...] = (),
+                        reference_pairs: tuple[tuple[str, str], ...] = (),
                         calls: list | None = None,
                         factor_calls: list | None = None) -> StrategyDefinition:
     """One definition per scripted play, built the way a real one is.
@@ -1410,7 +1409,7 @@ def scripted_definition(play: ScriptedPlay, *, timeframes: tuple[str, ...] = ("1
 
     def dependencies(params: Mapping) -> StrategyDependencies:
         return StrategyDependencies(timeframes=tuple(timeframes),
-                                    external_symbols=tuple(external_symbols),
+                                    reference_pairs=tuple(reference_pairs),
                                     vocabulary_digest=digest)
 
     def factory(params: Mapping) -> Strategy:
@@ -1443,14 +1442,18 @@ def scripted_definition(play: ScriptedPlay, *, timeframes: tuple[str, ...] = ("1
 
 def _factor_call(play: ScriptedPlay, symbol: str, bars,
                  timestamps: tuple) -> FactorCall:
-    frame = bars.frame(bars.timeframe)
+    frame = bars.frame(symbol, bars.timeframe)
     return FactorCall(
         play_id=play.play_id,
         symbol=symbol,
         timeframe=bars.timeframe,
         timestamps=tuple(timestamps),
         labels=tuple(bars.labels),
-        rows=tuple((tf, len(bars.frame(tf))) for tf in sorted(bars.frames)),
+        rows=tuple(
+            (timeframe, len(bars.frame(symbol, timeframe)))
+            for pair_symbol, timeframe in sorted(bars.frames)
+            if pair_symbol == symbol
+        ),
         last_label=frame.index[-1] if len(frame.index) else None,
         highest_close=float(frame["close"].max()) if len(frame.index) else None,
     )
@@ -1609,7 +1612,7 @@ def replay_inputs(
     registry = FrozenStrategyRegistry.from_definitions(tuple(
         hook(scripted_definition(
             play, timeframes=declared.timeframes,
-            external_symbols=declared.external_symbols, calls=calls,
+            reference_pairs=declared.reference_pairs, calls=calls,
             factor_calls=factor_calls))
         for play in supplied
     ))

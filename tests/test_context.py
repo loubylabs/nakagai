@@ -8,10 +8,14 @@ answers the same two questions from its schedule instead, and
 
 """
 
+import numpy as np
 import pandas as pd
+import pytest
 
-from nakagai.data.cache import BarCache
+from nakagai.data.cache import BarCache, MemoryBars
+from nakagai.data.schema import DEFAULT_TIMEFRAMES, TimeframeSet
 from nakagai.engine.context import build_context
+from nakagai.engine.portfolio_types import ReplayInputError
 from nakagai.strategies.rules import RuleStrategy
 
 
@@ -30,7 +34,7 @@ def test_no_future_bars(tmp_path, make_bars):
     cache = BarCache(tmp_path)
     _fill(cache, make_bars)
     now = pd.Timestamp("2026-06-01 15:00", tz="UTC")  # 15m bar 14:45 just closed
-    ctx = build_context(cache, "SPY", now)
+    ctx = build_context(cache, "SPY", now, reference_pairs=())
     assert ctx.bars["15m"].index.max() == pd.Timestamp("2026-06-01 14:45", tz="UTC")
     assert ctx.bars["1h"].index.max() == pd.Timestamp("2026-06-01 14:00", tz="UTC")  # 14:00 bar closed at 15:00
     # daily: NY date of now is 2026-06-01 -> only bars strictly before that date
@@ -41,7 +45,7 @@ def test_partial_hour_excluded(tmp_path, make_bars):
     cache = BarCache(tmp_path)
     _fill(cache, make_bars)
     now = pd.Timestamp("2026-06-01 14:45", tz="UTC")
-    ctx = build_context(cache, "SPY", now)
+    ctx = build_context(cache, "SPY", now, reference_pairs=())
     # the 14:00 1h bar closes at 15:00; it must NOT be visible at 14:45
     assert ctx.bars["1h"].index.max() == pd.Timestamp("2026-06-01 13:00", tz="UTC")
 
@@ -54,7 +58,7 @@ def test_same_day_daily_bar_excluded(tmp_path, make_bars):
     # bar for the 2026-06-01 New York session.
     cache.upsert("SPY", "1d", make_bars(1, "1d", start="2026-06-01 00:00"))
     now = pd.Timestamp("2026-06-01 15:00", tz="UTC")  # NY date 2026-06-01
-    ctx = build_context(cache, "SPY", now)
+    ctx = build_context(cache, "SPY", now, reference_pairs=())
     # today's bar is look-ahead: it must NOT be visible (rule is strict <)
     assert pd.Timestamp("2026-06-01 04:00", tz="UTC") not in ctx.bars["1d"].index
     assert ctx.bars["1d"].index.max() == pd.Timestamp("2026-05-30 04:00", tz="UTC")
@@ -82,7 +86,8 @@ def test_a_context_declares_which_higher_timeframes_may_be_decided_on(
     cache = BarCache(tmp_path)
     _fill(cache, make_bars)
     contexts = {
-        stamp: build_context(cache, "SPY", pd.Timestamp(stamp, tz="UTC"))
+        stamp: build_context(
+            cache, "SPY", pd.Timestamp(stamp, tz="UTC"), reference_pairs=())
         for stamp in ("2026-06-01 13:45", "2026-06-01 15:00",
                       "2026-06-01 15:15", "2026-06-01 16:00")
     }
@@ -112,5 +117,178 @@ def test_an_hourly_play_decides_only_where_the_context_says_it_may(
     }})
     closes = pd.date_range("2026-06-01 14:45", periods=5, freq="15min", tz="UTC")
     decided = [now for now in closes
-               if strategy._fresh(build_context(cache, "SPY", now))]
+               if strategy._fresh(build_context(
+                   cache, "SPY", now, reference_pairs=()))]
     assert decided == [pd.Timestamp("2026-06-01 15:00", tz="UTC")]
+
+
+def test_point_in_time_context_loads_exact_pairs_once_and_keeps_driving_bars_only(
+        tmp_path, monkeypatch):
+    cache = BarCache(tmp_path)
+    driving_index = pd.date_range(
+        "2026-06-01 13:30", periods=4, freq="15min", tz="UTC")
+    reference_index = pd.DatetimeIndex(
+        [driving_index[0], driving_index[2]], tz="UTC")
+
+    def frame(index, base):
+        close = pd.Series(np.arange(len(index), dtype=float) + base, index=index)
+        return pd.DataFrame({
+            "open": close, "high": close + 1.0, "low": close - 1.0,
+            "close": close, "volume": 1_000.0,
+        }, index=index)
+
+    cache.upsert("SPY", "15m", frame(driving_index, 100.0))
+    cache.upsert("QQQ", "15m", frame(reference_index, 200.0))
+    calls = []
+    real_load = cache.load
+
+    def recording_load(symbol, timeframe):
+        calls.append((symbol, timeframe))
+        return real_load(symbol, timeframe)
+
+    monkeypatch.setattr(cache, "load", recording_load)
+    tfs = TimeframeSet(
+        driving="15m", higher=(), deltas=DEFAULT_TIMEFRAMES.deltas,
+        session_aligned=DEFAULT_TIMEFRAMES.session_aligned,
+    )
+
+    context = build_context(
+        cache, "SPY", driving_index[-1] + pd.Timedelta(minutes=15), tfs,
+        reference_pairs=(("QQQ", "15m"),),
+    )
+
+    assert calls == [("SPY", "15m"), ("QQQ", "15m")]
+    assert set(context.bars) == {"15m"}
+    assert context.driving_bars is context.bars["15m"]
+    reference = context.fe.on("QQQ", "15m")
+    assert list(reference.index) == list(context.bars["15m"].index)
+    assert reference.iloc[1].isna().all()
+    assert reference.iloc[2]["close"] == 201.0
+
+
+def test_point_in_time_reference_visibility_uses_its_own_close_time(tmp_path):
+    cache = BarCache(tmp_path)
+    driving_index = pd.DatetimeIndex([
+        pd.Timestamp("2026-06-01 14:45", tz="UTC"),
+        pd.Timestamp("2026-06-01 15:00", tz="UTC"),
+    ])
+    reference_index = pd.DatetimeIndex([
+        pd.Timestamp("2026-06-01 14:00", tz="UTC"),
+    ])
+
+    def frame(index, close):
+        values = pd.Series([close] * len(index), index=index, dtype=float)
+        return pd.DataFrame({
+            "open": values, "high": values + 1.0, "low": values - 1.0,
+            "close": values, "volume": 1_000.0,
+        }, index=index)
+
+    cache.upsert("SPY", "15m", frame(driving_index, 100.0))
+    cache.upsert("SPY", "1h", frame(reference_index, 100.0))
+    cache.upsert("QQQ", "1h", frame(reference_index, 200.0))
+    tfs = TimeframeSet(
+        driving="15m", higher=("1h",), deltas=DEFAULT_TIMEFRAMES.deltas,
+        session_aligned=DEFAULT_TIMEFRAMES.session_aligned,
+    )
+
+    before = build_context(
+        cache, "SPY", pd.Timestamp("2026-06-01 14:59", tz="UTC"), tfs,
+        reference_pairs=(("QQQ", "1h"),),
+    )
+    after = build_context(
+        cache, "SPY", pd.Timestamp("2026-06-01 15:00", tz="UTC"), tfs,
+        reference_pairs=(("QQQ", "1h"),),
+    )
+
+    assert before.fe.on("QQQ", "1h").empty
+    assert after.fe.on("QQQ", "1h")["close"].tolist() == [200.0]
+
+
+@pytest.mark.parametrize(
+    ("defect", "field"),
+    [
+        ("nonfinite", "close"),
+        ("invalid high", "high"),
+        ("negative volume", "volume"),
+        ("malformed older row", "close"),
+    ],
+)
+def test_point_in_time_context_refuses_malformed_supplied_external_rows(
+        defect, field):
+    index = pd.date_range(
+        "2026-06-01 13:30", periods=4, freq="15min", tz="UTC", name="ts")
+
+    def frame(labels, base):
+        close = pd.Series(np.arange(len(labels), dtype=float) + base, index=labels)
+        return pd.DataFrame({
+            "open": close, "high": close + 1.0, "low": close - 1.0,
+            "close": close, "volume": 1_000.0,
+        }, index=labels)
+
+    driving = frame(index, 100.0)
+    external = frame(index, 200.0)
+    if defect == "nonfinite":
+        external.iloc[1, external.columns.get_loc("close")] = np.nan
+    elif defect == "invalid high":
+        external.iloc[1, external.columns.get_loc("high")] = 0.0
+    elif defect == "negative volume":
+        external.iloc[1, external.columns.get_loc("volume")] = -1.0
+    else:
+        older = pd.DatetimeIndex(
+            [pd.Timestamp("2026-06-01 13:15", tz="UTC")], name="ts")
+        malformed = frame(older, 300.0)
+        malformed.iloc[0, malformed.columns.get_loc("close")] = np.nan
+        external = pd.concat([malformed, external])
+    cache = MemoryBars({
+        ("SPY", "15m"): driving,
+        ("QQQ", "15m"): external,
+    })
+    tfs = TimeframeSet(
+        driving="15m", higher=(), deltas=DEFAULT_TIMEFRAMES.deltas,
+        session_aligned=DEFAULT_TIMEFRAMES.session_aligned,
+    )
+
+    with pytest.raises(ReplayInputError) as raised:
+        build_context(
+            cache, "SPY", index[-1] + pd.Timedelta(minutes=15), tfs,
+            reference_pairs=(("QQQ", "15m"),),
+        )
+
+    assert raised.value.code == "missing_required_bar"
+    assert raised.value.details["field"] == field
+
+
+def test_point_in_time_context_drops_valid_external_rows_before_driving_labels():
+    driving_index = pd.date_range(
+        "2026-06-01 13:30", periods=4, freq="15min", tz="UTC", name="ts")
+    older = pd.DatetimeIndex(
+        [pd.Timestamp("2026-06-01 13:15", tz="UTC")], name="ts")
+
+    def frame(labels, base):
+        close = pd.Series(np.arange(len(labels), dtype=float) + base, index=labels)
+        return pd.DataFrame({
+            "open": close, "high": close + 1.0, "low": close - 1.0,
+            "close": close, "volume": 1_000.0,
+        }, index=labels)
+
+    external = pd.concat([
+        frame(older, 50.0),
+        frame(driving_index, 200.0),
+    ])
+    cache = MemoryBars({
+        ("SPY", "15m"): frame(driving_index, 100.0),
+        ("QQQ", "15m"): external,
+    })
+    tfs = TimeframeSet(
+        driving="15m", higher=(), deltas=DEFAULT_TIMEFRAMES.deltas,
+        session_aligned=DEFAULT_TIMEFRAMES.session_aligned,
+    )
+
+    context = build_context(
+        cache, "SPY", driving_index[-1] + pd.Timedelta(minutes=15), tfs,
+        reference_pairs=(("QQQ", "15m"),),
+    )
+
+    aligned = context.fe.on("QQQ", "15m")
+    pd.testing.assert_index_equal(aligned.index, driving_index)
+    assert aligned["close"].tolist() == [200.0, 201.0, 202.0, 203.0]

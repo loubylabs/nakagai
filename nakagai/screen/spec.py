@@ -10,6 +10,9 @@ described, and evaluated against exactly the terms its prompt advertised."""
 from nakagai.strategies.rules.spec import (
     TIMEFRAMES, group_text, validate_condition_group,
 )
+from nakagai.strategies.rules.strategy import (
+    ReferencePair, expression_reference_pairs,
+)
 from nakagai.strategies.rules.vocabulary import Vocabulary, resolve_vocabulary
 
 VERSION = 1
@@ -70,6 +73,13 @@ def referenced_timeframes(spec: dict) -> set[str]:
 
     walk(spec.get("conditions", {}))
     return tfs
+
+
+def screen_reference_pairs(spec: dict) -> tuple[ReferencePair, ...]:
+    """Exact reference pairs declared by one ScreenSpec."""
+    tf = spec.get("tf", "1d")
+    host_timeframe = tf if isinstance(tf, str) else "1d"
+    return expression_reference_pairs(spec.get("conditions", {}), host_timeframe)
 
 
 def is_intraday(spec: dict) -> bool:

@@ -14,6 +14,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from nakagai.data.schema import BAR_COLUMNS
 from nakagai.engine.bars import (
     PortfolioBars,
     ReplayDependencies,
@@ -168,26 +169,30 @@ def test_a_prepared_pair_nobody_declared_raises_a_key_error():
 
 def test_dependencies_normalize_into_the_fixed_order():
     dependencies = ReplayDependencies(
-        timeframes=("1d", "15m", "1h", "1d"), external_symbols=("spy", "aapl", "SPY"),
+        timeframes=("1d", "15m", "1h", "1d"),
+        reference_pairs=(
+            ("spy", "15m"), ("aapl", "1d"), ("SPY", "15m"),
+        ),
     )
     assert dependencies.timeframes == ("15m", "1h", "1d")
-    assert dependencies.external_symbols == ("AAPL", "SPY")
+    assert dependencies.reference_pairs == (("AAPL", "1d"), ("SPY", "15m"))
 
 
 @pytest.mark.parametrize(
-    ("timeframes", "external", "code"),
+    ("timeframes", "reference_pairs", "code"),
     [
         ((), (), "invalid_value"),
         (("1h",), (), "invalid_value"),
         (("15m", "5m"), (), "invalid_value"),
         ("15m", (), "invalid_type"),
-        (("15m",), ("SP Y",), "invalid_value"),
+        (("15m",), (("SP Y", "15m"),), "invalid_value"),
         (("15m",), (None,), "invalid_type"),
     ],
 )
-def test_dependencies_refuse_anything_outside_the_contract(timeframes, external, code):
+def test_dependencies_refuse_anything_outside_the_contract(
+        timeframes, reference_pairs, code):
     with pytest.raises(ReplayInputError) as raised:
-        ReplayDependencies(timeframes=timeframes, external_symbols=external)
+        ReplayDependencies(timeframes=timeframes, reference_pairs=reference_pairs)
     assert raised.value.code == code
 
 
@@ -241,7 +246,7 @@ def test_a_surplus_frame_refuses():
 
 def test_a_missing_external_dependency_refuses():
     dependencies = ReplayDependencies(
-        timeframes=("15m",), external_symbols=("IWM",),
+        timeframes=("15m",), reference_pairs=(("IWM", "15m"),),
     )
     request = base_request()
     frames = frames_for(request, base_schedule(), dependencies)
@@ -272,10 +277,29 @@ def test_an_explicit_benchmark_symbol_needs_only_the_base_timeframe():
     assert ("IWM", "1h") not in prepared.pairs
 
 
+def test_exact_reference_closure_never_builds_a_symbol_timeframe_cross_product():
+    request = base_request(symbols=("SPY",))
+    schedule = base_schedule()
+    dependencies = ReplayDependencies(
+        timeframes=("15m",), reference_pairs=(("QQQ", "1d"),),
+    )
+    frames = frames_for(request, schedule, dependencies)
+
+    prepared = prepare_portfolio_bars(
+        request, PortfolioBars(frames), validate_schedule(request, schedule),
+        dependencies,
+    )
+
+    assert prepared.pairs == (("QQQ", "1d"), ("SPY", "15m"))
+    assert ("SPY", "1d") not in prepared.pairs
+    assert ("QQQ", "15m") not in prepared.pairs
+
+
 def test_a_trading_symbol_covers_the_tail_and_a_context_symbol_stops_at_test_end():
     request = tail_request()
     dependencies = ReplayDependencies(
-        timeframes=("15m", "1h"), external_symbols=("IWM",),
+        timeframes=("15m", "1h"),
+        reference_pairs=(("IWM", "15m"), ("IWM", "1h")),
     )
     schedule = validate_schedule(request, base_schedule())
     frames = frames_for(request, base_schedule(), dependencies)
@@ -299,7 +323,7 @@ def test_a_declared_timeframe_the_schedule_never_materialized_refuses():
         row for row in base_context_bars() if row.timeframe != "4h"))
     request = base_request(schedule_identity=schedule.identity)
     dependencies = ReplayDependencies(
-        timeframes=("15m", "4h"), external_symbols=(),
+        timeframes=("15m", "4h"), reference_pairs=(),
     )
     frames = frames_for(request, schedule, dependencies)
     with pytest.raises(ReplayInputError) as raised:
@@ -318,7 +342,8 @@ def test_a_context_bar_that_could_never_become_available_is_not_required():
     # rather than carrying data no context could ever show.
     request = tail_request()
     dependencies = ReplayDependencies(
-        timeframes=("15m", "4h"), external_symbols=("IWM",),
+        timeframes=("15m", "4h"),
+        reference_pairs=(("IWM", "15m"), ("IWM", "4h")),
     )
     frames = frames_for(request, base_schedule(), dependencies)
     prepared = prepare_portfolio_bars(
@@ -332,13 +357,159 @@ def test_a_context_bar_that_could_never_become_available_is_not_required():
 def test_a_context_symbol_refuses_bars_past_its_own_boundary():
     request = tail_request()
     dependencies = ReplayDependencies(
-        timeframes=("15m",), external_symbols=("IWM",),
+        timeframes=("15m",), reference_pairs=(("IWM", "15m"),),
     )
     frames = frames_for(request, base_schedule(), dependencies)
     frames[("IWM", "15m")] = bar_frame(
         scheduled_labels(base_schedule(), "15m", request.ic_tail_end))
     error = refuse(frames, request=request, dependencies=dependencies)
     assert (error.code, error.details["field"]) == ("missing_required_bar", "labels")
+
+
+def test_sparse_external_history_is_reindexed_without_forward_fill():
+    request = base_request()
+    schedule = base_schedule()
+    dependencies = ReplayDependencies(
+        timeframes=("15m",), reference_pairs=(("IWM", "15m"),),
+    )
+    frames = frames_for(request, schedule, dependencies)
+    expected = list(frames[("IWM", "15m")].index)
+    missing = expected[5]
+    supplied = frames[("IWM", "15m")].drop(index=missing)
+    frames[("IWM", "15m")] = supplied
+
+    prepared = prepare_portfolio_bars(
+        request, PortfolioBars(frames), validate_schedule(request, schedule),
+        dependencies,
+    )
+
+    internal = prepared.frame("IWM", "15m")
+    assert list(internal.index) == expected
+    assert internal.loc[missing].isna().all()
+    assert internal.iloc[4]["close"] == supplied.iloc[4]["close"]
+    assert internal.iloc[6]["close"] == supplied.iloc[5]["close"]
+    assert missing not in supplied.index
+
+
+def test_empty_external_history_becomes_an_all_null_internal_frame():
+    request = base_request()
+    schedule = base_schedule()
+    dependencies = ReplayDependencies(
+        timeframes=("15m",), reference_pairs=(("IWM", "15m"),),
+    )
+    frames = frames_for(request, schedule, dependencies)
+    frames[("IWM", "15m")] = frames[("IWM", "15m")].iloc[:0]
+
+    prepared = prepare_portfolio_bars(
+        request, PortfolioBars(frames), validate_schedule(request, schedule),
+        dependencies,
+    )
+
+    internal = prepared.frame("IWM", "15m")
+    assert len(internal) == len(scheduled_labels(
+        schedule, "15m", request.window.test_end))
+    assert internal.isna().all().all()
+
+
+def test_plain_constructor_empty_external_frame_prepares_as_binary64():
+    request = base_request()
+    schedule = base_schedule()
+    dependencies = ReplayDependencies(
+        timeframes=("15m",), reference_pairs=(("IWM", "15m"),),
+    )
+    frames = frames_for(request, schedule, dependencies)
+    empty = pd.DataFrame(
+        columns=BAR_COLUMNS,
+        index=pd.DatetimeIndex([], tz="UTC", name="ts"),
+    )
+    assert set(empty.dtypes) == {np.dtype("object")}
+    frames[("IWM", "15m")] = empty
+
+    prepared = prepare_portfolio_bars(
+        request, PortfolioBars(frames), validate_schedule(request, schedule),
+        dependencies,
+    )
+
+    internal = prepared.frame("IWM", "15m")
+    assert set(internal.dtypes) == {np.dtype("float64")}
+    assert internal.isna().all().all()
+
+
+def test_sparse_external_history_refuses_a_surplus_scheduled_label():
+    request = base_request()
+    schedule = base_schedule()
+    dependencies = ReplayDependencies(
+        timeframes=("15m",), reference_pairs=(("IWM", "15m"),),
+    )
+    frames = frames_for(request, schedule, dependencies)
+    external = frames[("IWM", "15m")]
+    frames[("IWM", "15m")] = pd.concat([
+        external,
+        bar_frame((ts("2026-11-27T18:00:00Z"),), base=200.0),
+    ])
+
+    error = refuse(frames, request=request, dependencies=dependencies)
+    assert (error.code, error.details["field"]) == (
+        "missing_required_bar", "labels")
+
+
+def test_pair_role_precedence_is_not_symbol_wide():
+    request = base_request(symbols=("AAPL",))
+    schedule = base_schedule()
+    dependencies = ReplayDependencies(
+        timeframes=("15m",), reference_pairs=(("AAPL", "1h"),),
+    )
+    frames = frames_for(request, schedule, dependencies)
+    hourly_missing = frames[("AAPL", "1h")].index[0]
+    frames[("AAPL", "1h")] = frames[("AAPL", "1h")].drop(
+        index=hourly_missing)
+
+    prepared = prepare_portfolio_bars(
+        request, PortfolioBars(frames), validate_schedule(request, schedule),
+        dependencies,
+    )
+    assert prepared.frame("AAPL", "1h").loc[hourly_missing].isna().all()
+
+    missing_15m = frames[("AAPL", "15m")].index[0]
+    frames[("AAPL", "15m")] = frames[("AAPL", "15m")].drop(index=missing_15m)
+    error = refuse(frames, request=request, dependencies=dependencies)
+    assert (error.code, error.details["symbol"], error.details["timeframe"]) == (
+        "missing_required_bar", "AAPL", "15m")
+
+
+def test_same_exact_pair_traded_role_precedes_external_role():
+    request = base_request(symbols=("AAPL",))
+    schedule = base_schedule()
+    dependencies = ReplayDependencies(
+        timeframes=("15m",), reference_pairs=(("AAPL", "15m"),),
+    )
+    frames = frames_for(request, schedule, dependencies)
+    assert list(frames) == [("AAPL", "15m")]
+    missing = frames[("AAPL", "15m")].index[0]
+    frames[("AAPL", "15m")] = frames[("AAPL", "15m")].drop(index=missing)
+
+    error = refuse(frames, request=request, dependencies=dependencies)
+    assert (error.code, error.details["symbol"], error.details["timeframe"]) == (
+        "missing_required_bar", "AAPL", "15m")
+
+
+def test_same_exact_pair_benchmark_role_precedes_external_role():
+    request = base_request(benchmark=BenchmarkSpec(
+        kind="single_symbol", symbol="IWM", weighting="equal", rebalance="never",
+    ))
+    schedule = base_schedule()
+    dependencies = ReplayDependencies(
+        timeframes=("15m",), reference_pairs=(("IWM", "15m"),),
+    )
+    frames = frames_for(request, schedule, dependencies)
+    assert list(key for key in frames if key == ("IWM", "15m")) == [
+        ("IWM", "15m")]
+    missing = frames[("IWM", "15m")].index[0]
+    frames[("IWM", "15m")] = frames[("IWM", "15m")].drop(index=missing)
+
+    error = refuse(frames, request=request, dependencies=dependencies)
+    assert (error.code, error.details["symbol"], error.details["timeframe"]) == (
+        "missing_required_bar", "IWM", "15m")
 
 
 # ----------------------------------------------------------- frame integrity
@@ -564,19 +735,37 @@ def test_a_context_at_the_first_test_close_sees_no_test_session_daily_bar():
     assert list(context.bars["1d"].index) == [ts("2026-11-25T05:00:00Z")]
 
 
-def test_a_context_only_carries_the_declared_timeframes():
+@pytest.mark.parametrize(
+    ("prepared_timeframes", "supplied_timeframes"),
+    [
+        (("15m", "1h", "4h", "1d"), ("15m", "1d")),
+        (("15m", "1d"), ("15m", "1h", "4h", "1d")),
+    ],
+    ids=("narrower supplied closure", "wider supplied closure"),
+)
+def test_a_context_refuses_a_different_prepared_timeframe_closure(
+        prepared_timeframes, supplied_timeframes):
+    request = base_request()
+    schedule = base_schedule()
+    prepared_dependencies = ReplayDependencies(
+        timeframes=prepared_timeframes, reference_pairs=())
     prepared = prepare_portfolio_bars(
-        base_request(), PortfolioBars(base_frames()), base_validated_schedule(),
-        base_dependencies(),
+        request, PortfolioBars(frames_for(
+            request, schedule, prepared_dependencies)),
+        validate_schedule(request, schedule), prepared_dependencies,
     )
-    dependencies = ReplayDependencies(timeframes=("15m", "1d"), external_symbols=())
-    context = build_scheduled_context(
-        prepared, "SPY", ts("2026-11-27T15:00:00Z"), base_validated_schedule(),
-        dependencies, vocabulary=core_vocabulary(),
-    )
-    assert set(context.bars) == {"15m", "1d"}
-    assert context.tfs.all == ("15m", "1d")
-    assert context.driving_bars is context.bars["15m"]
+    supplied_dependencies = ReplayDependencies(
+        timeframes=supplied_timeframes, reference_pairs=())
+
+    with pytest.raises(ReplayInputError) as raised:
+        build_scheduled_context(
+            prepared, "SPY", ts("2026-11-27T15:00:00Z"),
+            validate_schedule(request, schedule), supplied_dependencies,
+            vocabulary=core_vocabulary(),
+        )
+
+    assert raised.value.code == "mismatched_dependencies"
+    assert raised.value.details["field"] == "prepared"
 
 
 def test_a_context_refuses_anything_that_is_not_a_grammar():
@@ -613,7 +802,7 @@ def test_a_context_cannot_be_built_inside_the_ic_tail():
     # strategy may see them.
     request = tail_request()
     schedule = validate_schedule(request, base_schedule())
-    dependencies = ReplayDependencies(timeframes=("15m",), external_symbols=())
+    dependencies = ReplayDependencies(timeframes=("15m",), reference_pairs=())
     prepared = prepare_portfolio_bars(
         request, PortfolioBars(frames_for(request, base_schedule(), dependencies)),
         schedule, dependencies,

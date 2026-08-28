@@ -47,6 +47,12 @@ DOUBLE_CLOSE = {"version": 1, "tf": "1d", "conditions": {"all": [
     {"lhs": {"ind": "double_close"}, "op": ">", "rhs": {"src": "close"}}]}}
 
 
+ABOVE_QQQ = {"version": 1, "tf": "1h", "conditions": {"all": [{
+    "lhs": {"src": "close"}, "op": ">",
+    "rhs": {"src": "close", "sym": "QQQ"},
+}]}}
+
+
 def _injected():
     return core_vocabulary().with_terms(
         Term("double_close", "series", {}, {}, lambda s, _a: s * 2))
@@ -76,6 +82,34 @@ def test_run_screen_matches_and_sorts_matched_first(cache):
     assert up["last_close"] == pytest.approx(100.0)
     assert up["bar_time"].startswith("2026-07-16")
     assert result["universe"] == {"screened": 2, "skipped": 0}
+    assert result["errors"] == []
+
+
+def test_run_screen_does_not_forward_fill_a_missing_reference_observation(cache):
+    up = _hourly_bars(np.linspace(50, 100, 60))
+    qqq = _hourly_bars(np.linspace(10, 20, 60)).iloc[:-2]
+    cache.upsert("UP", "1h", up)
+    cache.upsert("QQQ", "1h", qqq)
+
+    result = run_screen(ABOVE_QQQ, ["UP"], cache, now=NOW)
+
+    assert result["errors"] == []
+    assert result["rows"][0]["matched"] is False
+    assert result["rows"][0]["last_close"] == pytest.approx(100.0)
+
+
+def test_run_screen_syncs_each_exact_reference_pair_for_each_target(cache):
+    calls = []
+
+    class _Provider:
+        def fetch_bars(self, symbol, timeframe, start, end):
+            calls.append((symbol, timeframe))
+            return _hourly_bars(np.linspace(10, 20, 60))
+
+    result = run_screen(
+        ABOVE_QQQ, ["UP"], cache, now=NOW, providers={"1h": _Provider()})
+
+    assert calls == [("UP", "1h"), ("QQQ", "1h")]
     assert result["errors"] == []
 
 
@@ -110,10 +144,10 @@ def test_run_screen_isolates_a_bad_symbol(cache, monkeypatch):
 
     real = runner_mod.build_context
 
-    def boom(cache_, sym, now, **kwargs):
+    def boom(cache_, sym, now, *args, **kwargs):
         if sym == "UP":
             raise RuntimeError("corrupt parquet")
-        return real(cache_, sym, now, **kwargs)
+        return real(cache_, sym, now, *args, **kwargs)
 
     monkeypatch.setattr(runner_mod, "build_context", boom)
     result = run_screen(ABOVE_SMA20, ["UP", "DOWN"], cache, now=NOW)

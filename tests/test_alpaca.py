@@ -1,10 +1,20 @@
+import inspect
 import json
+from dataclasses import FrozenInstanceError
 
 import httpx
 import pandas as pd
 import pytest
 
-from nakagai.data.alpaca import AlpacaProvider
+import nakagai.data.alpaca as alpaca_module
+from nakagai.data.alpaca import (
+    AlpacaBarBatchResult,
+    AlpacaBarMember,
+    AlpacaProvider,
+)
+
+START = pd.Timestamp("2026-06-01", tz="UTC")
+END = pd.Timestamp("2026-06-02", tz="UTC")
 
 PAGE1 = {
     "bars": [
@@ -186,67 +196,207 @@ def test_fetch_bars_multi_merges_a_symbol_split_across_pages():
     """Alpaca sorts by symbol then ts, so one symbol's bars can straddle a page
     boundary. Dropping the earlier page's rows would silently truncate history."""
     p = AlpacaProvider(key_id="k", secret="s", client=_multi_client([]), sleep=lambda _: None)
-    frames = p.fetch_bars_multi(["AAPL", "MSFT"], "15m",
+    result = p.fetch_bars_multi(["AAPL", "MSFT"], "15m",
                                 pd.Timestamp("2026-06-01", tz="UTC"),
                                 pd.Timestamp("2026-06-02", tz="UTC"))
-    assert len(frames["AAPL"]) == 3          # 2 from page 1 + 1 from page 2
-    assert len(frames["MSFT"]) == 1
-    assert list(frames["AAPL"].columns) == ["open", "high", "low", "close", "volume"]
-    assert frames["AAPL"].index[0] == pd.Timestamp("2026-06-01 13:30", tz="UTC")
-    assert frames["AAPL"].index.is_monotonic_increasing
+    assert result.requested == ("AAPL", "MSFT")
+    assert tuple(member.symbol for member in result.members) == result.requested
+    assert len(result.members[0].rows) == 3
+    assert len(result.members[1].rows) == 1
+    assert result.members[0].rows[0]["t"] == "2026-06-01T13:30:00Z"
+    with pytest.raises(FrozenInstanceError):
+        result.members[0].present = False
+    with pytest.raises(TypeError):
+        result.members[0].rows[0]["c"] = 0.0
 
 
-def test_fetch_bars_multi_returns_an_empty_frame_for_a_symbol_with_no_bars():
-    """A symbol absent from the response is a normal outcome (halted, delisted,
-    no IEX prints). It must read as "no bars", never as a missing key, so the
-    caller's per-symbol loop cannot KeyError on a bad ticker."""
-    p = AlpacaProvider(key_id="k", secret="s", client=_multi_client([]), sleep=lambda _: None)
-    frames = p.fetch_bars_multi(["AAPL", "MSFT", "NOSUCH"], "15m",
-                                pd.Timestamp("2026-06-01", tz="UTC"),
-                                pd.Timestamp("2026-06-02", tz="UTC"))
-    assert set(frames) == {"AAPL", "MSFT", "NOSUCH"}
-    assert frames["NOSUCH"].empty
-    assert list(frames["NOSUCH"].columns) == ["open", "high", "low", "close", "volume"]
-    assert str(frames["NOSUCH"].index.tz) == "UTC"
+def test_batch_results_deep_copy_and_freeze_direct_construction():
+    """The public result types own an immutable snapshot even when callers
+    construct them from mutable lists and nested dictionaries."""
+    requested = ["SPY"]
+    nested = {"venues": ["IEX"], "route": {"code": "A"}}
+    row = {"t": "2026-06-01T13:30:00Z", "meta": nested}
+    rows = [row]
+    members = [AlpacaBarMember("SPY", True, rows)]
+
+    result = AlpacaBarBatchResult(requested, members)
+
+    requested.append("QQQ")
+    members.clear()
+    rows.clear()
+    nested["venues"].append("NYSE")
+    nested["route"]["code"] = "B"
+    assert result.requested == ("SPY",)
+    assert isinstance(result.members, tuple)
+    assert isinstance(result.members[0].rows, tuple)
+    assert result.members[0].rows[0]["meta"]["venues"] == ("IEX",)
+    assert result.members[0].rows[0]["meta"]["route"]["code"] == "A"
+    with pytest.raises(TypeError):
+        result.members[0].rows[0]["meta"]["route"]["code"] = "C"
+    with pytest.raises(AttributeError):
+        result.members[0].rows[0]["meta"]["venues"].append("ARCA")
 
 
-def test_fetch_bars_multi_chunks_so_one_request_cannot_be_unboundedly_large():
-    """limit is 10,000 bars TOTAL across symbols, so a wide request paginates
-    heavily. Chunking keeps each request's page count predictable."""
+def test_fetch_bars_multi_deep_freezes_provider_json_without_alias(monkeypatch):
+    nested = {"venues": ["IEX"], "route": {"code": "A"}}
+    payload = {
+        "bars": {"SPY": [{
+            "t": "2026-06-01T13:30:00Z", "o": 1.0, "h": 1.5,
+            "l": 0.5, "c": 1.2, "v": 100, "meta": nested,
+        }]},
+        "next_page_token": None,
+    }
+
+    class Response:
+        def json(self):
+            return payload
+
+    p = AlpacaProvider(
+        key_id="k", secret="s",
+        client=object.__new__(httpx.Client), sleep=lambda _: None,
+    )
+    monkeypatch.setattr(p, "_get", lambda *_args, **_kwargs: Response())
+
+    result = p.fetch_bars_multi(["SPY"], "15m", START, END)
+    nested["venues"].append("NYSE")
+    nested["route"]["code"] = "B"
+
+    meta = result.members[0].rows[0]["meta"]
+    assert meta["venues"] == ("IEX",)
+    assert meta["route"]["code"] == "A"
+    with pytest.raises(TypeError):
+        meta["route"]["code"] = "C"
+
+
+def test_fetch_bars_multi_distinguishes_omitted_from_explicit_empty_members():
+    """Removing QQQ from the response must change present, while an explicit
+    empty row list stays a successful response member."""
+    payloads = iter([
+        {"bars": {"SPY": []}, "next_page_token": None},
+        {"bars": {"SPY": [], "QQQ": []}, "next_page_token": None},
+    ])
+
+    def handler(_request):
+        return httpx.Response(200, json=next(payloads))
+
+    p = AlpacaProvider(
+        key_id="k", secret="s",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+        sleep=lambda _: None,
+    )
+    omitted = p.fetch_bars_multi(["SPY", "QQQ"], "15m", START, END)
+    explicit = p.fetch_bars_multi(["SPY", "QQQ"], "15m", START, END)
+
+    assert omitted.members == (
+        AlpacaBarMember("SPY", True, ()),
+        AlpacaBarMember("QQQ", False, ()),
+    )
+    assert explicit.members == (
+        AlpacaBarMember("SPY", True, ()),
+        AlpacaBarMember("QQQ", True, ()),
+    )
+
+
+def test_fetch_bars_multi_refuses_a_request_above_the_configured_ceiling():
+    """Chunking belongs to data.sync, so this boundary cannot hide more than
+    one logical provider request behind one call."""
     captured = []
     p = AlpacaProvider(key_id="k", secret="s", client=_multi_client(captured),
-                       sleep=lambda _: None, max_symbols_per_request=2)
-    p.fetch_bars_multi(["AAPL", "MSFT", "NVDA", "AMD", "TSLA"], "1d",
-                       pd.Timestamp("2026-06-01", tz="UTC"),
-                       pd.Timestamp("2026-06-02", tz="UTC"))
-    batched = [r.url.params["symbols"] for r in captured]
-    assert "AAPL,MSFT" in batched
-    assert "NVDA,AMD" in batched
-    assert "TSLA" in batched
+                       sleep=lambda _: None, max_symbols_per_request=100)
+    with pytest.raises(ValueError, match="at most 100 symbols"):
+        p.fetch_bars_multi(
+            [f"S{i:03d}" for i in range(101)], "1d", START, END)
+    assert captured == []
 
 
-def test_fetch_bars_multi_does_not_leak_a_page_token_between_chunks():
-    """Each chunk starts its own pagination. Carrying the previous chunk's
-    page_token forward would ask Alpaca to resume a different query."""
+def test_fetch_bars_multi_keeps_malformed_rows_without_constructing_a_frame(
+        monkeypatch):
+    """Moving frame construction back into the provider would reject QQQ and
+    hide the valid sibling before pair-local consumers can classify either."""
+    malformed = {
+        "t": "2026-06-01T13:30:00Z", "o": 9.0, "h": 8.0,
+        "l": 10.0, "c": 9.0, "v": 100,
+    }
+    payload = {
+        "bars": {"SPY": MULTI_PAGE2["bars"]["MSFT"], "QQQ": [malformed]},
+        "next_page_token": None,
+    }
+    client = httpx.Client(transport=httpx.MockTransport(
+        lambda _request: httpx.Response(200, json=payload)))
+    p = AlpacaProvider(key_id="k", secret="s", client=client,
+                       sleep=lambda _: None)
+    monkeypatch.setattr(
+        alpaca_module.pd, "DataFrame",
+        lambda *args, **kwargs: pytest.fail("provider constructed a DataFrame"),
+    )
+
+    result = p.fetch_bars_multi(["SPY", "QQQ"], "15m", START, END)
+
+    assert result.members[0].present is True
+    assert result.members[0].rows[0]["c"] == 2.2
+    assert result.members[1].present is True
+    assert dict(result.members[1].rows[0]) == malformed
+
+
+def test_fetch_bars_multi_discards_a_staged_first_page_when_continuation_times_out():
+    """Returning the first page before the continuation completes would make
+    one logical provider request partially visible."""
     captured = []
-    p = AlpacaProvider(key_id="k", secret="s", client=_multi_client(captured),
-                       sleep=lambda _: None, max_symbols_per_request=2)
-    p.fetch_bars_multi(["AAPL", "MSFT", "NVDA", "AMD"], "1d",
-                       pd.Timestamp("2026-06-01", tz="UTC"),
-                       pd.Timestamp("2026-06-02", tz="UTC"))
-    firsts = [r for r in captured if r.url.params["symbols"] == "NVDA,AMD"]
-    assert firsts, "the second chunk was never requested"
-    assert "page_token" not in firsts[0].url.params
+
+    def handler(request):
+        captured.append(request)
+        if request.url.params.get("page_token") == "continue":
+            raise httpx.ReadTimeout("continuation timed out", request=request)
+        return httpx.Response(200, json={
+            "bars": {"SPY": MULTI_PAGE2["bars"]["MSFT"]},
+            "next_page_token": "continue",
+        })
+
+    p = AlpacaProvider(
+        key_id="k", secret="s",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+        sleep=lambda _: None,
+    )
+    result = None
+    with pytest.raises(httpx.ReadTimeout, match="continuation timed out"):
+        result = p.fetch_bars_multi(["SPY", "QQQ"], "15m", START, END)
+
+    assert result is None
+    assert len(captured) == 2
+
+
+def test_fetch_bars_multi_rejects_a_repeated_continuation_token_atomically():
+    captured = []
+
+    def handler(request):
+        captured.append(request)
+        return httpx.Response(200, json={
+            "bars": {"SPY": [MULTI_PAGE2["bars"]["MSFT"][0]]},
+            "next_page_token": "repeat",
+        })
+
+    p = AlpacaProvider(
+        key_id="k", secret="s",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+        sleep=lambda _: None,
+    )
+    result = None
+    with pytest.raises(ValueError, match="repeated next_page_token 'repeat'"):
+        result = p.fetch_bars_multi(["SPY"], "15m", START, END)
+
+    assert result is None
+    assert len(captured) == 2
 
 
 def test_fetch_bars_multi_uppercases_and_dedupes_requested_symbols():
     captured = []
     p = AlpacaProvider(key_id="k", secret="s", client=_multi_client(captured), sleep=lambda _: None)
-    frames = p.fetch_bars_multi(["aapl", "AAPL", "msft"], "15m",
+    result = p.fetch_bars_multi(["aapl", "AAPL", "msft"], "15m",
                                 pd.Timestamp("2026-06-01", tz="UTC"),
                                 pd.Timestamp("2026-06-02", tz="UTC"))
     assert captured[0].url.params["symbols"] == "AAPL,MSFT"
-    assert set(frames) == {"AAPL", "MSFT"}
+    assert result.requested == ("AAPL", "MSFT")
+    assert tuple(member.symbol for member in result.members) == result.requested
 
 
 def test_fetch_bars_multi_rejects_an_unsupported_timeframe():
@@ -262,7 +412,8 @@ def test_fetch_bars_multi_with_no_symbols_makes_no_request():
     p = AlpacaProvider(key_id="k", secret="s", client=_multi_client(captured), sleep=lambda _: None)
     assert p.fetch_bars_multi([], "15m",
                               pd.Timestamp("2026-06-01", tz="UTC"),
-                              pd.Timestamp("2026-06-02", tz="UTC")) == {}
+                              pd.Timestamp("2026-06-02", tz="UTC")) == (
+        AlpacaBarBatchResult((), ()))
     assert captured == []
 
 
@@ -274,3 +425,13 @@ def test_fetch_bars_multi_missing_credentials_fails_fast(monkeypatch):
         p.fetch_bars_multi(["AAPL"], "15m",
                            pd.Timestamp("2026-06-01", tz="UTC"),
                            pd.Timestamp("2026-06-02", tz="UTC"))
+
+
+def test_fetch_bars_multi_has_only_the_hard_cut_result_contract():
+    """A mapping return annotation or provider-owned chunk loop would restore
+    the superseded API and split one call across multiple logical requests."""
+    annotation = inspect.signature(AlpacaProvider.fetch_bars_multi).return_annotation
+    assert annotation is AlpacaBarBatchResult
+    source = inspect.getsource(AlpacaProvider.fetch_bars_multi)
+    assert "range(" not in source
+    assert "dict[str, pd.DataFrame]" not in source

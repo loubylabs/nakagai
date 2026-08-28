@@ -41,9 +41,14 @@ import pandas as pd
 import pytest
 
 from nakagai.data.schema import DEFAULT_TIMEFRAMES, TimeframeSet
-from nakagai.engine.bars import ReplayDependencies
+from nakagai.engine.bars import (
+    PortfolioBars,
+    ReplayDependencies,
+    prepare_portfolio_bars,
+)
 from nakagai.engine.context import build_scheduled_context
-from nakagai.engine.portfolio_types import StrategyOutputError
+from nakagai.engine.portfolio_types import ReplayInputError, StrategyOutputError
+from nakagai.engine.schedule import validate_schedule
 from nakagai.strategies.base import MarketContext, Strategy
 from nakagai.strategies.composite.strategy import CompositeStrategy
 from nakagai.strategies.rules import RuleStrategy
@@ -58,6 +63,7 @@ from tests.portfolio_fixtures import (
     counting_definitions,
     fall_bucket_request,
     fall_bucket_schedule,
+    frames_for,
     prepared_for,
     replay_fixture,
     scripted_name,
@@ -157,17 +163,77 @@ def test_an_external_dependency_joins_only_after_its_own_availability():
     `available_at` and not at the traded symbols'.
     """
     dependencies = ReplayDependencies(
-        timeframes=("15m", "1h"), external_symbols=("IWM",))
+        timeframes=("15m", "1h"), reference_pairs=(("IWM", "1h"),))
     validated, prepared = prepared_for(base_request(), base_schedule(), dependencies)
     before = build_scheduled_context(
-        prepared, "IWM", ts("2026-11-27T14:45:00Z"), validated, dependencies,
+        prepared, "SPY", ts("2026-11-27T14:45:00Z"), validated, dependencies,
         vocabulary=core_vocabulary())
     after = build_scheduled_context(
-        prepared, "IWM", ts("2026-11-27T15:00:00Z"), validated, dependencies,
+        prepared, "SPY", ts("2026-11-27T15:00:00Z"), validated, dependencies,
         vocabulary=core_vocabulary())
-    assert list(before.bars["1h"].index) == [ts("2026-11-25T14:00:00Z")]
-    assert list(after.bars["1h"].index) == [ts("2026-11-25T14:00:00Z"),
-                                            ts("2026-11-27T14:00:00Z")]
+    assert set(before.bars) == {"15m", "1h"}
+    assert list(before.fe.on("IWM", "1h").index) == [
+        ts("2026-11-25T14:00:00Z")]
+    assert list(after.fe.on("IWM", "1h").index) == [
+        ts("2026-11-25T14:00:00Z"), ts("2026-11-27T14:00:00Z")]
+
+
+def test_scheduled_sparse_reference_matches_point_in_time_assembly(tmp_path):
+    from nakagai.data.cache import BarCache
+    from nakagai.data.schema import TimeframeSet
+    from nakagai.engine.context import build_context
+
+    dependencies = ReplayDependencies(
+        timeframes=("15m",), reference_pairs=(("IWM", "15m"),))
+    request, schedule = base_request(symbols=("SPY",)), base_schedule()
+    frames = frames_for(request, schedule, dependencies)
+    missing = frames[("IWM", "15m")].index[-2]
+    frames[("IWM", "15m")] = frames[("IWM", "15m")].drop(index=missing)
+    validated = validate_schedule(request, schedule)
+    prepared = prepare_portfolio_bars(
+        request, PortfolioBars(frames), validated, dependencies)
+    now = request.window.test_end
+    scheduled = build_scheduled_context(
+        prepared, "SPY", now, validated, dependencies,
+        vocabulary=core_vocabulary())
+
+    cache = BarCache(tmp_path / "cache")
+    cache.upsert("SPY", "15m", frames[("SPY", "15m")])
+    cache.upsert("IWM", "15m", frames[("IWM", "15m")])
+    point = build_context(
+        cache, "SPY", now,
+        TimeframeSet(
+            driving="15m", higher=(), deltas=DEFAULT_TIMEFRAMES.deltas,
+            session_aligned=DEFAULT_TIMEFRAMES.session_aligned,
+        ),
+        reference_pairs=(("IWM", "15m"),),
+        vocabulary=core_vocabulary(),
+    )
+
+    pd.testing.assert_frame_equal(
+        scheduled.fe.on("IWM", "15m"), point.fe.on("IWM", "15m"))
+
+
+@pytest.mark.parametrize(
+    "reference_pairs",
+    [(), (("QQQ", "15m"),)],
+)
+def test_scheduled_context_refuses_a_different_prepared_reference_closure(
+        reference_pairs):
+    prepared_dependencies = ReplayDependencies(
+        timeframes=("15m",), reference_pairs=(("IWM", "15m"),))
+    validated, prepared = prepared_for(
+        base_request(), base_schedule(), prepared_dependencies)
+    supplied_dependencies = ReplayDependencies(
+        timeframes=("15m",), reference_pairs=reference_pairs)
+
+    with pytest.raises(ReplayInputError) as raised:
+        build_scheduled_context(
+            prepared, "SPY", ts("2026-11-27T15:00:00Z"), validated,
+            supplied_dependencies, vocabulary=core_vocabulary())
+
+    assert raised.value.code == "mismatched_dependencies"
+    assert raised.value.details["field"] == "prepared"
 
 
 def test_a_replay_builds_a_context_only_for_the_symbols_it_trades():
@@ -180,7 +246,7 @@ def test_a_replay_builds_a_context_only_for_the_symbols_it_trades():
     replay_fixture(
         calls=calls,
         dependencies=ReplayDependencies(
-            timeframes=("15m",), external_symbols=("IWM",)),
+            timeframes=("15m",), reference_pairs=(("IWM", "15m"),)),
     )
     assert {call.symbol for call in calls} == {"QQQ", "SPY"}
 
@@ -210,7 +276,7 @@ def test_a_context_carries_only_the_frames_its_replay_declared():
     spec asking for data this replay never had. It raises rather than reading
     empty, which would look to a play like a market with no history.
     """
-    dependencies = ReplayDependencies(timeframes=("15m", "1h"), external_symbols=())
+    dependencies = ReplayDependencies(timeframes=("15m", "1h"), reference_pairs=())
     validated, prepared = prepared_for(base_request(), base_schedule(), dependencies)
     context = build_scheduled_context(
         prepared, "SPY", ts("2026-11-27T15:00:00Z"), validated, dependencies,
@@ -241,7 +307,7 @@ def test_the_cursor_indexes_the_newest_row_each_frame_has_released():
     cursor is 27; both hourly bars have been released, so the hourly cursor
     is 1.
     """
-    dependencies = ReplayDependencies(timeframes=("15m", "1h"), external_symbols=())
+    dependencies = ReplayDependencies(timeframes=("15m", "1h"), reference_pairs=())
     validated, prepared = prepared_for(base_request(), base_schedule(), dependencies)
 
     context = build_scheduled_context(

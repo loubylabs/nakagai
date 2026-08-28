@@ -94,7 +94,7 @@ class CausalFactorBars:
     __slots__ = ("_symbol", "_timeframe", "_frames", "_labels")
 
     def __init__(self, symbol: str, timeframe: str,
-                 frames: Mapping[str, pd.DataFrame],
+                 frames: Mapping[tuple[str, str], pd.DataFrame],
                  labels: tuple[Timestamp, ...]) -> None:
         self._symbol = symbol
         self._timeframe = timeframe
@@ -111,8 +111,8 @@ class CausalFactorBars:
         return self._timeframe
 
     @property
-    def frames(self) -> Mapping[str, pd.DataFrame]:
-        """Every timeframe the definition declared, each cut at `test_end`."""
+    def frames(self) -> Mapping[tuple[str, str], pd.DataFrame]:
+        """Every exact pair the definition declared, cut at `test_end`."""
         return self._frames
 
     @property
@@ -120,9 +120,9 @@ class CausalFactorBars:
         """The axis row of each observation, ascending, one per timestamp."""
         return self._labels
 
-    def frame(self, timeframe: str) -> pd.DataFrame:
-        """One causal frame, or `KeyError` for a timeframe nobody declared."""
-        return self._frames[timeframe]
+    def frame(self, symbol: str, timeframe: str) -> pd.DataFrame:
+        """One causal pair, or `KeyError` for a pair nobody declared."""
+        return self._frames[(symbol, timeframe)]
 
 
 @dataclass(frozen=True)
@@ -167,7 +167,7 @@ def _ic_map(
             for symbol in request.symbols:
                 estimates[(play.play_id, symbol)] = _ungraded()
             continue
-        axis, timeframes = graded
+        axis, timeframes, reference_pairs = graded
         # The selected instants belong to the schedule and the axis, not to a
         # symbol, so they are chosen once for the play and read by each of its
         # symbols. With none selected there is nothing to grade and nothing is
@@ -177,7 +177,7 @@ def _ic_map(
         for symbol in request.symbols:
             estimates[(play.play_id, symbol)] = (
                 _estimates(schedule, prepared, definition, play, symbol,
-                           axis, timeframes, observations)
+                           axis, timeframes, reference_pairs, observations)
                 if observations else _ungraded()
             )
     return MappingProxyType(estimates)
@@ -196,7 +196,9 @@ def _ungraded() -> tuple[IcEstimate, IcEstimate, IcEstimate]:
 
 
 def _graded_axis(definition: StrategyDefinition,
-                 play: PlayRequest) -> tuple[str, tuple[str, ...]] | None:
+                 play: PlayRequest) -> tuple[
+                     str, tuple[str, ...], tuple[tuple[str, str], ...]
+                 ] | None:
     """The play's observation axis and its declared frames, or nothing.
 
     Both come from the definition's own pure functions, and both are called
@@ -224,13 +226,14 @@ def _graded_axis(definition: StrategyDefinition,
             play_id=play.play_id, timeframe=axis,
             declared=declared.timeframes,
         )
-    return (axis, declared.timeframes)
+    return (axis, declared.timeframes, declared.reference_pairs)
 
 
 def _estimates(
     schedule: ValidatedSchedule, prepared: _ValidatedPortfolioBars,
     definition: StrategyDefinition, play: PlayRequest, symbol: str,
     axis: str, timeframes: tuple[str, ...],
+    reference_pairs: tuple[tuple[str, str], ...],
     observations: tuple[_Observation, ...],
 ) -> tuple[IcEstimate, IcEstimate, IcEstimate]:
     """One play symbol's three estimates, from one call into its factor.
@@ -242,7 +245,8 @@ def _estimates(
     """
     bars = CausalFactorBars(
         symbol=symbol, timeframe=axis,
-        frames=_causal_frames(schedule, prepared, symbol, timeframes),
+        frames=_causal_frames(
+            schedule, prepared, symbol, timeframes, reference_pairs),
         labels=tuple(row.label for row in observations),
     )
     timestamps = tuple(row.at for row in observations)
@@ -296,20 +300,25 @@ def _observations(schedule: ValidatedSchedule,
 
 
 def _causal_frames(schedule: ValidatedSchedule, prepared: _ValidatedPortfolioBars,
-                   symbol: str, timeframes: tuple[str, ...]) -> dict[str, pd.DataFrame]:
-    """Every declared frame, cut where the window's last close left it."""
+                   symbol: str, timeframes: tuple[str, ...],
+                   reference_pairs: tuple[tuple[str, str], ...],
+                   ) -> dict[tuple[str, str], pd.DataFrame]:
+    """Every declared pair, cut where the window's last close left it."""
     at = schedule.request.window.test_end
-    frames: dict[str, pd.DataFrame] = {}
-    for timeframe in timeframes:
+    pairs = [(symbol, timeframe) for timeframe in timeframes]
+    pairs.extend(pair for pair in reference_pairs if pair not in pairs)
+    frames: dict[tuple[str, str], pd.DataFrame] = {}
+    for pair_symbol, timeframe in pairs:
         try:
-            frame = prepared.frame(symbol, timeframe)
+            frame = prepared.frame(pair_symbol, timeframe)
         except KeyError:
             raise _fail(
                 _MISSING_BAR,
                 "a graded definition declares a frame this replay never prepared",
-                field="frame", symbol=symbol, timeframe=timeframe,
+                field="frame", symbol=pair_symbol, timeframe=timeframe,
             ) from None
-        frames[timeframe] = frame.iloc[:_causal_rows(schedule, timeframe, at)]
+        frames[(pair_symbol, timeframe)] = frame.iloc[
+            :_causal_rows(schedule, timeframe, at)]
     return frames
 
 

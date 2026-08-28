@@ -87,7 +87,7 @@ POINT_COUNT = 16  # the opening anchor, fourteen closes, and the post-close mark
 # so the union is these three and never the fourth supported timeframe. A
 # literal is what makes `dependencies_for` checkable: a closure taken from the
 # code under test could not disagree with it.
-DECLARED = ReplayDependencies(timeframes=("15m", "1h", "1d"), external_symbols=())
+DECLARED = ReplayDependencies(timeframes=("15m", "1h", "1d"), reference_pairs=())
 
 
 def opens(ordinal: int) -> pd.Timestamp:
@@ -302,7 +302,7 @@ def test_the_dependency_closure_is_the_union_the_definitions_declare():
     """
     surplus = frames_for(base_request(), base_schedule(),
                          ReplayDependencies(timeframes=("15m", "1h", "4h", "1d"),
-                                            external_symbols=()))
+                                            reference_pairs=()))
 
     with pytest.raises(ReplayInputError) as raised:
         run_portfolio(base_request(), PortfolioBars(surplus), strategy_registry(),
@@ -351,7 +351,7 @@ def test_a_daily_only_portfolio_replays_through_the_public_door():
     request, registry = daily_only_inputs()
     frames = frames_for(
         request, base_schedule(),
-        ReplayDependencies(timeframes=("15m", "1d"), external_symbols=()),
+        ReplayDependencies(timeframes=("15m", "1d"), reference_pairs=()),
         build=lambda labels: flat_frame(labels, 100.0))
 
     result = run_portfolio(request, PortfolioBars(frames), registry,

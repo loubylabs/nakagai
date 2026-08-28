@@ -21,18 +21,22 @@ in memory, and asserts the comparison notices: a net nobody has seen fail is a
 claim rather than a check.
 """
 
+from datetime import time
+from types import SimpleNamespace
+
 import numpy as np
 import pandas as pd
 import pytest
-from types import SimpleNamespace
 
 from nakagai.data.schema import DEFAULT_TIMEFRAMES
 from nakagai.strategies.ict.primitives import atr as window_atr
 from nakagai.strategies.rules import compile_pine, lower_pine, primitives as prim
 from nakagai.strategies.rules.frame_eval import FrameEval
 from nakagai.strategies.rules.pine.lowerings import HELPERS
+from nakagai.strategies.rules.vocabulary import core_vocabulary
+from nakagai.strategies.rules.windows import WindowSpec
 from nakagai.strategies.util import first_bar_of_session, fresh_bar
-from tests.pine_interpreter import as_series, run_helper, run_program
+from tests.pine_interpreter import PineError, as_series, run_helper, run_program
 
 SOURCES = {helper_id: helper.source for helper_id, helper in HELPERS.items()}
 # Short enough that an end-anchored scan is exercised over ordinary history,
@@ -402,8 +406,8 @@ def _market(index: pd.DatetimeIndex, close: np.ndarray, step: np.ndarray):
     frames = {"15m": chart,
               **{tf: chart.resample(rule).agg(agg).dropna()
                  for tf, rule in (("1h", "1h"), ("4h", "4h"), ("1d", "1D"))}}
-    requested = {"60": (frames["1h"], pd.Timedelta(hours=1)),
-                 "D": (frames["1d"], pd.Timedelta(days=1))}
+    requested = {("SPY", "60"): (frames["1h"], pd.Timedelta(hours=1)),
+                 ("SPY", "D"): (frames["1d"], pd.Timedelta(days=1))}
     return chart, frames, requested
 
 
@@ -447,13 +451,18 @@ def _body(source: str) -> list[str]:
     return source[start:source.index("// --- Markers ---")].splitlines()
 
 
-def _engine_decisions(spec: dict, side: str, chart=None, frames=None) -> np.ndarray:
+def _engine_decisions(spec: dict, side: str, chart=None, frames=None, *,
+                      pair_frames=None, vocabulary=None) -> np.ndarray:
     """The driving bars RuleStrategy would signal `side` on, from the engine."""
     chart = CHART if chart is None else chart
     frames = FRAMES if frames is None else frames
     timeframe = spec["timeframe"]
-    lifted = FrameEval(frames, DEFAULT_TIMEFRAMES).driving_group(
-        spec[side], timeframe).to_numpy()
+    pair_frames = ({("SPY", tf): frame for tf, frame in frames.items()}
+                   if pair_frames is None else pair_frames)
+    lifted = FrameEval(
+        "SPY", pair_frames, DEFAULT_TIMEFRAMES,
+        vocabulary=vocabulary,
+    ).driving_group(spec[side], timeframe).to_numpy()
     out = np.zeros(len(chart), dtype=bool)
     for i in range(len(chart)):
         now = chart.index[i] + CHART_STEP
@@ -587,6 +596,180 @@ def test_a_foreign_operand_decides_where_the_engine_decides(groups, market,
         f"{[str(t) for t in chart.index[wrong[:8]]]}, Pine "
         f"{pine[wrong[:8]].tolist()} against engine {engine[wrong[:8]].tolist()}")
     assert 2 <= int(engine.sum()) <= len(frames["1h"])
+
+
+def _raw_request_values(gaps: str) -> np.ndarray:
+    chart = CHART.iloc[:3]
+    reference = chart.drop(chart.index[1])
+    lines = [
+        "nk_reference() =>", "    close",
+        ('nk_raw = request.security("QQQ", "15", nk_reference(), '
+         f'lookahead=barmerge.lookahead_on, gaps={gaps})'),
+    ]
+    rows = run_program({}, lines, chart, CHART_STEP,
+                       {("QQQ", "15"): (reference, CHART_STEP)})
+    return np.asarray([row["nk_raw"] for row in rows], dtype="float64")
+
+
+def test_the_interpreter_models_request_gap_fill_modes_independently():
+    gaps_on = _raw_request_values("barmerge.gaps_on")
+    gaps_off = _raw_request_values("barmerge.gaps_off")
+    assert gaps_on[[0, 2]].tolist() == gaps_off[[0, 2]].tolist()
+    assert np.isnan(gaps_on[1])
+    assert gaps_off[1] == gaps_off[0]
+    with pytest.raises(PineError, match="only barmerge gap modes are modelled"):
+        _raw_request_values("barmerge.gaps_unknown")
+
+
+def test_the_interpreter_resolves_chart_and_literal_request_symbols():
+    chart = CHART.iloc[:3]
+    spy = chart.assign(close=200.0)
+    qqq = chart.assign(close=100.0)
+    lines = [
+        "nk_reference() =>", "    close",
+        ('nk_chart = request.security(syminfo.tickerid, "15", '
+         'nk_reference(), lookahead=barmerge.lookahead_on, '
+         'gaps=barmerge.gaps_on)'),
+        ('nk_literal = request.security("QQQ", "15", nk_reference(), '
+         'lookahead=barmerge.lookahead_on, gaps=barmerge.gaps_on)'),
+    ]
+    rows = run_program(
+        {}, lines, chart, CHART_STEP,
+        {("SPY", "15"): (spy, CHART_STEP),
+         ("QQQ", "15"): (qqq, CHART_STEP)},
+        symbol="SPY")
+    assert [row["nk_chart"] for row in rows] == [200.0] * len(chart)
+    assert [row["nk_literal"] for row in rows] == [100.0] * len(chart)
+
+
+def test_an_absent_reference_bar_remains_missing_in_executable_pine():
+    reference = CHART.copy()
+    gap = len(reference) // 2
+    missing_stamp = reference.index[gap]
+    reference = reference.drop(missing_stamp)
+    spec = {
+        "version": 2, "name": "reference_gap", "timeframe": "15m",
+        "long": {"all": [{
+            "lhs": {"src": "close", "sym": "QQQ"},
+            "op": ">", "rhs": 0,
+        }]},
+        "risk": {"stop": {"kind": "percent", "pct": 2.0},
+                 "target": {"kind": "rr", "rr": 2.0}},
+    }
+    source = compile_pine(spec).indicator
+    assert 'request.security("QQQ", "15",' in source
+    assert "gaps=barmerge.gaps_on" in source
+    rows = run_program(
+        {h.id: h.source for h in HELPERS.values()}, _body(source), CHART,
+        CHART_STEP, {("QQQ", "15"): (reference, CHART_STEP)})
+    pine = np.array([bool(row["nk_long_decision"]) for row in rows])
+    pairs = {("SPY", tf): frame for tf, frame in FRAMES.items()}
+    # Sparse external inputs become engine-owned frames with the expected
+    # target index and na at absent bars before FrameEval reads them.
+    pairs[("QQQ", "15m")] = reference.reindex(CHART.index)
+    engine = _engine_decisions(spec, "long", pair_frames=pairs)
+    assert np.array_equal(pine, engine)
+    assert pine[gap - 1] and not pine[gap] and pine[gap + 1]
+    filled_source = source.replace(
+        "gaps=barmerge.gaps_on", "gaps=barmerge.gaps_off")
+    assert filled_source != source
+    filled_rows = run_program(
+        {h.id: h.source for h in HELPERS.values()}, _body(filled_source),
+        CHART, CHART_STEP, {("QQQ", "15"): (reference, CHART_STEP)})
+    filled = np.array([bool(row["nk_long_decision"])
+                       for row in filled_rows])
+    assert filled[gap]
+    assert not np.array_equal(filled, engine)
+
+
+def test_a_sparse_daily_reference_shifts_after_gap_aware_merge():
+    daily = FRAMES["1d"]
+    missing = len(daily) // 2
+    sparse = daily.drop(daily.index[missing])
+    spec = {
+        "version": 2, "name": "daily_reference_gap", "timeframe": "15m",
+        "long": {"all": [{
+            "lhs": {"src": "close", "tf": "1d", "sym": "QQQ"},
+            "op": ">", "rhs": 0,
+        }]},
+        "risk": {"stop": {"kind": "percent", "pct": 2.0},
+                 "target": {"kind": "rr", "rr": 2.0}},
+    }
+    source = compile_pine(spec).indicator
+    rows = run_program(
+        {h.id: h.source for h in HELPERS.values()}, _body(source), CHART,
+        CHART_STEP, {("QQQ", "D"): (sparse, pd.Timedelta(days=1))})
+    pine = np.array([bool(row["nk_long_decision"]) for row in rows])
+    pairs = {("SPY", tf): frame for tf, frame in FRAMES.items()}
+    pairs[("QQQ", "1d")] = sparse.reindex(daily.index)
+    engine = _engine_decisions(spec, "long", pair_frames=pairs)
+    assert np.array_equal(pine, engine)
+    sessions = CHART.index.tz_convert("America/New_York").normalize()
+    affected = pd.DatetimeIndex([
+        pd.Timestamp(stamp.date(), tz="America/New_York")
+        for stamp in daily.index[[missing, missing + 1]]
+    ])
+    for session, expected in zip(affected, (True, False)):
+        where = np.flatnonzero(sessions == session)
+        assert len(where)
+        assert np.array_equal(pine[where], engine[where])
+        assert bool(engine[where].all()) is expected
+
+
+def test_literal_symbols_read_distinct_same_timeframe_request_data():
+    spy = CHART.copy()
+    qqq = CHART.copy()
+    spy.loc[:, "close"] = 200.0
+    qqq.loc[:, "close"] = 100.0
+    spec = {
+        "version": 2, "name": "pair_data", "timeframe": "15m",
+        "long": {"all": [{
+            "lhs": {"src": "close", "sym": "SPY"}, "op": ">",
+            "rhs": {"src": "close", "sym": "QQQ"},
+        }]},
+        "risk": {"stop": {"kind": "percent", "pct": 2.0},
+                 "target": {"kind": "rr", "rr": 2.0}},
+    }
+    source = compile_pine(spec).indicator
+    rows = run_program(
+        {h.id: h.source for h in HELPERS.values()}, _body(source), CHART,
+        CHART_STEP,
+        {("SPY", "15"): (spy, CHART_STEP),
+         ("QQQ", "15"): (qqq, CHART_STEP)})
+    pine = np.array([bool(row["nk_long_decision"]) for row in rows])
+    pairs = {("SPY", tf): frame for tf, frame in FRAMES.items()}
+    pairs[("SPY", "15m")] = spy
+    pairs[("QQQ", "15m")] = qqq
+    engine = _engine_decisions(spec, "long", pair_frames=pairs)
+    assert np.array_equal(pine, engine)
+    assert pine.all()
+
+
+def test_symbol_timeframe_and_window_execute_with_engine_parity():
+    window = WindowSpec(
+        "london", "Europe/London", time(8), time(16, 30), "weekday",
+        "low_iex")
+    vocabulary = core_vocabulary().with_windows(window)
+    spec = {
+        "version": 2, "name": "reference_window", "timeframe": "15m",
+        "long": {"all": [{
+            "lhs": {"ind": "highest", "of": {"src": "high"},
+                    "window": "london", "tf": "1h", "sym": "SPY"},
+            "op": ">", "rhs": 0,
+        }]},
+        "risk": {"stop": {"kind": "percent", "pct": 2.0},
+                 "target": {"kind": "rr", "rr": 2.0}},
+    }
+    source = compile_pine(spec, vocabulary).indicator
+    assert 'request.security("SPY", "60",' in source
+    assert "gaps=barmerge.gaps_on" in source
+    rows = run_program(
+        {h.id: h.source for h in HELPERS.values()}, _body(source), CHART,
+        CHART_STEP, REQUESTED)
+    pine = np.array([bool(row["nk_long_decision"]) for row in rows])
+    engine = _engine_decisions(spec, "long", vocabulary=vocabulary)
+    assert np.array_equal(pine, engine)
+    assert pine.any()
 
 
 def test_a_chart_composed_cross_reads_the_previous_hour_not_the_previous_bar():

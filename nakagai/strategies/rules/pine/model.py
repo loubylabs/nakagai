@@ -32,7 +32,12 @@ from typing import Literal
 
 # Bumped when the same spec would lower to different Pine. Part of a program's
 # identity, so a saved artifact can say which compiler wrote it.
-GENERATOR_VERSION = "1"
+GENERATOR_VERSION = "2"
+
+# TradingView caps a script's distinct request.security contexts. The lowerer
+# counts its deduplicated pair registry against this public compiler boundary
+# after the complete walk and before either artifact renders.
+MAX_PINE_REQUEST_PAIRS = 40
 
 
 class PineCompileError(ValueError):

@@ -173,19 +173,20 @@ def test_every_field_of_a_multi_field_indicator_is_covered():
 
 @pytest.mark.parametrize("node", EVERY_NODE, ids=lambda n: str(n))
 def test_whole_frame_equals_prefix_at_every_probe_row(node, frames):
-    fe = FrameEval(frames, TFS)
+    pair_frames = {("SPY", tf): frame for tf, frame in frames.items()}
+    fe = FrameEval("SPY", pair_frames, TFS)
     # A span that starts partway into the frame, so the end-anchored rows
     # really do exercise the offset and the placement back onto the frame's
     # index. At the whole-frame default lo is 0 and the offset is the identity,
     # which is the one arrangement that cannot catch an off-by-one there.
-    fe.set_span("15m", 300, len(frames["15m"]))
+    fe.set_span("SPY", "15m", 300, len(frames["15m"]))
     whole = fe.series(node, "15m")
     driving = frames["15m"]
     rows = list(range(300, len(driving), 37))
     assert rows, "need probe rows"
     for i in rows:
         now = driving.index[i] + TFS.step
-        want = prefix_value(node, frames, "15m", now, TFS)
+        want = prefix_value(node, pair_frames, "SPY", "15m", now, TFS)
         got = float(whole.iloc[i]) if isinstance(whole, pd.Series) else float(whole)
         assert (pd.isna(got) and pd.isna(want)) or got == want, (
             f"{node} row {i}: whole-frame {got!r} != prefix {want!r}")
