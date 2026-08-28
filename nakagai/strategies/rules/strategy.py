@@ -165,7 +165,9 @@ class RuleStrategy(Strategy):
         The tree is evaluated on the SPEC's timeframe (so `crosses_above`
         compares consecutive spec-timeframe bars, as the per-bar path did) and
         the resulting boolean is lifted onto the driving index, where the
-        cursor reads it.
+        cursor reads it. `driving_group` begins lexical symbol scope at the
+        traded symbol owned by the evaluator. An explicit `sym` may replace
+        that scope below this boundary, but it never changes the emitted trade.
         """
         tf = self.spec.get("timeframe", SPEC_TIMEFRAME_DEFAULT)
         i = ctx.cursor.get(ctx.tfs.driving, -1)

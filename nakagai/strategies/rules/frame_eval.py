@@ -127,55 +127,52 @@ def _cross_prev(node, v: pd.Series, vocabulary: Vocabulary) -> pd.Series:
 
 
 class FrameEval:
-    """Replay-scoped node cache over one symbol's untruncated frames."""
+    """Replay-scoped expression cache over pair-keyed market frames."""
 
-    # `vocabulary` is keyword-only: it sits behind an optional `tfs`, so
-    # FrameEval(frames, vocab) would bind the Vocabulary to `tfs` and evaluate
-    # every node against the core vocabulary instead. Nothing raises on that
-    # path unless a cross-timeframe node reaches self.tfs, so the wrong answer
-    # would look like a right one.
-    def __init__(self, frames: dict, tfs: TimeframeSet = DEFAULT_TIMEFRAMES, *,
+    def __init__(self, driving_symbol: str, frames: dict,
+                 tfs: TimeframeSet = DEFAULT_TIMEFRAMES, *,
                  vocabulary: Vocabulary | None = None):
-        self._frames = {tf: f for tf, f in frames.items()}
+        bad = [key for key in frames
+               if not (isinstance(key, tuple) and len(key) == 2
+                       and all(isinstance(part, str) for part in key))]
+        if bad:
+            raise TypeError(
+                "FrameEval frames must be pair-keyed as (symbol, timeframe); "
+                f"invalid keys: {bad!r}")
+        self.driving_symbol = driving_symbol
+        self._frames = dict(frames)
         self.tfs = tfs
         self.vocabulary = resolve_vocabulary(vocabulary)
         self._cache: dict = {}
         self._maps: dict = {}
         self._spans: dict = {}
+        self._missing: dict = {}
 
-    def on(self, tf: str) -> pd.DataFrame:
-        return self._frames[tf]
+    def on(self, symbol: str, tf: str) -> pd.DataFrame:
+        return self._frames[(symbol, tf)]
 
-    def set_span(self, tf: str, lo: int, hi: int) -> None:
-        """Declare the rows of `tf` the end_anchored terms are computed on.
-
-        The span is a correctness input for every end-anchored node, and it is
-        deliberately NOT part of the memo key: keying on it would let one
-        FrameEval hold two answers for the same node, and only one of them can
-        be the values the caller's rows actually saw. So the span is fixed for
-        the life of the cache, and moving it once anything is cached raises
-        rather than serving the previous span's rows from behind the memo.
-
-        Raising rather than dropping the affected entries is the deliberate
-        half of that choice. This is the trap waiting for the next person to
-        reuse one FrameEval across walk-forward windows: silence would make
-        that reuse legal and wrong, while quietly invalidating would make it
-        legal and pointless, since every node would be recomputed and the memo
-        is the entire reason to reuse. An error puts the decision in front of
-        whoever tries it. Build one FrameEval per span; both callers do.
-        """
+    def set_span(self, symbol: str, tf: str, lo: int, hi: int) -> None:
+        """Fix the end-anchored evaluation span for one symbol pair."""
+        pair = (symbol, tf)
         span = (max(int(lo), 0), int(hi))
-        if self._cache and self._span(tf) != span:
+        if self._cache and self._span(pair) != span:
             raise ValueError(
-                f"the {tf!r} span moved from {self._span(tf)} to {span} after "
-                "nodes were already computed under the old one; build a new "
-                "FrameEval per replay window rather than re-spanning this one")
-        self._spans[tf] = span
+                f"the {pair!r} span moved from {self._span(pair)} to {span} "
+                "after nodes were already computed under the old one; build "
+                "a new FrameEval per replay window")
+        self._spans[pair] = span
 
-    def _span(self, tf: str) -> tuple[int, int]:
-        return self._spans.get(tf, (0, len(self._frames[tf])))
+    def _span(self, pair: tuple[str, str]) -> tuple[int, int]:
+        return self._spans.get(pair, (0, len(self._frames[pair])))
 
-    def _positions(self, src_tf: str, dst_tf: str) -> np.ndarray:
+    def _own_missing(self, pair: tuple[str, str]) -> pd.Series:
+        if pair not in self._missing:
+            frame = self._frames[pair]
+            self._missing[pair] = frame.isna().all(axis=1).astype(bool)
+        return self._missing[pair]
+
+    def _positions(self, src_pair: tuple[str, str],
+                   dst_pair: tuple[str, str]) -> np.ndarray:
         """Row -> index of the last `src_tf` bar closed at that row's close.
 
         A session-aligned destination has no honest close time derivable from
@@ -186,20 +183,21 @@ class FrameEval:
         catalog spec pairs a session-aligned timeframe with a cross-timeframe
         reference, and a user spec that does deserves an error, not a guess.
         """
-        key = (src_tf, dst_tf)
+        src_tf, dst_tf = src_pair[1], dst_pair[1]
+        key = (*src_pair, *dst_pair)
         if key not in self._maps:
             if dst_tf in self.tfs.session_aligned:
                 raise ValueError(
                     f"spec timeframe {dst_tf!r} is session-aligned, so a "
                     f"reference to {src_tf!r} has no well-defined visibility "
                     "cutoff; move the spec to an intraday timeframe")
-            dst = self._frames[dst_tf].index
-            counts = visible_counts(self._frames[src_tf].index,
+            dst = self._frames[dst_pair].index
+            counts = visible_counts(self._frames[src_pair].index,
                                     dst + self.tfs.deltas[dst_tf], src_tf, self.tfs)
             self._maps[key] = counts - 1
         return self._maps[key]
 
-    def to_driving(self, v, src_tf: str):
+    def to_driving(self, v, src_symbol: str, src_tf: str):
         """Lift a native series onto the driving index by visibility.
 
         The signal path reads at a driving-bar cursor, but conditions must be
@@ -209,56 +207,110 @@ class FrameEval:
         lifting the BOOLEAN preserves that exactly; comparing on the driving
         index would compare against the previous 15m bar instead.
         """
-        return self._align(v, src_tf, self.tfs.driving)
+        return self._align(
+            v,
+            (src_symbol, src_tf),
+            (self.driving_symbol, self.tfs.driving),
+        )
 
-    def _align(self, v, src_tf: str, dst_tf: str):
+    def _align(self, v, src_pair: tuple[str, str],
+               dst_pair: tuple[str, str]):
         """Carry a native series onto another timeframe's index by visibility.
 
         dtype is preserved: booleans lift as booleans (invisible rows False),
         floats as floats (invisible rows NaN). A float cast here would turn a
         condition series into 0.0/1.0 and silently make `not visible` truthy.
         """
-        if not isinstance(v, pd.Series) or src_tf == dst_tf:
+        if not isinstance(v, pd.Series) or src_pair == dst_pair:
             return v
-        pos = self._positions(src_tf, dst_tf)
+        pos = self._positions(src_pair, dst_pair)
         ok = pos >= 0
-        index = self._frames[dst_tf].index
-        if v.dtype == bool:
-            out = np.zeros(len(pos), dtype=bool)
-            out[ok] = v.to_numpy()[pos[ok]]
-            return pd.Series(out, index=index)
+        index = self._frames[dst_pair].index
+        if v.dtype == bool or isinstance(v.dtype, pd.BooleanDtype):
+            out = pd.Series(pd.NA, index=index, dtype="boolean")
+            if ok.any():
+                values = v.astype("boolean").to_numpy()
+                out.iloc[np.flatnonzero(ok)] = values[pos[ok]]
+            if isinstance(v.dtype, pd.BooleanDtype):
+                return out
+            return out.fillna(False).astype(bool)
         vals = v.to_numpy(dtype="float64")
         out = np.full(len(pos), np.nan)
         out[ok] = vals[pos[ok]]
         return pd.Series(out, index=index)
 
-    def series(self, node, tf: str):
-        if isinstance(node, (int, float)):
-            return float(node)
-        key = (tf, json.dumps(node, sort_keys=True))
-        if key in self._cache:
-            return self._cache[key]
-        self._cache[key] = out = self._eval(node, tf)
-        return out
+    def _align_mask(self, mask: pd.Series, src_pair: tuple[str, str],
+                    dst_pair: tuple[str, str]) -> pd.Series:
+        if src_pair == dst_pair:
+            return mask
+        pos = self._positions(src_pair, dst_pair)
+        ok = pos >= 0
+        out = np.ones(len(pos), dtype=bool)
+        out[ok] = mask.to_numpy(dtype=bool)[pos[ok]]
+        return pd.Series(out, index=self._frames[dst_pair].index)
 
-    def _eval(self, node: dict, tf: str):
-        src_tf = node.get("tf", tf)
-        frame = self._frames[src_tf]
+    @staticmethod
+    def _masked(value, mask: pd.Series):
+        if not isinstance(value, pd.Series):
+            return value
+        if value.dtype == bool or isinstance(value.dtype, pd.BooleanDtype):
+            return value.astype("boolean").mask(mask, pd.NA)
+        return value.mask(mask)
+
+    def _align_result(self, result, src_pair: tuple[str, str],
+                      dst_pair: tuple[str, str]):
+        value, mask = result
+        return (
+            self._align(value, src_pair, dst_pair),
+            self._align_mask(mask, src_pair, dst_pair),
+        )
+
+    def series(self, node, tf: str):
+        """Evaluate from the traded symbol and return only the public value."""
+        value, _ = self._series_result(
+            node, (self.driving_symbol, tf))
+        return value
+
+    def _series_result(self, node, host_pair: tuple[str, str]):
+        if isinstance(node, (int, float)):
+            return (
+                float(node),
+                pd.Series(False, index=self._frames[host_pair].index),
+            )
+        native_pair = (
+            node.get("sym", host_pair[0]),
+            node.get("tf", host_pair[1]),
+        )
+        key = (*native_pair, json.dumps(node, sort_keys=True))
+        if key in self._cache:
+            native = self._cache[key]
+        else:
+            self._cache[key] = native = self._eval(node, native_pair)
+        return self._align_result(native, native_pair, host_pair)
+
+    def _eval(self, node: dict, pair: tuple[str, str]):
+        frame = self._frames[pair]
+        mask = self._own_missing(pair).copy()
         if "src" in node:
-            return self._align(frame[node["src"]], src_tf, tf)
+            return self._masked(frame[node["src"]], mask), mask
         if "op" in node:
-            return _math(node["op"], [self.series(a, tf) for a in node["args"]])
+            children = [self._series_result(a, pair) for a in node["args"]]
+            for _, child_mask in children:
+                mask |= child_mask
+            out = _math(node["op"], [value for value, _ in children])
+            return self._masked(out, mask), mask
         if "ind" in node:
             name = node["ind"]
             term = self.vocabulary.indicators[name]
             a = {**term.defaults,
                  **{k: v for k, v in node.items()
-                    if k not in ("ind", "of", "tf", "window")}}
+                    if k not in ("ind", "of", "tf", "sym", "window")}}
             if term.kind == "bar":
                 out = term.fn(frame, a)
             else:
                 of = node.get("of", {"src": "close"})
-                s = self.series(of, src_tf)
+                s, child_mask = self._series_result(of, pair)
+                mask |= child_mask
                 if not isinstance(s, pd.Series):
                     s = pd.Series(s, index=frame.index, dtype="float64")
                 if "window" in node:
@@ -272,12 +324,15 @@ class FrameEval:
                     out = term.fn(s, a)
             if isinstance(out, pd.DataFrame):
                 out = out[a["field"]]
-            return self._align(out, src_tf, tf)
+            return self._masked(out, mask), mask
         name = node["prim"]
         term = self.vocabulary.primitives[name]
         a = {**term.defaults,
-             **{k: v for k, v in node.items() if k not in ("prim", "tf")}}
-        if any(is_condition_rule(rule) for rule in term.args.values()):
+             **{k: v for k, v in node.items()
+                if k not in ("prim", "tf", "sym")}}
+        condition_args = [arg for arg, rule in term.args.items()
+                          if is_condition_rule(rule) and arg in node]
+        if condition_args:
             # Generic per N3-D9, keyed on the arg TYPE rather than the name
             # "bars_since": a term registered outside core (a platform
             # vocabulary entry, added with no core PR) reaches this the same
@@ -302,20 +357,26 @@ class FrameEval:
             # exempts every end_anchored term. `.loc` rather than `.reindex`:
             # `b` is always a prefix of this same frame, so a missing label is a
             # miswiring and should raise here rather than become a silent NaN.
-            a["eval_fn"] = (lambda cond, b:
-                            self.condition_series(cond, src_tf).loc[b.index])
+            for arg in condition_args:
+                _, child_mask = self._condition_result(node[arg], pair)
+                mask |= child_mask
+            a["eval_fn"] = (
+                lambda cond, b: self._condition_result(cond, pair)[0]
+                .fillna(False).astype(bool).loc[b.index]
+            )
         if term.end_anchored:
             # Exactly the span, with no warm-up margin in front of it. Row i is
             # the scalar function called on bars[:i+1], which does its own
             # `lookback` tail-trim, so a row needs nothing computed before it:
             # widening the range only calls the function for rows no reader can
             # reach, at `lookback` extra calls per node per replay.
-            lo, hi = self._span(src_tf)
+            lo, hi = self._span(pair)
             part = end_anchored_series(term, None, frame, lo, hi, **a)
             out = pd.Series(np.nan, index=frame.index)
             out.iloc[lo:hi] = part.to_numpy()
-            return self._align(out, src_tf, tf)
-        return self._align(term.fn(None, frame, **a), src_tf, tf)
+            return self._masked(out, mask), mask
+        out = term.fn(None, frame, **a)
+        return self._masked(out, mask), mask
 
     def condition_series(self, cond: dict, tf: str) -> pd.Series:
         """Elementwise boolean series for a comparison condition. dtype ==
@@ -323,9 +384,11 @@ class FrameEval:
         boundary, per N3-D4. See _condition_series_na for the private
         Kleene-preserving leaf this is built from.
         """
-        return self._condition_series_na(cond, tf).fillna(False).astype(bool)
+        return self._condition_result(
+            cond, (self.driving_symbol, tf))[0].fillna(False).astype(bool)
 
-    def _condition_series_na(self, cond: dict, tf: str) -> pd.Series:
+    def _condition_series_na(self, cond: dict, symbol: str,
+                             tf: str) -> pd.Series:
         """Elementwise NULLABLE boolean series: dtype "boolean", pd.NA where
         an operand is unknown. Private per N3-D4: pd.NA lives only beneath
         group_series's and driving_group's public boundary, and the one other
@@ -334,8 +397,12 @@ class FrameEval:
         rather than this one, so an unknown condition still does not count as
         an occurrence there, which is today's behavior preserved deliberately.
         """
-        index = self._frames[tf].index
-        lhs, rhs = self.series(cond["lhs"], tf), self.series(cond["rhs"], tf)
+        return self._condition_result(cond, (symbol, tf))[0]
+
+    def _condition_result(self, cond: dict, pair: tuple[str, str]):
+        index = self._frames[pair].index
+        lhs, lhs_mask = self._series_result(cond["lhs"], pair)
+        rhs, rhs_mask = self._series_result(cond["rhs"], pair)
         if not isinstance(lhs, pd.Series):
             lhs = pd.Series(lhs, index=index)
         if not isinstance(rhs, pd.Series):
@@ -354,9 +421,12 @@ class FrameEval:
         # out is plain-bool: a float comparison against NaN reads False, never
         # NaN, so the cast to nullable "boolean" is exact and `na` is what
         # turns the right positions into pd.NA rather than a lossy False.
-        return out.astype("boolean").mask(na, pd.NA)
+        mask = self._own_missing(pair) | lhs_mask | rhs_mask
+        unknown = mask | na
+        return out.astype("boolean").mask(unknown, pd.NA), mask
 
-    def _group_reduce_na(self, group: dict, tf: str) -> pd.Series:
+    def _group_reduce_na(self, group: dict, symbol: str,
+                         tf: str) -> pd.Series:
         """The private Kleene-preserving reducer: nullable boolean throughout.
 
         N3-D2: all/any reduce element-wise with & / |, via functools.reduce,
@@ -372,9 +442,9 @@ class FrameEval:
         """
         key, val = next(iter(group.items()))
         if key == "not":
-            return ~self._group_reduce_na(val, tf)
-        parts = [self._group_reduce_na(i, tf) if is_group_node(i)
-                 else self._condition_series_na(i, tf) for i in val]
+            return ~self._group_reduce_na(val, symbol, tf)
+        parts = [self._group_reduce_na(i, symbol, tf) if is_group_node(i)
+                 else self._condition_series_na(i, symbol, tf) for i in val]
         op = operator.and_ if key == "all" else operator.or_
         return functools.reduce(op, parts)
 
@@ -382,7 +452,8 @@ class FrameEval:
         """all/any/not tree as one boolean series on `tf`'s index. dtype ==
         bool: an unknown group result resolves to not-fired HERE, at the
         public boundary, per N3-D4."""
-        return self._group_reduce_na(group, tf).fillna(False).astype(bool)
+        return self._group_reduce_na(
+            group, self.driving_symbol, tf).fillna(False).astype(bool)
 
     def driving_group(self, group: dict, tf: str) -> pd.Series:
         """`group` as a boolean series on the DRIVING index, computed once.
@@ -393,7 +464,14 @@ class FrameEval:
         put replay straight back on O(bars x history) with the indicator cache
         doing nothing but hiding it.
         """
-        key = ("group", tf, json.dumps(group, sort_keys=True))
+        key = ("group", self.driving_symbol, tf,
+               json.dumps(group, sort_keys=True))
         if key not in self._cache:
-            self._cache[key] = self.to_driving(self.group_series(group, tf), tf)
+            native = self._group_reduce_na(group, self.driving_symbol, tf)
+            lifted = self._align(
+                native,
+                (self.driving_symbol, tf),
+                (self.driving_symbol, self.tfs.driving),
+            )
+            self._cache[key] = lifted.fillna(False).astype(bool)
         return self._cache[key]
