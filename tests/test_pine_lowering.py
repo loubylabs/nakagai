@@ -19,8 +19,9 @@ from nakagai.strategies.rules import (
 )
 from nakagai.strategies.rules.pine.lower import PINE_TIMEFRAMES, SpecLowerer
 from nakagai.strategies.rules.pine import (
-    GENERATOR_VERSION, MAX_PINE_REQUEST_PAIRS,
+    GENERATOR_VERSION, MAX_PINE_REQUEST_PAIRS as PACKAGE_REQUEST_PAIR_LIMIT,
 )
+from nakagai.strategies.rules.pine.compiler import MAX_PINE_REQUEST_PAIRS
 from nakagai.strategies.rules.pine.model import PineExpr
 from nakagai.strategies.rules.spec import (
     DRIVING,
@@ -459,6 +460,7 @@ def test_nodes_without_symbol_keep_the_existing_request_contract():
 
 def test_the_pair_limit_and_generator_identity_are_public_constants():
     assert MAX_PINE_REQUEST_PAIRS == 40
+    assert PACKAGE_REQUEST_PAIR_LIMIT is MAX_PINE_REQUEST_PAIRS
     assert GENERATOR_VERSION == "2"
 
 

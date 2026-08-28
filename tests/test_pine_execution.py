@@ -36,7 +36,7 @@ from nakagai.strategies.rules.pine.lowerings import HELPERS
 from nakagai.strategies.rules.vocabulary import core_vocabulary
 from nakagai.strategies.rules.windows import WindowSpec
 from nakagai.strategies.util import first_bar_of_session, fresh_bar
-from tests.pine_interpreter import as_series, run_helper, run_program
+from tests.pine_interpreter import PineError, as_series, run_helper, run_program
 
 SOURCES = {helper_id: helper.source for helper_id, helper in HELPERS.items()}
 # Short enough that an end-anchored scan is exercised over ordinary history,
@@ -598,10 +598,34 @@ def test_a_foreign_operand_decides_where_the_engine_decides(groups, market,
     assert 2 <= int(engine.sum()) <= len(frames["1h"])
 
 
-def test_an_explicit_reference_gap_remains_missing_in_executable_pine():
+def _raw_request_values(gaps: str) -> np.ndarray:
+    chart = CHART.iloc[:3]
+    reference = chart.drop(chart.index[1])
+    lines = [
+        "nk_reference() =>", "    close",
+        ('nk_raw = request.security("QQQ", "15", nk_reference(), '
+         f'lookahead=barmerge.lookahead_on, gaps={gaps})'),
+    ]
+    rows = run_program({}, lines, chart, CHART_STEP,
+                       {"15": (reference, CHART_STEP)})
+    return np.asarray([row["nk_raw"] for row in rows], dtype="float64")
+
+
+def test_the_interpreter_models_request_gap_fill_modes_independently():
+    gaps_on = _raw_request_values("barmerge.gaps_on")
+    gaps_off = _raw_request_values("barmerge.gaps_off")
+    assert gaps_on[[0, 2]].tolist() == gaps_off[[0, 2]].tolist()
+    assert np.isnan(gaps_on[1])
+    assert gaps_off[1] == gaps_off[0]
+    with pytest.raises(PineError, match="only barmerge gap modes are modelled"):
+        _raw_request_values("barmerge.gaps_unknown")
+
+
+def test_an_absent_reference_bar_remains_missing_in_executable_pine():
     reference = CHART.copy()
     gap = len(reference) // 2
-    reference.iloc[gap, reference.columns.get_loc("close")] = np.nan
+    missing_stamp = reference.index[gap]
+    reference = reference.drop(missing_stamp)
     spec = {
         "version": 2, "name": "reference_gap", "timeframe": "15m",
         "long": {"all": [{
@@ -619,10 +643,22 @@ def test_an_explicit_reference_gap_remains_missing_in_executable_pine():
         CHART_STEP, {"15": (reference, CHART_STEP)})
     pine = np.array([bool(row["nk_long_decision"]) for row in rows])
     pairs = {("SPY", tf): frame for tf, frame in FRAMES.items()}
-    pairs[("QQQ", "15m")] = reference
+    # Sparse external inputs become engine-owned frames with the expected
+    # target index and na at absent bars before FrameEval reads them.
+    pairs[("QQQ", "15m")] = reference.reindex(CHART.index)
     engine = _engine_decisions(spec, "long", pair_frames=pairs)
     assert np.array_equal(pine, engine)
     assert pine[gap - 1] and not pine[gap] and pine[gap + 1]
+    filled_source = source.replace(
+        "gaps=barmerge.gaps_on", "gaps=barmerge.gaps_off")
+    assert filled_source != source
+    filled_rows = run_program(
+        {h.id: h.source for h in HELPERS.values()}, _body(filled_source),
+        CHART, CHART_STEP, {"15": (reference, CHART_STEP)})
+    filled = np.array([bool(row["nk_long_decision"])
+                       for row in filled_rows])
+    assert filled[gap]
+    assert not np.array_equal(filled, engine)
 
 
 def test_symbol_timeframe_and_window_execute_with_engine_parity():

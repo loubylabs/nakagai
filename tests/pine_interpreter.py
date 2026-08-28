@@ -420,6 +420,14 @@ class Runtime:
         # request. -1 before the first one exists.
         self.markets: dict[str, Market] = {}
         self.maps: dict[str, np.ndarray] = {}
+        # Whether the mapped requested bar actually contains each chart bar.
+        # A missing expected bar maps to the previous requested row for
+        # gaps_off carry-forward, while gaps_on reads this bit and yields na.
+        self.coverage: dict[str, np.ndarray] = {}
+        # Calendar-derived closes for time_close(tf). They belong to the chart
+        # cadence, so a missing bar in a requested symbol cannot erase the
+        # visibility gate for that expected interval.
+        self.calendar_closes: dict[str, np.ndarray] = {}
         self._requested: dict[int, list] = {}
 
     def call(self, name: str, args: list, key: tuple):
@@ -547,6 +555,10 @@ class Runtime:
         if named.get("lookahead") != "barmerge.lookahead_on":
             raise PineError("only barmerge.lookahead_on is modelled, got "
                             f"{named.get('lookahead')!r}")
+        gaps = named.get("gaps")
+        if gaps not in ("barmerge.gaps_on", "barmerge.gaps_off"):
+            raise PineError("only barmerge gap modes are modelled, got "
+                            f"{gaps!r}")
         if len(arg_nodes) != 3 or arg_nodes[1][0] != "str":
             raise PineError("request.security wants (symbol, literal tf, expr)")
         tf, call = arg_nodes[1][1], arg_nodes[2]
@@ -558,6 +570,8 @@ class Runtime:
             market = self.markets[tf]
             sub = Runtime(market, self.helpers)
             sub.markets, sub.maps = self.markets, self.maps
+            sub.coverage = self.coverage
+            sub.calendar_closes = self.calendar_closes
             values = []
             for bar in range(market.length):
                 sub.bar = bar
@@ -565,7 +579,9 @@ class Runtime:
             self._requested[site] = values
         values = self._requested[site]
         position = int(self.maps[tf][self.bar])
-        if position < 0:
+        if (position < 0
+                or (gaps == "barmerge.gaps_on"
+                    and not self.coverage[tf][self.bar])):
             head = values[0] if values else NA
             return tuple(NA for _ in head) if isinstance(head, tuple) else NA
         return values[position]
@@ -612,9 +628,7 @@ class Runtime:
             # The close of the bar of `args[0]` that this chart bar sits in.
             # No request: Pine derives it from the calendar, which is why the
             # gate it spells costs nothing.
-            position = int(self.maps[args[0]][self.bar])
-            return (NA if position < 0
-                    else self.markets[args[0]].at("time_close", position))
+            return self.calendar_closes[args[0]][self.bar]
         if name == "int":
             return int(args[0])
         if name == "math.max":
@@ -724,8 +738,20 @@ def run_program(sources: dict[str, str], lines: list[str], bars: pd.DataFrame,
     runtime = Runtime(Market(bars, step), helpers)
     for timeframe, (frame, delta) in (frames or {}).items():
         runtime.markets[timeframe] = Market(frame, delta)
-        runtime.maps[timeframe] = np.asarray(
+        positions = np.asarray(
             frame.index.searchsorted(bars.index, side="right")) - 1
+        runtime.maps[timeframe] = positions
+        covered = np.zeros(len(bars), dtype=bool)
+        mapped = positions >= 0
+        if mapped.any():
+            closes = frame.index + delta
+            covered[mapped] = np.asarray(
+                bars.index[mapped] < closes[positions[mapped]])
+        runtime.coverage[timeframe] = covered
+        delta_ms = int(delta / pd.Timedelta(milliseconds=1))
+        chart_ms = runtime.market.series["time"].astype("int64")
+        runtime.calendar_closes[timeframe] = (
+            (chart_ms // delta_ms + 1) * delta_ms).astype("float64")
     sites: list[str] = []
     body, _rest = _block(statements, 0, 0, sites)
     state = _Frame()

@@ -2,7 +2,7 @@
 
 from nakagai.strategies.rules.pine.lower import SpecLowerer
 from nakagai.strategies.rules.pine.model import (
-    PineBundle, PineCompileError, PineProgram,
+    MAX_PINE_REQUEST_PAIRS, PineBundle, PineCompileError, PineProgram,
 )
 from nakagai.strategies.rules.pine.render import render
 from nakagai.strategies.rules.spec import validate_spec
