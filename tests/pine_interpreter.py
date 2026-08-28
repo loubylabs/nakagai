@@ -407,28 +407,32 @@ class Market:
         return self._stamps[key]
 
 
+_RequestPair = tuple[str, str]
+
+
 class Runtime:
     """One program's execution over one market, bar by bar."""
 
-    def __init__(self, market: Market, helpers: dict[str, PineFunction]):
+    def __init__(self, market: Market, helpers: dict[str, PineFunction],
+                 chart_symbol: str = "SPY"):
         self.market = market
         self.helpers = helpers
+        self.chart_symbol = chart_symbol
         self.frames: dict[tuple, _Frame] = {}
         self.bar = 0
-        # One Market per requested timeframe, and per timeframe the index of
-        # the bar CONTAINING each chart bar, which is how TradingView aligns a
-        # request. -1 before the first one exists.
-        self.markets: dict[str, Market] = {}
-        self.maps: dict[str, np.ndarray] = {}
+        # One Market per requested pair, and per pair the index of the bar
+        # CONTAINING each chart bar. -1 means no requested bar exists yet.
+        self.markets: dict[_RequestPair, Market] = {}
+        self.maps: dict[_RequestPair, np.ndarray] = {}
         # Whether the mapped requested bar actually contains each chart bar.
         # A missing expected bar maps to the previous requested row for
         # gaps_off carry-forward, while gaps_on reads this bit and yields na.
-        self.coverage: dict[str, np.ndarray] = {}
+        self.coverage: dict[_RequestPair, np.ndarray] = {}
         # Calendar-derived closes for time_close(tf). They belong to the chart
         # cadence, so a missing bar in a requested symbol cannot erase the
         # visibility gate for that expected interval.
         self.calendar_closes: dict[str, np.ndarray] = {}
-        self._requested: dict[int, list] = {}
+        self._requested: dict[tuple[_RequestPair, int], list] = {}
 
     def call(self, name: str, args: list, key: tuple):
         function = self.helpers.get(name)
@@ -561,27 +565,40 @@ class Runtime:
                             f"{gaps!r}")
         if len(arg_nodes) != 3 or arg_nodes[1][0] != "str":
             raise PineError("request.security wants (symbol, literal tf, expr)")
+        symbol_node = arg_nodes[0]
+        if symbol_node[0] == "str":
+            symbol = symbol_node[1]
+        elif (symbol_node[0] == "name"
+              and symbol_node[1] == "syminfo.tickerid"):
+            symbol = self.chart_symbol
+        else:
+            raise PineError(
+                "request.security symbol must be a literal or "
+                "syminfo.tickerid")
         tf, call = arg_nodes[1][1], arg_nodes[2]
+        pair = (symbol, tf)
         if call[0] != "call" or call[2]:
             raise PineError("the requested expression must be a bare call")
-        if tf not in self.markets:
-            raise PineError(f"no frame was supplied for the {tf!r} request")
-        if site not in self._requested:
-            market = self.markets[tf]
-            sub = Runtime(market, self.helpers)
+        if pair not in self.markets:
+            raise PineError(f"no frame was supplied for the {pair!r} request")
+        request_key = (pair, site)
+        if request_key not in self._requested:
+            market = self.markets[pair]
+            sub = Runtime(market, self.helpers, chart_symbol=symbol)
             sub.markets, sub.maps = self.markets, self.maps
             sub.coverage = self.coverage
             sub.calendar_closes = self.calendar_closes
             values = []
             for bar in range(market.length):
                 sub.bar = bar
-                values.append(sub.call(call[1], [], ("requested", site)))
-            self._requested[site] = values
-        values = self._requested[site]
-        position = int(self.maps[tf][self.bar])
+                values.append(sub.call(
+                    call[1], [], ("requested", request_key)))
+            self._requested[request_key] = values
+        values = self._requested[request_key]
+        position = int(self.maps[pair][self.bar])
         if (position < 0
                 or (gaps == "barmerge.gaps_on"
-                    and not self.coverage[tf][self.bar])):
+                    and not self.coverage[pair][self.bar])):
             head = values[0] if values else NA
             return tuple(NA for _ in head) if isinstance(head, tuple) else NA
         return values[position]
@@ -719,15 +736,16 @@ def _split_program(lines: list[str]):
 
 
 def run_program(sources: dict[str, str], lines: list[str], bars: pd.DataFrame,
-                step: pd.Timedelta, frames=None) -> list[dict]:
+                step: pd.Timedelta, frames=None, *,
+                symbol: str = "SPY") -> list[dict]:
     """Every top-level statement of an emitted artifact, over `bars`, bar by bar.
 
-    `frames` maps a Pine timeframe string to the (frame, step) a request of it
-    reads. A chart bar is mapped to the requested bar it falls inside by plain
-    searchsorted, which is TradingView's containment for an intraday request
-    and, for a daily one over regular-hours bars, the same grouping the engine
-    uses: a daily label is UTC midnight of its New York date, and every session
-    bar of that date is later in the same UTC date.
+    `frames` maps `(symbol, Pine timeframe)` to the (frame, step) a request of
+    that pair reads. A literal request selects its literal symbol;
+    syminfo.tickerid selects `symbol`. A chart bar is mapped to the requested
+    bar it falls inside by plain searchsorted, which is TradingView's
+    containment for an intraday request and, for a daily one over regular-hours
+    bars, the same grouping the engine uses.
 
     Returns one dict per bar: every identifier that bar assigned, so a test can
     read the decision the artifact reached rather than the text that reached it.
@@ -735,19 +753,24 @@ def run_program(sources: dict[str, str], lines: list[str], bars: pd.DataFrame,
     statements, inline = _split_program(lines)
     helpers = {name: PineFunction(source)
                for name, source in {**sources, **inline}.items()}
-    runtime = Runtime(Market(bars, step), helpers)
-    for timeframe, (frame, delta) in (frames or {}).items():
-        runtime.markets[timeframe] = Market(frame, delta)
+    runtime = Runtime(Market(bars, step), helpers, chart_symbol=symbol)
+    for pair, (frame, delta) in (frames or {}).items():
+        if (not isinstance(pair, tuple) or len(pair) != 2
+                or not all(isinstance(part, str) for part in pair)):
+            raise PineError(
+                "request frames must be keyed by (symbol, Pine timeframe)")
+        _request_symbol, timeframe = pair
+        runtime.markets[pair] = Market(frame, delta)
         positions = np.asarray(
             frame.index.searchsorted(bars.index, side="right")) - 1
-        runtime.maps[timeframe] = positions
+        runtime.maps[pair] = positions
         covered = np.zeros(len(bars), dtype=bool)
         mapped = positions >= 0
         if mapped.any():
             closes = frame.index + delta
             covered[mapped] = np.asarray(
                 bars.index[mapped] < closes[positions[mapped]])
-        runtime.coverage[timeframe] = covered
+        runtime.coverage[pair] = covered
         delta_ms = int(delta / pd.Timedelta(milliseconds=1))
         chart_ms = runtime.market.series["time"].astype("int64")
         runtime.calendar_closes[timeframe] = (

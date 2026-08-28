@@ -395,8 +395,10 @@ def test_two_nodes_of_one_timeframe_share_its_single_request():
 
 def test_two_nodes_of_one_reference_pair_share_one_literal_request():
     spec = _spec(
-        {"ind": "sma", "n": 10, "tf": "1h", "sym": "SPY"},
-        rhs={"ind": "ema", "n": 20, "tf": "1h", "sym": "SPY"})
+        {"ind": "sma", "n": 10, "tf": "1h", "sym": "SPY",
+         "of": {"ind": "ema", "n": 5}},
+        rhs={"ind": "sma", "n": 20, "tf": "1h", "sym": "SPY",
+             "of": {"ind": "ema", "n": 5}})
     program = lower_pine(spec)
     requests = [line for line in _lines(program)
                 if "request.security(" in line]
@@ -404,6 +406,23 @@ def test_two_nodes_of_one_reference_pair_share_one_literal_request():
     assert requests[0].startswith("[")
     assert 'request.security("SPY", "60",' in requests[0]
     assert "gaps=barmerge.gaps_on" in requests[0]
+    ema_inputs = [item for item in program.inputs if item.name.endswith("_ema_n")]
+    assert [item.default for item in ema_inputs] == [5]
+
+
+def test_identical_descendants_on_distinct_pairs_get_independent_inputs():
+    spec = _spec(
+        {"ind": "sma", "n": 10, "sym": "SPY",
+         "of": {"ind": "ema", "n": 5}},
+        rhs={"ind": "sma", "n": 20, "sym": "QQQ",
+             "of": {"ind": "ema", "n": 5}})
+    program = lower_pine(spec)
+    ema_inputs = [item for item in program.inputs if item.name.endswith("_ema_n")]
+    assert [item.name for item in ema_inputs] == [
+        "nk_long_all_0_lhs_of_ema_n",
+        "nk_long_all_0_rhs_of_ema_n",
+    ]
+    assert [item.default for item in ema_inputs] == [5, 5]
 
 
 def test_symbol_and_timeframe_both_separate_request_pairs():

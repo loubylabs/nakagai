@@ -716,14 +716,16 @@ class SpecLowerer:
         """One pair's function, request, latches and visibility gate."""
         symbol, tf = pair
         path = RulePath(("timeframe",))
-        # A session-aligned bar is read one bar back and an intraday one is
-        # not, and the difference is the gate each is paired with. An intraday
-        # gate fires where the requested bar CLOSES, so the unoffset value is
-        # that bar's own and is confirmed. A session-aligned gate fires where
-        # the new day OPENS, where the current daily bar has not happened yet,
-        # so the confirmed value there is the previous one. Both are exactly
-        # what closed_before hands the engine on the same bar.
-        offset = "[1]" if tf in SESSION_ALIGNED else ""
+        # An intraday gate fires where the requested bar CLOSES, so its
+        # unoffset value is confirmed. A session-aligned gate fires where the
+        # new day OPENS, so its current daily bar has not happened yet. An
+        # inherited-symbol request reads [1] inside its dense gaps_off frame.
+        # A literal-symbol request shifts its sparse gaps_on result in the
+        # chart latch below, because [1] inside that sparse frame means the
+        # previous AVAILABLE row and skips a missing expected day. Both routes
+        # publish exactly what closed_before hands the engine on the same bar.
+        chart_shift = symbol is not None and tf in SESSION_ALIGNED
+        offset = "[1]" if tf in SESSION_ALIGNED and not chart_shift else ""
         values = request["values"]
         # The gate leads, because it is the chart-level fact everything under
         # it is conditioned on and a reader meets it before the latch it guards.
@@ -742,10 +744,25 @@ class SpecLowerer:
             tf=PINE_TIMEFRAMES[tf], call=function,
             gaps=("barmerge.gaps_off" if symbol is None
                   else "barmerge.gaps_on")))
-        out += [f"var {kind} {name} = {SEED[kind]}"
-                for _p, name, kind, _m in values]
-        out.append(f"if {gate}\n" + "\n".join(
-            f"    {name} := {name}_raw" for _p, name, _k, _m in values))
+        if chart_shift:
+            previous = [self.ctx.claim(f"{name}_previous_raw", path)
+                        for _p, name, _kind, _member in values]
+            out += [f"var {kind} {prior} = {SEED[kind]}"
+                    for prior, (_p, _name, kind, _member)
+                    in zip(previous, values)]
+            out += [f"var {kind} {name} = {SEED[kind]}"
+                    for _p, name, kind, _member in values]
+            shifts = []
+            for prior, (_p, name, _kind, _member) in zip(previous, values):
+                shifts += [f"    {name} := {prior}",
+                           f"    {prior} := {name}_raw"]
+            out.append(f"if {gate}\n" + "\n".join(shifts))
+        else:
+            out += [f"var {kind} {name} = {SEED[kind]}"
+                    for _p, name, kind, _member in values]
+            out.append(f"if {gate}\n" + "\n".join(
+                f"    {name} := {name}_raw"
+                for _p, name, _kind, _member in values))
 
     def _sample_lines(self, out: list[str]) -> None:
         """The play's operands as its OWN timeframe's bars saw them, and before.
@@ -1162,9 +1179,12 @@ class SpecLowerer:
             # and one was dropped without a word.
             (arg,) = condition_args & set(node)
             source = self._condition(node[arg], path.child(arg), frame, frame)
+        pair_content = json.dumps(
+            {"node": _content(node, self.vocabulary), "pair": frame},
+            sort_keys=True, separators=(",", ":"))
         call = TermCall(term=term, args=args, path=path,
                         slot=self.ctx.slot(f"nk_{term.name}", path),
-                        source=source, content=_content(node, self.vocabulary),
+                        source=source, content=pair_content,
                         window=window)
         if window is not None and window.confidence == "low_iex":
             self.ctx.warn(LOW_IEX_WARNING.format(name=window.name))

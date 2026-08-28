@@ -464,7 +464,7 @@ def test_a_selected_frame_runs_the_window_state_inside_request_security():
     rows = run_program(
         {helper.id: helper.source for helper in program.helpers},
         lines, chart, pd.Timedelta(minutes=15),
-        {"60": (hourly, pd.Timedelta(hours=1))})
+        {("SPY", "60"): (hourly, pd.Timedelta(hours=1))})
     pine = as_series([row["nk_selected_probe"] for row in rows], chart)
     engine = FrameEval(
         "SPY",
