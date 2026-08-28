@@ -2,6 +2,9 @@
 
 import os
 import time
+from collections.abc import Mapping
+from dataclasses import dataclass
+from types import MappingProxyType
 
 import httpx
 import pandas as pd
@@ -14,7 +17,24 @@ _BASE = "https://data.alpaca.markets"
 _MAX_429_RETRIES = 5
 
 
-def _frame_from_rows(rows: list[dict]) -> pd.DataFrame:
+@dataclass(frozen=True, slots=True)
+class AlpacaBarMember:
+    """One requested symbol's lossless membership and staged raw rows."""
+
+    symbol: str
+    present: bool
+    rows: tuple[Mapping[str, object], ...]
+
+
+@dataclass(frozen=True, slots=True)
+class AlpacaBarBatchResult:
+    """The atomic result of one bounded, fully paginated provider request."""
+
+    requested: tuple[str, ...]
+    members: tuple[AlpacaBarMember, ...]
+
+
+def _frame_from_rows(rows: list[Mapping[str, object]]) -> pd.DataFrame:
     """Alpaca's raw bar dicts to the canonical schema. One implementation,
     shared by the single-symbol and multi-symbol fetches."""
     if not rows:
@@ -43,7 +63,7 @@ class AlpacaProvider(DataProvider):
         # paginates rather than failing. 100 keeps each request to a handful of
         # pages at 15m over a 40-day window (roughly 740 bars per symbol), which
         # is what the scan loop asks for. Alpaca documents no symbol cap.
-        self.max_symbols_per_request = max_symbols_per_request
+        self.max_symbols_per_request = max(1, int(max_symbols_per_request))
 
     def _get(self, url: str, params: dict, headers: dict) -> httpx.Response:
         """Paced GET that sleeps through 429s instead of failing the symbol.
@@ -96,52 +116,83 @@ class AlpacaProvider(DataProvider):
         return _frame_from_rows(rows)
 
     def fetch_bars_multi(self, symbols: list[str], timeframe: str,
-                         start: pd.Timestamp, end: pd.Timestamp) -> dict[str, pd.DataFrame]:
-        """Bars for many symbols in one request per page, keyed by symbol.
+                         start: pd.Timestamp,
+                         end: pd.Timestamp) -> AlpacaBarBatchResult:
+        """Return one bounded logical request after all pages have succeeded.
 
         This is the scaling seam. fetch_bars costs one request per symbol per
         timeframe, and at 0.35s pacing a 100-symbol watchlist across three
         timeframes cannot finish inside a 15-minute scan bar. The multi-symbol
-        endpoint collapses that to pages.
+        endpoint collapses one bounded symbol chunk to pages. Callers own
+        chunking so each completed logical request can commit independently.
 
-        Every requested symbol is a key, mapping to an empty canonical frame if
-        the API returned nothing for it, so a caller's per-symbol loop cannot
-        KeyError on a halted or misspelled ticker.
+        Raw member rows remain unclassified here. This preserves the difference
+        between an omitted requested member and an explicitly empty member, and
+        lets downstream pair-local validation retain valid siblings.
         """
         if timeframe not in _TF:
             raise ValueError(f"unsupported timeframe {timeframe}")
         wanted = list(dict.fromkeys(s.upper() for s in symbols if s))
         if not wanted:
-            return {}
+            return AlpacaBarBatchResult((), ())
+        if len(wanted) > self.max_symbols_per_request:
+            raise ValueError(
+                "fetch_bars_multi accepts at most "
+                f"{self.max_symbols_per_request} symbols per logical request")
         if not self.key_id or not self.secret:
             raise RuntimeError(
                 "Alpaca credentials not set: export ALPACA_KEY_ID and ALPACA_SECRET_KEY "
                 "(e.g. `set -a; source .env.local; set +a`) before running this command")
         headers = {"APCA-API-KEY-ID": self.key_id, "APCA-API-SECRET-KEY": self.secret}
-        rows: dict[str, list[dict]] = {sym: [] for sym in wanted}
-        step = max(1, int(self.max_symbols_per_request))
-        for i in range(0, len(wanted), step):
-            chunk = wanted[i:i + step]
-            params = {
-                "symbols": ",".join(chunk),
-                "timeframe": _TF[timeframe],
-                "start": start.isoformat(),
-                "end": end.isoformat(),
-                "adjustment": "split",
-                "feed": "iex",
-                "limit": 10_000,
-            }
-            while True:
-                r = self._get(f"{_BASE}/v2/stocks/bars", params, headers)
-                payload = r.json()
-                # `bars` is an OBJECT keyed by symbol here, unlike the
-                # single-symbol endpoint's array. Alpaca sorts by symbol then
-                # timestamp, so one symbol's bars can straddle pages; extend
-                # rather than assign or the earlier page is silently dropped.
-                for sym, bars in (payload.get("bars") or {}).items():
-                    rows.setdefault(sym.upper(), []).extend(bars or [])
-                token = payload.get("next_page_token")
-                if not token:
-                    break
-                params["page_token"] = token
-        return {sym: _frame_from_rows(rows.get(sym) or []) for sym in wanted}
+        rows: dict[str, list[Mapping[str, object]]] = {
+            symbol: [] for symbol in wanted}
+        present = dict.fromkeys(wanted, False)
+        params = {
+            "symbols": ",".join(wanted),
+            "timeframe": _TF[timeframe],
+            "start": start.isoformat(),
+            "end": end.isoformat(),
+            "adjustment": "split",
+            "feed": "iex",
+            "limit": 10_000,
+        }
+        while True:
+            response = self._get(f"{_BASE}/v2/stocks/bars", params, headers)
+            payload = response.json()
+            if not isinstance(payload, Mapping):
+                raise ValueError("Alpaca multi-bar response is not an object")
+            page = payload.get("bars")
+            if not isinstance(page, Mapping):
+                raise ValueError("Alpaca multi-bar response bars is not an object")
+            for raw_symbol, raw_rows in page.items():
+                if not isinstance(raw_symbol, str):
+                    raise ValueError("Alpaca multi-bar member symbol is not text")
+                symbol = raw_symbol.upper()
+                if symbol not in rows:
+                    continue
+                if not isinstance(raw_rows, list):
+                    raise ValueError(
+                        f"Alpaca multi-bar member {symbol} rows is not a list")
+                if any(not isinstance(row, Mapping) for row in raw_rows):
+                    raise ValueError(
+                        f"Alpaca multi-bar member {symbol} contains a non-object row")
+                present[symbol] = True
+                rows[symbol].extend(raw_rows)
+            token = payload.get("next_page_token")
+            if token is None or token == "":
+                break
+            if not isinstance(token, str):
+                raise ValueError("Alpaca multi-bar next_page_token is not text")
+            params["page_token"] = token
+        return AlpacaBarBatchResult(
+            requested=tuple(wanted),
+            members=tuple(
+                AlpacaBarMember(
+                    symbol=symbol,
+                    present=present[symbol],
+                    rows=tuple(MappingProxyType(dict(row))
+                               for row in rows[symbol]),
+                )
+                for symbol in wanted
+            ),
+        )

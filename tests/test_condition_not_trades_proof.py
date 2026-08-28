@@ -687,20 +687,47 @@ def test_every_field_reaches_one_side_of_the_comparison(market):
 # Linux and arm64 Darwin, and the tolerant half absorbs what the ENGINE's
 # arithmetic still differs by.
 #
-# Node 05 is expected to move these digests because the grammar digest is an
-# input to definition identity. Behavior remains pinned separately so this
-# table cannot bless an arithmetic or signal movement as part of that change.
+# Node 06 moved these combined digests because the expression-scope declaration
+# is an input to definition identity. Behavior remains pinned separately, so
+# this table cannot bless arithmetic or signal movement with that identity
+# change. Derived on 2026-08-28 only after every behavior digest and every
+# float reference below passed unchanged and each identity formula rebuilt.
 GOLDEN = {
-    "catalog:macd_trend": (65, "02d871c6c80f0b31ec89be9b20db6e41db61c905ccc37a22ff350b60c79905c2"),
-    "catalog:rsi_reversion": (7, "7e3b63d6bd3b1add7effc0cdb38ff26aab161039cb541f200091c9864c13461a"),
-    "catalog:sma_cross": (40, "ae07aefa77f3966e6868a826b730eb27ddedce2292ddd65a1d2ca9bbd3706567"),
-    "fixture:bollinger_breakout": (4, "3d4f83e36f989083a067be1c80bc3a80dd8f6af741e9336f02ffab04715f671f"),
-    "fixture:discount_pullback": (23, "6a2e51eccf5de9a91e0d2f144f43d6cfac0aec79dc20c841458da2d2afa0db81"),
-    "fixture:ifvg_reversal": (65, "a0ac5cc152e22e9653dc7dc0bcc732eb2493ae0d36e2c9cf8b0957115f0addba"),
-    "fixture:ob_bounce": (55, "57b66c78dc1c8e13dbc61c1e55131a1db8460088806deffc8d2744381b7c984a"),
-    "fixture:orb": (135, "6ab9e4ae0ce5874b80ba9e3389e627a46d55808f004db1a77082a566de13c483"),
-    "fixture:sma_cross": (40, "ae07aefa77f3966e6868a826b730eb27ddedce2292ddd65a1d2ca9bbd3706567"),
+    "catalog:macd_trend": (65, "dae02680f7fb6d500a24b1b25ab3f6a3e5e7a299936131745c8de8cb19eacecc"),
+    "catalog:rsi_reversion": (7, "3d5cbad4a79bf2a3d1e150b5c7866d806a9f510907e15a6388bd306a1f79a64a"),
+    "catalog:sma_cross": (40, "4a5a1dcf823d04b863fe9260a59466dd4cb60f16bf140e582d220c987a24b74d"),
+    "fixture:bollinger_breakout": (4, "25af8aac0ede583eef3a7d36344bac916c46ad51ab9b0b5554a088f3ecb0ebba"),
+    "fixture:discount_pullback": (23, "716f30f29682962af7ea8b5770957caee7dc61946f3ba2c688786b1a1d1a5130"),
+    "fixture:ifvg_reversal": (65, "53a3319f7441efca82a482e9e4ea01ac75c59b1a4554c3502857d6c74b84e767"),
+    "fixture:ob_bounce": (55, "f1fb5034f189d78a7f543ae6d37e0c02c4c2c0e6a7b5dd9b958ea94bf2d59f5d"),
+    "fixture:orb": (135, "922128321ce092d0aec10a01a7c8c6ff306c87fc8a7a22f1f403c8214b29aaed"),
+    "fixture:sma_cross": (40, "4a5a1dcf823d04b863fe9260a59466dd4cb60f16bf140e582d220c987a24b74d"),
 }
+
+
+PRE_NODE06_IDENTITY_GOLDEN = {
+    "catalog:macd_trend": "02d871c6c80f0b31ec89be9b20db6e41db61c905ccc37a22ff350b60c79905c2",
+    "catalog:rsi_reversion": "7e3b63d6bd3b1add7effc0cdb38ff26aab161039cb541f200091c9864c13461a",
+    "catalog:sma_cross": "ae07aefa77f3966e6868a826b730eb27ddedce2292ddd65a1d2ca9bbd3706567",
+    "fixture:bollinger_breakout": "3d4f83e36f989083a067be1c80bc3a80dd8f6af741e9336f02ffab04715f671f",
+    "fixture:discount_pullback": "6a2e51eccf5de9a91e0d2f144f43d6cfac0aec79dc20c841458da2d2afa0db81",
+    "fixture:ifvg_reversal": "a0ac5cc152e22e9653dc7dc0bcc732eb2493ae0d36e2c9cf8b0957115f0addba",
+    "fixture:ob_bounce": "57b66c78dc1c8e13dbc61c1e55131a1db8460088806deffc8d2744381b7c984a",
+    "fixture:orb": "6ab9e4ae0ce5874b80ba9e3389e627a46d55808f004db1a77082a566de13c483",
+    "fixture:sma_cross": "ae07aefa77f3966e6868a826b730eb27ddedce2292ddd65a1d2ca9bbd3706567",
+}
+
+
+def test_node06_combined_identity_digests_move_one_to_one_without_collision():
+    assert set(PRE_NODE06_IDENTITY_GOLDEN) == set(GOLDEN)
+    mapping = {}
+    for name, old_digest in PRE_NODE06_IDENTITY_GOLDEN.items():
+        new_digest = GOLDEN[name][1]
+        assert new_digest != old_digest
+        if old_digest in mapping:
+            assert mapping[old_digest] == new_digest
+        mapping[old_digest] = new_digest
+    assert len(set(mapping.values())) == len(mapping)
 
 
 # Derived on 2026-08-26 from the production harness at the reviewed core 0.7.0

@@ -2,9 +2,16 @@
 re-pulling the whole configured range on every run (Alpaca free tier is
 200 req/min per account, shared by every machine using the key)."""
 
+import httpx
 import pandas as pd
+import pytest
 
 from nakagai.data.base import DataProvider
+from nakagai.data.alpaca import (
+    AlpacaBarBatchResult,
+    AlpacaBarMember,
+    AlpacaProvider,
+)
 from nakagai.data.cache import BarCache
 from nakagai.data.schema import empty_bars
 from nakagai.data.sync import fetch_incremental, fetch_incremental_multi
@@ -81,17 +88,34 @@ def test_full_ignores_the_cache(tmp_path, make_bars):
 # which is the cost this exists to remove.
 
 
+def _provider_rows(frame):
+    return tuple({
+        "t": ts.isoformat(),
+        "o": row.open,
+        "h": row.high,
+        "l": row.low,
+        "c": row.close,
+        "v": row.volume,
+    } for ts, row in frame.iterrows())
+
+
 class CapturingMultiProvider:
     """fetch_bars_multi-shaped. Not a DataProvider subclass: the batch method is
     an AlpacaProvider capability, not part of the one-method ABC contract."""
 
-    def __init__(self, frames: dict):
+    def __init__(self, frames: dict, *, max_symbols_per_request: int = 100):
         self._frames = frames
         self.calls: list[tuple] = []
+        self.max_symbols_per_request = max_symbols_per_request
 
     def fetch_bars_multi(self, symbols, timeframe, start, end):
         self.calls.append((tuple(symbols), timeframe, start, end))
-        return {s: self._frames.get(s, empty_bars()) for s in symbols}
+        return AlpacaBarBatchResult(
+            tuple(symbols),
+            tuple(AlpacaBarMember(
+                s, True, _provider_rows(self._frames.get(s, empty_bars())))
+                for s in symbols),
+        )
 
 
 def test_multi_widens_to_the_earliest_resume_point(tmp_path, make_bars):
@@ -212,3 +236,53 @@ def test_multi_dedupes_the_refetched_overlap(tmp_path, make_bars):
     p = CapturingMultiProvider({"AAPL": make_bars(6)})   # 4 overlapping + 2 new
     fetch_incremental_multi(cache, p, ["AAPL"], "15m", START, END)
     assert len(cache.load("AAPL", "15m")) == 6
+
+
+def test_multi_commits_a_completed_chunk_before_a_later_continuation_fails(
+        tmp_path):
+    """Buffering all chunks before writes would lose a completed independent
+    request when the next logical request fails during pagination."""
+    cache = BarCache(tmp_path)
+    captured = []
+    row = {
+        "t": "2026-06-01T13:30:00Z", "o": 1.0, "h": 1.5,
+        "l": 0.5, "c": 1.2, "v": 100,
+    }
+
+    def handler(request):
+        captured.append(request)
+        symbols = request.url.params["symbols"]
+        token = request.url.params.get("page_token")
+        if symbols == "AAPL,MSFT":
+            return httpx.Response(200, json={
+                "bars": {"AAPL": [row], "MSFT": [row]},
+                "next_page_token": None,
+            })
+        if token == "qqq-continue":
+            raise httpx.ReadTimeout("continuation timed out", request=request)
+        return httpx.Response(200, json={
+            "bars": {"QQQ": [row]},
+            "next_page_token": "qqq-continue",
+        })
+
+    provider = AlpacaProvider(
+        key_id="k", secret="s",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+        sleep=lambda _seconds: None,
+        max_symbols_per_request=2,
+    )
+
+    with pytest.raises(httpx.ReadTimeout, match="continuation timed out"):
+        fetch_incremental_multi(
+            cache, provider, ["AAPL", "MSFT", "QQQ"],
+            "15m", START, END,
+        )
+
+    assert [request.url.params["symbols"] for request in captured] == [
+        "AAPL,MSFT",
+        "QQQ",
+        "QQQ",
+    ]
+    assert len(cache.load("AAPL", "15m")) == 1
+    assert len(cache.load("MSFT", "15m")) == 1
+    assert cache.load("QQQ", "15m").empty
