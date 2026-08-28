@@ -225,11 +225,13 @@ above 70" is {{"not": {{"all": [{{"lhs": {{"ind": "rsi", "n": 14}}, "op": ">",
 number.
 
 Expressions are numbers or objects:
-- series leaf: {{"src": one of {g.SOURCES}, "tf"?: one of {g.TIMEFRAMES}}}
+SYMBOL is an uppercase market symbol matching [A-Z][A-Z0-9.-]{{0,9}}.
+- series leaf: {{"src": one of {g.SOURCES}, "sym"?: <SYMBOL>,
+  "tf"?: one of {g.TIMEFRAMES}}}
 - indicator: {{"ind": <name>, <args>, "of"?: <expr>, "tf"?: <tf>,
-  "window"?: <registered window>}}
+  "window"?: <registered window>, "sym"?: <SYMBOL>}}
 - math: {{"op": one of {sorted(g.MATH_OPS)}, "args": [<expr>, ...]}}
-- primitive: {{"prim": <name>, <args>, "tf"?: <tf>}}
+- primitive: {{"prim": <name>, <args>, "tf"?: <tf>, "sym"?: <SYMBOL>}}
 
 # Indicators (name(arg=bounds or choices))
 {ind_lines}

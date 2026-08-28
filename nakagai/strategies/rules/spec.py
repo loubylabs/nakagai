@@ -835,7 +835,8 @@ def _expr_text(node, vocabulary: Vocabulary) -> str:
         parts = [f"{v}" for v in args.values()]
         if term.kind != "bar":
             of = node.get("of", {"src": "close"})
-            if of != {"src": "close"}:
+            if (of != {"src": "close"}
+                    or ("of" in node and term.render_explicit_source)):
                 parts.append(f"of={_expr_text(of, vocabulary)}")
         inner = ", ".join(parts)
         text = f"{name}({inner})" if inner else name

@@ -718,6 +718,49 @@ def test_symbol_scope_readback_is_explicit(node, text):
     assert _expr_text(node, core_vocabulary()) == text
 
 
+def test_explicit_default_source_readback_is_controlled_by_term_metadata():
+    explicit_source = Term(
+        "kama", "series",
+        {"n": (1, 100), "fast": (1, 100), "slow": (1, 100)}, {},
+        lambda series, args: series,
+        render_explicit_source=True,
+    )
+    vocabulary = core_vocabulary().with_terms(explicit_source)
+
+    assert _expr_text(
+        {"ind": "sma", "n": 20, "of": {"src": "close"}},
+        vocabulary,
+    ) == "sma(20)"
+    assert _expr_text(
+        {"ind": "kama", "n": 10, "fast": 2, "slow": 30,
+         "of": {"src": "close"}},
+        vocabulary,
+    ) == "kama(10, 2, 30, of=close)"
+    assert _expr_text(
+        {"ind": "kama", "n": 10, "fast": 2, "slow": 30},
+        vocabulary,
+    ) == "kama(10, 2, 30)"
+
+
+def test_explicit_source_rendering_is_core_neutral_term_metadata():
+    arbitrary = Term(
+        "external_series", "series", {"n": (1, 100)}, {},
+        lambda series, args: series,
+        render_explicit_source=True,
+    )
+    vocabulary = core_vocabulary().with_terms(arbitrary)
+    assert _expr_text(
+        {"ind": "external_series", "n": 7, "of": {"src": "close"}},
+        vocabulary,
+    ) == "external_series(7, of=close)"
+
+    renderer_source = inspect.getsource(rules_spec._expr_text)
+    assert "nakagai_platform" not in renderer_source
+    assert "'kama'" not in renderer_source
+    assert '"kama"' not in renderer_source
+    assert "adapter" not in renderer_source
+
+
 def test_relative_scope_description_matches_the_frozen_readback():
     assert validate_spec(RELATIVE_SCOPE_SPEC) == []
     assert describe_spec(RELATIVE_SCOPE_SPEC) == (

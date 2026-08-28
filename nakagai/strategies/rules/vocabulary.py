@@ -2,10 +2,10 @@
 
 A Term owns a name's WHOLE contract in one place: its argument schema and
 bounds, its defaults, the executable function, the doc line the NL prompts
-render, the three causal flags described below, its window reducer contract,
-and the slot a Pine lowering attaches to. Nothing about a name lives anywhere
-else, so declaring one is one statement and injecting one is one `with_terms`
-call.
+render, the three causal flags described below, its readback metadata, its
+window reducer contract, and the slot a Pine lowering attaches to. Nothing
+about a name lives anywhere else, so declaring one is one statement and
+injecting one is one `with_terms` call.
 
 A Vocabulary holds indicator, primitive, and window namespaces because the
 grammar spells them under different keys. Term names are unique across the two
@@ -102,6 +102,7 @@ class Term:
     end_anchored: bool = False
     session_scoped: bool = False
     driving_frame_intraday: bool = False
+    render_explicit_source: bool = False
     pine: PineLowering | None = None
     window_reduce: WindowReducer | None = None
     window_required: bool = False

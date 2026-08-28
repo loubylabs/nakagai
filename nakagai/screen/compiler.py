@@ -7,7 +7,8 @@ a third compiler ever appears)."""
 import json
 
 from nakagai.nlbuilder.compiler import (
-    CompileResult, _add_usage, _client_or_default, _parse, _text,
+    CandidateNormalizer, CandidateValidator, CompileResult, _add_usage,
+    _client_or_default, _parse, _text,
 )
 from nakagai.screen.prompt import render_screen_prompt
 from nakagai.screen.spec import describe_screen, validate_screen_spec
@@ -19,15 +20,22 @@ MAX_TOKENS = 4000
 
 def compile_screen(description: str, client=None, model: str = MODEL,
                    max_retries: int = 2, *,
-                   vocabulary: Vocabulary | None = None) -> CompileResult:
+                   vocabulary: Vocabulary | None = None,
+                   prompt_policy: str = "",
+                   candidate_normalizer: CandidateNormalizer | None = None,
+                   candidate_validator: CandidateValidator | None = None,
+                   ) -> CompileResult:
     # One vocabulary for the whole loop. The prompt advertises exactly the
     # terms the validator will accept and the readback will render, so an
     # injected term cannot be offered to the model and then refused on the way
     # back (or accepted and then rendered against a name the renderer lacks).
     vocabulary = resolve_vocabulary(vocabulary)
     client = _client_or_default(client)
+    prompt = render_screen_prompt(vocabulary)
+    if prompt_policy.strip():
+        prompt += "\n\n" + prompt_policy.strip()
     system = [{"type": "text",
-               "text": render_screen_prompt(vocabulary),
+               "text": prompt,
                "cache_control": {"type": "ephemeral"}}]
     messages = [{"role": "user", "content": description.strip()}]
     result = CompileResult()
@@ -59,6 +67,13 @@ def compile_screen(description: str, client=None, model: str = MODEL,
             return result
         spec = doc.get("spec")
         errors = validate_screen_spec(spec, vocabulary=vocabulary)
+        if not errors and candidate_normalizer is not None:
+            spec = candidate_normalizer("screen", spec)
+            errors = validate_screen_spec(spec, vocabulary=vocabulary)
+        if not errors and candidate_validator is not None:
+            callback_errors = candidate_validator("screen", spec)
+            errors = ([callback_errors] if isinstance(callback_errors, str)
+                      else list(callback_errors))
         if not errors:
             result.spec = spec
             result.readback = describe_screen(spec, vocabulary=vocabulary)
