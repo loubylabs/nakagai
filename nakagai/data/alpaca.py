@@ -25,6 +25,13 @@ class AlpacaBarMember:
     present: bool
     rows: tuple[Mapping[str, object], ...]
 
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "rows",
+            tuple(_freeze_json(row) for row in self.rows),
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class AlpacaBarBatchResult:
@@ -32,6 +39,25 @@ class AlpacaBarBatchResult:
 
     requested: tuple[str, ...]
     members: tuple[AlpacaBarMember, ...]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "requested", tuple(self.requested))
+        object.__setattr__(self, "members", tuple(self.members))
+
+
+def _freeze_json(value: object) -> object:
+    """Copy and recursively freeze one JSON-shaped provider value."""
+    if isinstance(value, Mapping):
+        return MappingProxyType({
+            key: _freeze_json(member) for key, member in value.items()
+        })
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze_json(member) for member in value)
+    if isinstance(value, (set, frozenset)):
+        return frozenset(_freeze_json(member) for member in value)
+    if isinstance(value, bytearray):
+        return bytes(value)
+    return value
 
 
 def _frame_from_rows(rows: list[Mapping[str, object]]) -> pd.DataFrame:
@@ -147,6 +173,7 @@ class AlpacaProvider(DataProvider):
         rows: dict[str, list[Mapping[str, object]]] = {
             symbol: [] for symbol in wanted}
         present = dict.fromkeys(wanted, False)
+        seen_tokens: set[str] = set()
         params = {
             "symbols": ",".join(wanted),
             "timeframe": _TF[timeframe],
@@ -183,6 +210,10 @@ class AlpacaProvider(DataProvider):
                 break
             if not isinstance(token, str):
                 raise ValueError("Alpaca multi-bar next_page_token is not text")
+            if token in seen_tokens:
+                raise ValueError(
+                    f"Alpaca multi-bar repeated next_page_token {token!r}")
+            seen_tokens.add(token)
             params["page_token"] = token
         return AlpacaBarBatchResult(
             requested=tuple(wanted),
@@ -190,8 +221,7 @@ class AlpacaProvider(DataProvider):
                 AlpacaBarMember(
                     symbol=symbol,
                     present=present[symbol],
-                    rows=tuple(MappingProxyType(dict(row))
-                               for row in rows[symbol]),
+                    rows=rows[symbol],
                 )
                 for symbol in wanted
             ),

@@ -205,6 +205,27 @@ def test_multi_upserts_nothing_for_an_empty_frame(tmp_path):
     assert cache.load("NOSUCH", "15m").empty
 
 
+def test_multi_raises_when_provider_omits_a_requested_member(tmp_path):
+    """Omission is an operational failure, not the successful zero-row answer
+    represented by a present member with an explicit empty row sequence."""
+    cache = BarCache(tmp_path)
+
+    class OmittingProvider:
+        max_symbols_per_request = 100
+
+        def fetch_bars_multi(self, symbols, timeframe, start, end):
+            return AlpacaBarBatchResult(
+                symbols,
+                [AlpacaBarMember(symbols[0], False, [])],
+            )
+
+    with pytest.raises(ValueError, match="provider omitted requested symbol 'NOSUCH'"):
+        fetch_incremental_multi(
+            cache, OmittingProvider(), ["NOSUCH"], "15m", START, END)
+
+    assert cache.load("NOSUCH", "15m").empty
+
+
 def test_multi_full_ignores_cached_coverage(tmp_path, make_bars):
     cache = BarCache(tmp_path)
     cache.upsert("AAPL", "15m", make_bars(10))

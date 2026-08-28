@@ -161,9 +161,15 @@ def _commit_batch(cache: BarCache, timeframe: str, requested: list[str],
     if symbols != expected:
         raise ValueError(
             f"provider returned members={symbols!r}, expected {expected!r}")
+    omitted = tuple(
+        member.symbol for member in result.members if not member.present)
+    if omitted:
+        if len(omitted) == 1:
+            detail = f"symbol {omitted[0]!r}"
+        else:
+            detail = f"symbols {omitted!r}"
+        raise ValueError(f"provider omitted requested {detail}")
     for member in result.members:
-        if not member.present:
-            continue
         frame = _frame_from_rows(list(member.rows))
         if not frame.empty:
             written[member.symbol] = cache.upsert(

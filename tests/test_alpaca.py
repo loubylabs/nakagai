@@ -210,6 +210,64 @@ def test_fetch_bars_multi_merges_a_symbol_split_across_pages():
         result.members[0].rows[0]["c"] = 0.0
 
 
+def test_batch_results_deep_copy_and_freeze_direct_construction():
+    """The public result types own an immutable snapshot even when callers
+    construct them from mutable lists and nested dictionaries."""
+    requested = ["SPY"]
+    nested = {"venues": ["IEX"], "route": {"code": "A"}}
+    row = {"t": "2026-06-01T13:30:00Z", "meta": nested}
+    rows = [row]
+    members = [AlpacaBarMember("SPY", True, rows)]
+
+    result = AlpacaBarBatchResult(requested, members)
+
+    requested.append("QQQ")
+    members.clear()
+    rows.clear()
+    nested["venues"].append("NYSE")
+    nested["route"]["code"] = "B"
+    assert result.requested == ("SPY",)
+    assert isinstance(result.members, tuple)
+    assert isinstance(result.members[0].rows, tuple)
+    assert result.members[0].rows[0]["meta"]["venues"] == ("IEX",)
+    assert result.members[0].rows[0]["meta"]["route"]["code"] == "A"
+    with pytest.raises(TypeError):
+        result.members[0].rows[0]["meta"]["route"]["code"] = "C"
+    with pytest.raises(AttributeError):
+        result.members[0].rows[0]["meta"]["venues"].append("ARCA")
+
+
+def test_fetch_bars_multi_deep_freezes_provider_json_without_alias(monkeypatch):
+    nested = {"venues": ["IEX"], "route": {"code": "A"}}
+    payload = {
+        "bars": {"SPY": [{
+            "t": "2026-06-01T13:30:00Z", "o": 1.0, "h": 1.5,
+            "l": 0.5, "c": 1.2, "v": 100, "meta": nested,
+        }]},
+        "next_page_token": None,
+    }
+
+    class Response:
+        def json(self):
+            return payload
+
+    p = AlpacaProvider(
+        key_id="k", secret="s",
+        client=object.__new__(httpx.Client), sleep=lambda _: None,
+    )
+    monkeypatch.setattr(p, "_get", lambda *_args, **_kwargs: Response())
+
+    result = p.fetch_bars_multi(["SPY"], "15m", START, END)
+    nested["venues"].append("NYSE")
+    nested["route"]["code"] = "B"
+
+    meta = result.members[0].rows[0]["meta"]
+    assert meta["venues"] == ("IEX",)
+    assert meta["route"]["code"] == "A"
+    with pytest.raises(TypeError):
+        meta["route"]["code"] = "C"
+
+
 def test_fetch_bars_multi_distinguishes_omitted_from_explicit_empty_members():
     """Removing QQQ from the response must change present, while an explicit
     empty row list stays a successful response member."""
@@ -302,6 +360,29 @@ def test_fetch_bars_multi_discards_a_staged_first_page_when_continuation_times_o
     result = None
     with pytest.raises(httpx.ReadTimeout, match="continuation timed out"):
         result = p.fetch_bars_multi(["SPY", "QQQ"], "15m", START, END)
+
+    assert result is None
+    assert len(captured) == 2
+
+
+def test_fetch_bars_multi_rejects_a_repeated_continuation_token_atomically():
+    captured = []
+
+    def handler(request):
+        captured.append(request)
+        return httpx.Response(200, json={
+            "bars": {"SPY": [MULTI_PAGE2["bars"]["MSFT"][0]]},
+            "next_page_token": "repeat",
+        })
+
+    p = AlpacaProvider(
+        key_id="k", secret="s",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+        sleep=lambda _: None,
+    )
+    result = None
+    with pytest.raises(ValueError, match="repeated next_page_token 'repeat'"):
+        result = p.fetch_bars_multi(["SPY"], "15m", START, END)
 
     assert result is None
     assert len(captured) == 2
