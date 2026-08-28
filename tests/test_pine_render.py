@@ -127,11 +127,11 @@ def test_both_artifacts_open_with_the_version_and_their_identity(
     spec = load_rule_spec("sma_cross")
     bundle = compile_pine(spec)
     assert bundle.spec_hash == spec_hash(spec)
-    assert bundle.generator_version == "1"
+    assert bundle.generator_version == "2"
     for source in (bundle.indicator, bundle.strategy):
         assert source.splitlines()[0] == "//@version=6"
         assert "// Nakagai Pine export: sma_cross" in source
-        assert "// Generator version: 1" in source
+        assert "// Generator version: 2" in source
         assert f"// Spec hash: {bundle.spec_hash}" in source
         # The FULL hash, not a prefix: it is the artifact's whole claim about
         # which spec it came from.

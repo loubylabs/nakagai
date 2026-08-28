@@ -15,9 +15,12 @@ import pytest
 
 from nakagai.data.schema import DEFAULT_TIMEFRAMES
 from nakagai.strategies.rules import (
-    PineExits, PineRisk, lower_pine, spec_hash,
+    PineExits, PineRisk, compile_pine, lower_pine, spec_hash,
 )
 from nakagai.strategies.rules.pine.lower import PINE_TIMEFRAMES, SpecLowerer
+from nakagai.strategies.rules.pine import (
+    GENERATOR_VERSION, MAX_PINE_REQUEST_PAIRS,
+)
 from nakagai.strategies.rules.pine.model import PineExpr
 from nakagai.strategies.rules.spec import (
     DRIVING,
@@ -389,6 +392,76 @@ def test_two_nodes_of_one_timeframe_share_its_single_request():
     assert all(f"ta.sma({ema}," in line for line in lines if "ta.sma(" in line)
 
 
+def test_two_nodes_of_one_reference_pair_share_one_literal_request():
+    spec = _spec(
+        {"ind": "sma", "n": 10, "tf": "1h", "sym": "SPY"},
+        rhs={"ind": "ema", "n": 20, "tf": "1h", "sym": "SPY"})
+    program = lower_pine(spec)
+    requests = [line for line in _lines(program)
+                if "request.security(" in line]
+    assert len(requests) == 1
+    assert requests[0].startswith("[")
+    assert 'request.security("SPY", "60",' in requests[0]
+    assert "gaps=barmerge.gaps_on" in requests[0]
+
+
+def test_symbol_and_timeframe_both_separate_request_pairs():
+    spec = _spec(
+        {"src": "close", "tf": "1h", "sym": "SPY"},
+        rhs={"op": "+", "args": [
+            {"src": "close", "tf": "1d", "sym": "SPY"},
+            {"src": "close", "tf": "1h", "sym": "QQQ"},
+        ]})
+    program = lower_pine(spec)
+    requests = [line for line in _lines(program)
+                if "request.security(" in line]
+    assert len(requests) == 3
+    assert sum('request.security("SPY", "60",' in line
+               for line in requests) == 1
+    assert sum('request.security("SPY", "D",' in line
+               for line in requests) == 1
+    assert sum('request.security("QQQ", "60",' in line
+               for line in requests) == 1
+    assert all("gaps=barmerge.gaps_on" in line for line in requests)
+    source = "\n".join(program.calculations)
+    for token in ("nk_htf_spy_60_", "nk_visible_60_spy_60",
+                  "nk_close_spy_60_", "nk_htf_spy_d_",
+                  "nk_visible_d_spy_d", "nk_close_spy_d_",
+                  "nk_htf_qqq_60_", "nk_visible_60_qqq_60",
+                  "nk_close_qqq_60_"):
+        assert token in source
+
+
+def test_distinct_valid_symbol_punctuation_cannot_collide_in_pair_names():
+    spec = _spec({"src": "close", "sym": "BRK.B"},
+                 rhs={"src": "close", "sym": "BRK-B"})
+    source = "\n".join(lower_pine(spec).calculations)
+    assert 'request.security("BRK.B", "15",' in source
+    assert 'request.security("BRK-B", "15",' in source
+
+
+def test_direct_core_compiles_a_reference_outside_platform_house_policy():
+    bundle = compile_pine(_spec({"src": "close", "sym": "TSLA"}))
+    for source in (bundle.indicator, bundle.strategy):
+        assert 'request.security("TSLA", "15",' in source
+        assert "gaps=barmerge.gaps_on" in source
+
+
+def test_nodes_without_symbol_keep_the_existing_request_contract():
+    program = _program({"src": "close", "tf": "1h"})
+    request, = [line for line in _lines(program)
+                if "request.security(" in line]
+    assert request.startswith(
+        'nk_close_1_raw = request.security(syminfo.tickerid, "60",')
+    assert "gaps=barmerge.gaps_off" in request
+    assert "gaps=barmerge.gaps_on" not in request
+
+
+def test_the_pair_limit_and_generator_identity_are_public_constants():
+    assert MAX_PINE_REQUEST_PAIRS == 40
+    assert GENERATOR_VERSION == "2"
+
+
 def test_identical_nodes_on_both_sides_share_one_calculation(load_spec):
     # sma_cross reads the same sma(20) and sma(50) on the long and the short
     # side. Two calculations would be the same number computed twice.
@@ -416,7 +489,7 @@ def test_the_program_carries_its_identity(load_spec):
     program = lower_pine(spec)
     assert program.title == "rsi_reversion"
     assert program.spec_hash == spec_hash(spec)
-    assert program.generator_version == "1"
+    assert program.generator_version == "2"
 
 
 def test_the_program_holds_no_indicator_or_strategy_statement(load_spec):

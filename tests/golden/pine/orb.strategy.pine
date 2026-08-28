@@ -3,7 +3,7 @@
 // Artifact: strategy. It runs the same decisions through TradingView's broker
 // emulator, entering at the next bar's open and carrying the stop and target
 // the signal froze.
-// Generator version: 1
+// Generator version: 2
 // Spec hash: 4c859a415b6f45842b2831796b6b3904155ec2710d852dfe4b1ba4eef7a261f0
 //
 // Chart: a standard 15-minute candle chart. Heikin Ashi, Renko, Line Break,

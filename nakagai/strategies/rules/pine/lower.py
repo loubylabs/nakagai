@@ -8,15 +8,15 @@ same strategy keeps a chart's saved settings, and a sanitized name that would
 land on a path another one already owns stops generation rather than quietly
 merging two knobs.
 
-ONE NODE, ONE CALCULATION, AND ONE REQUEST PER TIMEFRAME. Nodes are memoized on
+ONE NODE, ONE CALCULATION, AND ONE REQUEST PER SYMBOL PAIR. Nodes are memoized on
 their canonical content with the field stripped, so sma_cross's two sides read
 one pair of moving averages and a MACD line and its signal come out of one
 ta.macd. The memo is keyed on the HOST the node is emitted into, which is the
 chart or the inside of one timeframe's function, so a node read natively and
 read again on the chart are two entries: the native one is a function local and
 handing its identifier to a chart expression would emit Pine that does not
-compile. Everything a program needs from one timeframe lands in that
-timeframe's single function, so two nodes of the same timeframe share their
+compile. Everything a program needs from one `(symbol, timeframe)` pair lands
+in that pair's single function, so two nodes of the same pair share their
 sub-calculations and the script makes one request of it.
 
 THE CHART IS THE DRIVING CADENCE, NEVER THE SPEC'S OWN TIMEFRAME. Engine.run
@@ -58,8 +58,8 @@ from nakagai.strategies.rules.pine.lowerings import (
     DAY_OF_WEEK, DIV, HELPERS, NEW_SESSION, SESSION_OPEN_BAR, emit_window,
 )
 from nakagai.strategies.rules.pine.model import (
-    GENERATOR_VERSION, PineCompileError, PineExits, PineHelper, PineInput,
-    PineProgram, PineRisk, RulePath, TermCall,
+    GENERATOR_VERSION, MAX_PINE_REQUEST_PAIRS, PineCompileError, PineExits,
+    PineHelper, PineInput, PineProgram, PineRisk, RulePath, TermCall,
 )
 from nakagai.strategies.rules.spec import (
     BREAKEVEN_RR_BOUNDS, DEFAULT_RISK, DRIVING, SESSION_ALIGNED,
@@ -80,8 +80,8 @@ from nakagai.strategies.rules.windows import PRIOR_DAY
 # admits needs an entry; one without would otherwise reach request.security as
 # a string TradingView reads as minutes.
 PINE_TIMEFRAMES = {"15m": "15", "1h": "60", "4h": "240", "1d": "D"}
-REQUEST = ('request.security(syminfo.tickerid, "{tf}", {call}(), '
-           "lookahead=barmerge.lookahead_on, gaps=barmerge.gaps_off)")
+REQUEST = ('request.security({symbol}, "{tf}", {call}(), '
+           "lookahead=barmerge.lookahead_on, gaps={gaps})")
 # What a latch holds before its first update. Exactly frame_eval._align's own
 # dtype branch: a row no bar is visible on is False for a boolean series and
 # NaN for a float one, so an ungated condition reads false and an ungated
@@ -207,6 +207,29 @@ def _typed(value, bounds, path: RulePath, term: str):
 # One memoized node: the identifier answering each of its fields, and every
 # input its production reached.
 _Memo = tuple[dict[str, str], frozenset[str]]
+_Pair = tuple[str | None, str]
+
+
+def _pair_stem(stem: str, pair: _Pair) -> str:
+    """Include both axes in explicit-reference identifiers.
+
+    The inherited chart symbol keeps every pre-Node-06 name byte-identical. A
+    literal reference adds a stable symbol and timeframe suffix so two request
+    contexts cannot look like one in generated Pine.
+    """
+    symbol, timeframe = pair
+    if symbol is None:
+        return stem
+    # `.` and `-` are the only punctuation the symbol grammar admits. Spell
+    # them rather than collapsing both to `_`, which would make BRK.B and
+    # BRK-B fight for one Pine identifier despite being distinct literals.
+    symbol_axis = symbol.lower().replace(".", "_dot_").replace("-", "_dash_")
+    return f"{stem}_{symbol_axis}_{_sanitize(PINE_TIMEFRAMES[timeframe])}"
+
+
+def _pair_text(pair: _Pair) -> str:
+    symbol, timeframe = pair
+    return f"({symbol if symbol is not None else 'chart'}, {timeframe})"
 
 
 class PineContext:
@@ -230,7 +253,7 @@ class PineContext:
         # its production touched, so a later block hitting the memo can still
         # say it reached those inputs. ONE dict for the whole program, not a
         # stack under the sinks: see block().
-        self.nodes: dict[tuple[str, str], _Memo] = {}
+        self.nodes: dict[tuple[_Pair, str], _Memo] = {}
         self._blocks: dict[str, set[str]] = {}
         self._reaching: list[set[str]] = []
         self._history = 0
@@ -548,15 +571,15 @@ class SpecLowerer:
         self.frame = str(spec.get("timeframe", "1h"))
         self.ctx = PineContext()
         self.lifted: set[str] = set()
-        self.gates: dict[str, str] = {}
+        self.gates: dict[_Pair, str] = {}
         self.decision_gate = ""
         # A play that reads more than one timeframe has to emit in DEPENDENCY
         # order rather than in walk order, so the pieces are collected and
-        # assembled by run(): one request per timeframe, then the gate-cadence
+        # assembled by run(): one request per pair, then the gate-cadence
         # snapshots over their latches, then what the chart composes out of
         # both. Insertion order decides which request block comes first, which
         # is deterministic because the walk is.
-        self._requests: dict[str, dict] = {}
+        self._requests: dict[_Pair, dict] = {}
         self._chart_after: list[str] = []
         self._samples: list[tuple[str, str]] = []
 
@@ -565,13 +588,19 @@ class SpecLowerer:
         short_decision = self._side("short")
         exits = self._exits()
         risk = self._risk()
+        request_count = len(self._requests)
+        if request_count > MAX_PINE_REQUEST_PAIRS:
+            raise PineCompileError(
+                "pine_request_limit",
+                f"the spec requires {request_count} unique request.security "
+                f"pairs; Pine allows at most {MAX_PINE_REQUEST_PAIRS}")
         # Everything a request produces goes first, because every chart-level
         # statement below reads a latch. Then the snapshots over those latches,
         # then the walk's own chart statements, then the compositions held back
         # by _decide.
         front: list[str] = []
-        for tf, request in self._requests.items():
-            self._request_lines(tf, request, front)
+        for pair, request in self._requests.items():
+            self._request_lines(pair, request, front)
         # The freshness gate belongs to the PLAY's timeframe, not to whatever
         # its conditions happened to put in a request. It used to be resolved
         # inside the request emission, behind an early return, so a play whose
@@ -615,26 +644,27 @@ class SpecLowerer:
         )
 
     # -- requested timeframes -------------------------------------------
-    def _request_for(self, tf: str) -> dict:
-        """The one request this program makes of `tf`, created on first use.
+    def _request_for(self, pair: _Pair) -> dict:
+        """The one request this program makes of `pair`, created on first use.
 
-        ONE request per timeframe, not one per value and not one per node.
-        Every value the program needs off `tf` is a member of a single tuple,
+        ONE request per pair, not one per value and not one per node. Every
+        value the program needs off `pair` is a member of a single tuple,
         so the nodes underneath them are shared the way `ONE NODE, ONE
         CALCULATION` promises, the gate is checked once, and the script spends
         one of TradingView's per-script request budget rather than one per
         operand. A request per node gave mfi_bounce two reads of the daily
         frame and ote_pullback four.
         """
-        if tf not in self._requests:
+        _symbol, tf = pair
+        if pair not in self._requests:
             if tf not in PINE_TIMEFRAMES:
                 raise PineCompileError(
                     "pine_unsupported",
                     f"timeframe: {tf!r} has no Pine timeframe string",
                     path="timeframe")
-            self._requests[tf] = {"body": [], "values": []}
+            self._requests[pair] = {"body": [], "values": []}
             self.lifted.add(tf)
-        return self._requests[tf]
+        return self._requests[pair]
 
     def _frame_value(self, path: RulePath, name: str, kind: str,
                      produce) -> str:
@@ -654,26 +684,26 @@ class SpecLowerer:
             return name
         with self.ctx.block() as body:
             text = produce(self.frame)
-        request = self._request_for(self.frame)
+        request = self._request_for((None, self.frame))
         request["body"] += [*body, f"{kind} {name}_native = {text}"]
         request["values"].append((path, name, kind, f"{name}_native"))
         return name
 
-    def _requested(self, tf: str, path: RulePath, stem: str,
+    def _requested(self, pair: _Pair, path: RulePath, stem: str,
                    produce) -> dict[str, str]:
-        """One NODE computed on `tf`, as members of the one request for `tf`.
+        """One node computed on `pair`, as members of its single request.
 
         Only the SINK moves; the memo is one dict for the whole program and
-        stays reachable in here. Every node of a timeframe lands in that
-        timeframe's single function, so two of them sharing a sub-calculation
+        stays reachable in here. Every node of a pair lands in that pair's
+        single function, so two of them sharing a sub-calculation
         is correct rather than a dangling local, which is the opposite of what
         a function per node required.
         """
         with self.ctx.block() as body:
-            inner = produce(tf)
-        request = self._request_for(tf)
+            inner = produce(pair)
+        request = self._request_for(pair)
         request["body"] += body
-        slot = self.ctx.slot(stem, path)
+        slot = self.ctx.slot(_pair_stem(stem, pair), path)
         out = {}
         for field, expr in inner.items():
             name = self.ctx.claim(f"{slot}_{field}" if field else slot, path)
@@ -681,8 +711,10 @@ class SpecLowerer:
             out[field] = name
         return out
 
-    def _request_lines(self, tf: str, request: dict, out: list[str]) -> None:
-        """One timeframe's function, request, latches and the gate over them."""
+    def _request_lines(self, pair: _Pair, request: dict,
+                       out: list[str]) -> None:
+        """One pair's function, request, latches and visibility gate."""
+        symbol, tf = pair
         path = RulePath(("timeframe",))
         # A session-aligned bar is read one bar back and an intraday one is
         # not, and the difference is the gate each is paired with. An intraday
@@ -695,16 +727,21 @@ class SpecLowerer:
         values = request["values"]
         # The gate leads, because it is the chart-level fact everything under
         # it is conditioned on and a reader meets it before the latch it guards.
-        gate = self._gate(tf, out)
+        gate = self._gate(pair, out)
         returned = [f"{member}{offset}" for _p, _n, _k, member in values]
-        function = self.ctx.slot("nk_frame" if tf == self.frame else "nk_htf",
-                                 path)
+        function = self.ctx.slot(
+            _pair_stem("nk_frame" if pair == (None, self.frame) else "nk_htf",
+                       pair), path)
         body = "\n".join(f"    {line}"
                           for line in [*request["body"], _tuple(returned)])
         out.append(f"{function}() =>\n{body}")
         raws = [self.ctx.claim(f"{name}_raw", p) for p, name, _k, _m in values]
         out.append(f"{_tuple(raws)} = " + REQUEST.format(
-            tf=PINE_TIMEFRAMES[tf], call=function))
+            symbol=("syminfo.tickerid" if symbol is None
+                    else json.dumps(symbol)),
+            tf=PINE_TIMEFRAMES[tf], call=function,
+            gaps=("barmerge.gaps_off" if symbol is None
+                  else "barmerge.gaps_on")))
         out += [f"var {kind} {name} = {SEED[kind]}"
                 for _p, name, kind, _m in values]
         out.append(f"if {gate}\n" + "\n".join(
@@ -724,12 +761,12 @@ class SpecLowerer:
         for name, kind in self._samples:
             out.append(f"var {kind} {name}_gated = {SEED[kind]}")
             out.append(f"var {kind} {name}_prior = {SEED[kind]}")
-        out.append(f"if {self._gate(self.frame, out)}\n" + "\n".join(
+        out.append(f"if {self._gate((None, self.frame), out)}\n" + "\n".join(
             f"    {name}_prior := {name}_gated\n    {name}_gated := {name}"
             for name, _kind in self._samples))
 
-    def _gate(self, tf: str, out: list[str]) -> str:
-        """The chart bar a newly closed `tf` bar first becomes readable on.
+    def _gate(self, pair: _Pair, out: list[str]) -> str:
+        """The chart bar a newly closed pair bar first becomes readable on.
 
         engine/context.visible_counts, in Pine, with the engine's own two
         branches, because the two kinds of timeframe answer "closed" from
@@ -744,16 +781,17 @@ class SpecLowerer:
           arrives. That is the same new-session rule every session primitive
           here already uses, rather than a second notion of a session.
         """
-        if tf not in self.gates:
+        _symbol, tf = pair
+        if pair not in self.gates:
             path = RulePath(("timeframe",))
             expr = (f"{self.ctx.helper(NEW_SESSION, path)}()"
                     if tf in SESSION_ALIGNED
                     else f'time_close("{PINE_TIMEFRAMES[tf]}") == time_close')
-            name = self.ctx.claim(
-                f"nk_visible_{_sanitize(PINE_TIMEFRAMES[tf])}", path)
+            name = self.ctx.claim(_pair_stem(
+                f"nk_visible_{_sanitize(PINE_TIMEFRAMES[tf])}", pair), path)
             out.append(f"{name} = {expr}")
-            self.gates[tf] = name
-        return self.gates[tf]
+            self.gates[pair] = name
+        return self.gates[pair]
 
     def _fresh_gate(self, out: list[str]) -> str:
         """The chart bar the engine lets this play SIGNAL on: RuleStrategy._fresh.
@@ -774,7 +812,7 @@ class SpecLowerer:
             name = self.ctx.claim("nk_frame_fresh", path)
             out.append(f"{name} = {self.ctx.helper(SESSION_OPEN_BAR, path)}()")
             return name
-        return self._gate(self.frame, out)
+        return self._gate((None, self.frame), out)
 
     # -- blocks --------------------------------------------------------
     def _decide(self, group: dict, path: RulePath, name: str) -> str:
@@ -800,7 +838,8 @@ class SpecLowerer:
             # whole tree stays one expression.
             return self._frame_value(
                 path, name, "bool",
-                lambda frame: self._group(group, path, frame, frame))
+                lambda frame: self._group(
+                    group, path, (None, frame), (None, frame)))
         # Only the composition is held back. Whatever the walk emits under it
         # (a foreign frame's request, gate and latch) goes out where it is
         # reached, so it stands above both the play's own request and the
@@ -817,11 +856,14 @@ class SpecLowerer:
             # lifted boolean came from.
             return self._frame_value(
                 path, "nk_" + "_".join(_sanitize(p) for p in path.parts), "bool",
-                lambda frame: (self._group(node, path, frame, frame)
+                lambda frame: (self._group(
+                                   node, path, (None, frame), (None, frame))
                                if is_group_node(node)
-                               else self._condition(node, path, frame, frame)))
+                               else self._condition(
+                                   node, path, (None, frame), (None, frame))))
         if not is_group_node(node):
-            return self._condition(node, path, self.frame, self.chart)
+            return self._condition(
+                node, path, (None, self.frame), (None, self.chart))
         key, items = next(iter(node.items()))
         _refuse_not(key, path)
         joiner = " and " if key == "all" else " or "
@@ -835,7 +877,8 @@ class SpecLowerer:
         while stack:
             item = stack.pop()
             if isinstance(item, dict):
-                if str(item.get("tf", self.frame)) != self.frame:
+                if ("sym" in item
+                        or str(item.get("tf", self.frame)) != self.frame):
                     return True
                 stack += [v for k, v in item.items() if k != "tf"]
             elif isinstance(item, list):
@@ -930,15 +973,13 @@ class SpecLowerer:
 
     # -- conditions ----------------------------------------------------
     #
-    # Two timeframes travel together through the walk and they are not the same
-    # question, which the engine also keeps apart. FRAME is what a node without
-    # a `tf` inherits, exactly as FrameEval._eval passes `tf` down and an `of`
-    # chain inherits its parent's. HOST is the context the Pine is being
-    # emitted into, which is either the chart or the inside of one request. A
-    # node is lifted when its own timeframe is not the host's, and the two
-    # differ only where a condition has to be composed on the chart out of
-    # operands that still belong to the play's own frame.
-    def _group(self, group: dict, path: RulePath, frame: str, host: str) -> str:
+    # Two pairs travel together through the walk. FRAME is what a node without
+    # `sym` or `tf` inherits, exactly as FrameEval._eval passes both axes down
+    # an `of` chain. HOST is the context the Pine is emitted into, either the
+    # chart or one request. A node is lifted when its source pair differs from
+    # the host pair.
+    def _group(self, group: dict, path: RulePath, frame: _Pair,
+               host: _Pair) -> str:
         key, items = next(iter(group.items()))
         _refuse_not(key, path)
         joiner = " and " if key == "all" else " or "
@@ -950,8 +991,8 @@ class SpecLowerer:
                          else self._condition(item, child, frame, host))
         return "(" + joiner.join(parts) + ")"
 
-    def _condition(self, cond: dict, path: RulePath, frame: str,
-                   host: str) -> str:
+    def _condition(self, cond: dict, path: RulePath, frame: _Pair,
+                   host: _Pair) -> str:
         lhs = self._expr(cond["lhs"], path.child("lhs"), frame, host)
         rhs = self._expr(cond["rhs"], path.child("rhs"), frame, host)
         op = cond["op"]
@@ -1032,12 +1073,12 @@ class SpecLowerer:
         return name
 
     # -- expressions ---------------------------------------------------
-    def _expr(self, node, path: RulePath, frame: str, host: str) -> str:
+    def _expr(self, node, path: RulePath, frame: _Pair, host: _Pair) -> str:
         if isinstance(node, (int, float)):
             return self.ctx.number(path, node)
         if "src" in node:
             return self._node(node, path, frame, host, f"nk_{node['src']}",
-                              lambda _frame: {"": node["src"]})[""]
+                              lambda _pair: {"": node["src"]})[""]
         if "op" in node:
             return self._math(node, path, frame, host)
         kind = "ind" if "ind" in node else "prim"
@@ -1065,7 +1106,8 @@ class SpecLowerer:
                 path=path.text, term=name)
         return fields[field]
 
-    def _math(self, node: dict, path: RulePath, frame: str, host: str) -> str:
+    def _math(self, node: dict, path: RulePath, frame: _Pair,
+              host: _Pair) -> str:
         op = node["op"]
         args = [self._expr(a, path.child("args", i), frame, host)
                 for i, a in enumerate(node["args"])]
@@ -1081,7 +1123,7 @@ class SpecLowerer:
         return "(" + f" {op} ".join(args) + ")"
 
     def _term(self, node: dict, term, path: RulePath,
-              frame: str) -> dict[str, str]:
+              frame: _Pair) -> dict[str, str]:
         # Keyed on the arg's declared TYPE, the way canon.py and spec.py key
         # theirs, rather than on the literal name "cond": a condition-taking
         # term whose arg is called anything else reached its emit with an
@@ -1095,7 +1137,7 @@ class SpecLowerer:
                   PRIOR_DAY if term.name == "gap_pct" else None)
         args = {**term.defaults,
                 **{k: v for k, v in node.items()
-                   if k not in ("ind", "prim", "of", "tf", "window")
+                   if k not in ("ind", "prim", "of", "tf", "window", "sym")
                    and k not in condition_args}}
         if window_name is not None:
             args.pop("n", None)
@@ -1132,12 +1174,12 @@ class SpecLowerer:
                 term.pine.emit(self.ctx, call))
         return self.ctx.take_fields(call.slot) or {"": expr.text}
 
-    # -- timeframes ----------------------------------------------------
-    def _node(self, node: dict, path: RulePath, frame: str, host: str,
+    # -- pairs ---------------------------------------------------------
+    def _node(self, node: dict, path: RulePath, frame: _Pair, host: _Pair,
               stem: str, produce) -> dict[str, str]:
-        """One source or term node, on the host's frame or lifted onto it.
+        """One source or term node, on the host pair or lifted onto it.
 
-        The memo is keyed on the HOST as well as the content, so the same node
+        The memo is keyed on the HOST PAIR as well as the content, so the same node
         read natively inside a request and read again on the chart are two
         entries. They have to be: the native one is a function local, and
         handing that identifier to a chart-level expression would emit Pine
@@ -1152,9 +1194,11 @@ class SpecLowerer:
             fields, touched = memo
             self.ctx.reached(touched, path)
             return fields
-        src_tf = node.get("tf", frame)
+        source = (str(node.get("sym", frame[0]))
+                  if node.get("sym", frame[0]) is not None else None,
+                  str(node.get("tf", frame[1])))
         term = _term_name(node)
-        if src_tf != host and host != self.chart:
+        if source != host and host != (None, self.chart):
             # Genuinely inexpressible: this node names a timeframe other than
             # the one whose request it sits inside, and request.security does
             # not nest. A condition's own operands never land here, because
@@ -1171,31 +1215,33 @@ class SpecLowerer:
             # message still names the nesting exactly.
             raise PineCompileError(
                 "pine_unsupported",
-                f"{path.text}: {src_tf} is read inside a {host} request, and "
-                "request.security does not nest; move the reference up to the "
-                "spec's own timeframe", path=path.text, term=term)
+                f"{path.text}: {_pair_text(source)} is read inside "
+                f"{_pair_text(host)}, and request.security does not nest; "
+                "move the reference up to the spec's own scope",
+                path=path.text, term=term)
         with self.ctx.reaching() as touched:
-            fields = (produce(host) if src_tf == host
-                      else self._lift(node, path, src_tf, stem, produce, term))
+            fields = (produce(host) if source == host
+                      else self._lift(node, path, source, stem, produce, term))
         self.ctx.nodes[key] = (fields, frozenset(touched))
         return fields
 
-    def _lift(self, node: dict, path: RulePath, src_tf: str, stem: str,
+    def _lift(self, node: dict, path: RulePath, source: _Pair, stem: str,
               produce, term: str) -> dict[str, str]:
-        """One node whose timeframe is not the host's, joined to that request.
+        """One node whose pair is not the host's, joined to that request.
 
-        There is nothing special left about a FOREIGN timeframe. Whether the
-        node names the play's own frame (reached from a condition composed on
-        the chart) or another one, it becomes a member of the single request
-        for the timeframe it names. The refusal here is the one _request_for
-        cannot phrase as well, because a node can name its path and its term.
+        There is nothing special left about a foreign pair. Whether the node
+        names the play's own frame on a literal symbol or another frame, it
+        becomes a member of the single request for the pair it names. The
+        refusal here is the one _request_for cannot phrase as well, because a
+        node can name its path and its term.
         """
+        _symbol, src_tf = source
         if src_tf not in PINE_TIMEFRAMES:
             raise PineCompileError(
                 "pine_unsupported",
                 f"{path.text}: {src_tf!r} has no Pine timeframe string",
                 path=path.text, term=term)
-        return self._requested(src_tf, path, stem, produce)
+        return self._requested(source, path, stem, produce)
 
     def _assumptions(self) -> tuple[str, ...]:
         out = [f"The chart must be on {self.chart} bars. Nakagai replays every "
