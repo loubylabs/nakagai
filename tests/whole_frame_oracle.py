@@ -67,7 +67,7 @@ def prefix_value(node, frames: dict, eval_symbol: str, eval_tf: str,
         return float(bars[node["src"]].iloc[-1])
     if "op" in node:
         vals = [prefix_value(
-                    a, frames, eval_symbol, eval_tf, now, tfs, vocabulary)
+                    a, frames, src_symbol, src_tf, now, tfs, vocabulary)
                 for a in node["args"]]
         if node["op"] == "abs":
             return abs(vals[0])
@@ -81,7 +81,8 @@ def prefix_value(node, frames: dict, eval_symbol: str, eval_tf: str,
         name = node["ind"]
         term = vocabulary.indicators[name]
         a = {**term.defaults,
-             **{k: v for k, v in node.items() if k not in ("ind", "of", "tf")}}
+             **{k: v for k, v in node.items()
+                if k not in ("ind", "of", "tf", "sym")}}
         if term.kind == "bar":
             out = term.fn(bars, a)
         else:
@@ -96,7 +97,8 @@ def prefix_value(node, frames: dict, eval_symbol: str, eval_tf: str,
     name = node["prim"]
     term = vocabulary.primitives[name]
     a = {**term.defaults,
-         **{k: v for k, v in node.items() if k not in ("prim", "tf")}}
+         **{k: v for k, v in node.items()
+            if k not in ("prim", "tf", "sym")}}
     if name == "bars_since":
         a["eval_fn"] = lambda cond, b: _condition_mask(
             cond, b, frames, src_symbol, src_tf, tfs, vocabulary)

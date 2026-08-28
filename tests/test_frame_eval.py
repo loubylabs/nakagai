@@ -1103,3 +1103,54 @@ def test_eager_and_lazy_pair_lookup_publish_identical_values():
 
     assert lazy_result.equals(eager_result)
     assert lazy_frames.loaded == (("SPY", "15m"), ("AAPL", "15m"))
+
+
+def test_prefix_oracle_math_children_inherit_the_selected_symbol():
+    aapl = _pair_frame([10.0, 11.0])
+    spy = _pair_frame([20.0, 21.0])
+    frames = {("AAPL", "15m"): aapl, ("SPY", "15m"): spy}
+    node = {
+        "op": "+",
+        "sym": "SPY",
+        "args": [{"src": "close"}, 1.0],
+    }
+    now = aapl.index[-1] + TFS.step
+
+    got = prefix_value(node, frames, "AAPL", "15m", now, TFS)
+
+    assert got == 22.0
+
+
+def test_prefix_oracle_strips_symbol_scope_from_primitive_arguments():
+    aapl = _pair_frame([10.0, 11.0])
+    spy = _pair_frame([20.0, 21.0])
+    frames = {("AAPL", "15m"): aapl, ("SPY", "15m"): spy}
+    node = {"prim": "minutes_into_session", "sym": "SPY"}
+    now = aapl.index[-1] + TFS.step
+
+    got = prefix_value(node, frames, "AAPL", "15m", now, TFS)
+
+    assert got == 15.0
+
+
+def test_prefix_oracle_strips_symbol_scope_from_indicator_arguments():
+    seen = []
+
+    def capture(series, args):
+        seen.append(dict(args))
+        return series
+
+    vocabulary = core_vocabulary().with_terms(
+        Term("capture_scope", "series", {}, {}, capture),
+    )
+    aapl = _pair_frame([10.0, 11.0])
+    spy = _pair_frame([20.0, 21.0])
+    frames = {("AAPL", "15m"): aapl, ("SPY", "15m"): spy}
+    node = {"ind": "capture_scope", "sym": "SPY"}
+    now = aapl.index[-1] + TFS.step
+
+    got = prefix_value(
+        node, frames, "AAPL", "15m", now, TFS, vocabulary)
+
+    assert got == 21.0
+    assert seen == [{}]
