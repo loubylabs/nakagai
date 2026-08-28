@@ -27,7 +27,6 @@ from nakagai.engine.bars import (
     ReplayDependencies,
     _ValidatedPortfolioBars,
     _normalized_frame,
-    _reindex_external,
     _require_prepared_closure,
 )
 from nakagai.engine.portfolio_types import (
@@ -125,8 +124,7 @@ def build_context(cache: BarCache, symbol: str, now: pd.Timestamp,
         loaded = cache.load(*pair)
         expected = driving_frames[(symbol, pair[1])].index
         normalized = _normalized_frame(loaded, pair)
-        pair_frames[pair] = _reindex_external(
-            normalized, pair, tuple(expected))
+        pair_frames[pair] = normalized.reindex(expected)
     visible = {
         pair: closed_before(frame, pair[1], now, tfs)
         for pair, frame in pair_frames.items()

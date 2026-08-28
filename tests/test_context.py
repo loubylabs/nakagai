@@ -210,7 +210,7 @@ def test_point_in_time_reference_visibility_uses_its_own_close_time(tmp_path):
         ("nonfinite", "close"),
         ("invalid high", "high"),
         ("negative volume", "volume"),
-        ("surplus label", "labels"),
+        ("malformed older row", "close"),
     ],
 )
 def test_point_in_time_context_refuses_malformed_supplied_external_rows(
@@ -234,9 +234,11 @@ def test_point_in_time_context_refuses_malformed_supplied_external_rows(
     elif defect == "negative volume":
         external.iloc[1, external.columns.get_loc("volume")] = -1.0
     else:
-        surplus = pd.DatetimeIndex(
-            [pd.Timestamp("2026-06-01 14:30", tz="UTC")], name="ts")
-        external = pd.concat([external, frame(surplus, 300.0)])
+        older = pd.DatetimeIndex(
+            [pd.Timestamp("2026-06-01 13:15", tz="UTC")], name="ts")
+        malformed = frame(older, 300.0)
+        malformed.iloc[0, malformed.columns.get_loc("close")] = np.nan
+        external = pd.concat([malformed, external])
     cache = MemoryBars({
         ("SPY", "15m"): driving,
         ("QQQ", "15m"): external,
@@ -254,3 +256,39 @@ def test_point_in_time_context_refuses_malformed_supplied_external_rows(
 
     assert raised.value.code == "missing_required_bar"
     assert raised.value.details["field"] == field
+
+
+def test_point_in_time_context_drops_valid_external_rows_before_driving_labels():
+    driving_index = pd.date_range(
+        "2026-06-01 13:30", periods=4, freq="15min", tz="UTC", name="ts")
+    older = pd.DatetimeIndex(
+        [pd.Timestamp("2026-06-01 13:15", tz="UTC")], name="ts")
+
+    def frame(labels, base):
+        close = pd.Series(np.arange(len(labels), dtype=float) + base, index=labels)
+        return pd.DataFrame({
+            "open": close, "high": close + 1.0, "low": close - 1.0,
+            "close": close, "volume": 1_000.0,
+        }, index=labels)
+
+    external = pd.concat([
+        frame(older, 50.0),
+        frame(driving_index, 200.0),
+    ])
+    cache = MemoryBars({
+        ("SPY", "15m"): frame(driving_index, 100.0),
+        ("QQQ", "15m"): external,
+    })
+    tfs = TimeframeSet(
+        driving="15m", higher=(), deltas=DEFAULT_TIMEFRAMES.deltas,
+        session_aligned=DEFAULT_TIMEFRAMES.session_aligned,
+    )
+
+    context = build_context(
+        cache, "SPY", driving_index[-1] + pd.Timedelta(minutes=15), tfs,
+        reference_pairs=(("QQQ", "15m"),),
+    )
+
+    aligned = context.fe.on("QQQ", "15m")
+    pd.testing.assert_index_equal(aligned.index, driving_index)
+    assert aligned["close"].tolist() == [200.0, 201.0, 202.0, 203.0]
