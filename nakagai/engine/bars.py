@@ -179,18 +179,18 @@ class _ValidatedPortfolioBars:
 
     def __init__(
         self, frames: dict[tuple[str, str], pd.DataFrame],
-        reference_pairs: tuple[tuple[str, str], ...],
+        dependencies: ReplayDependencies,
     ) -> None:
         self._frames = MappingProxyType(frames)
-        self._reference_pairs = reference_pairs
+        self._dependencies = dependencies
 
     @property
     def pairs(self) -> tuple[tuple[str, str], ...]:
         return tuple(self._frames)
 
     @property
-    def reference_pairs(self) -> tuple[tuple[str, str], ...]:
-        return self._reference_pairs
+    def dependencies(self) -> ReplayDependencies:
+        return self._dependencies
 
     def frame(self, symbol: str, timeframe: str) -> pd.DataFrame:
         """One prepared frame, or `KeyError` for a pair nobody declared."""
@@ -202,17 +202,29 @@ def _require_prepared_closure(
     prepared: _ValidatedPortfolioBars, request: PortfolioReplayRequest,
     dependencies: ReplayDependencies,
 ) -> None:
-    """Refuse missing traded frames or a different external pair closure."""
-    if prepared.reference_pairs != dependencies.reference_pairs:
-        different = sorted(
-            set(prepared.reference_pairs) ^ set(dependencies.reference_pairs),
-            key=_key_order,
+    """Refuse a prepared mapping built under any other exact closure."""
+    if prepared.dependencies != dependencies:
+        different_timeframes = tuple(
+            timeframe for timeframe in BAR_TIMEFRAMES
+            if ((timeframe in prepared.dependencies.timeframes)
+                != (timeframe in dependencies.timeframes))
         )
-        symbol, timeframe = different[0]
+        if different_timeframes:
+            details = {"timeframe": different_timeframes[0]}
+        else:
+            different_pairs = sorted(
+                set(prepared.dependencies.reference_pairs)
+                ^ set(dependencies.reference_pairs),
+                key=_key_order,
+            )
+            details = {
+                "symbol": different_pairs[0][0],
+                "timeframe": different_pairs[0][1],
+            }
         raise _fail(
             "mismatched_dependencies",
             "the bars were prepared under another dependency closure",
-            field="prepared", symbol=symbol, timeframe=timeframe,
+            field="prepared", **details,
         )
     pairs = frozenset(prepared.pairs)
     absent = tuple(
@@ -286,7 +298,7 @@ def prepare_portfolio_bars(
             "a frame was supplied that this replay never declared",
             "unexpected_frame", symbol=surplus[0][0], timeframe=surplus[0][1],
         )
-    return _ValidatedPortfolioBars(prepared, dependencies.reference_pairs)
+    return _ValidatedPortfolioBars(prepared, dependencies)
 
 
 def _required_labels(
@@ -367,12 +379,13 @@ def _normalized_frame(frame: pd.DataFrame, key: tuple[str, str]) -> pd.DataFrame
             f"a frame carries {', '.join(BAR_COLUMNS)}", "columns",
             symbol=symbol, timeframe=timeframe, absent=absent,
         )
-    for column in BAR_COLUMNS:
-        if frame[column].dtype.kind not in "iuf":
-            raise _refuse(
-                "every bar column is a number that casts to binary64", "dtype",
-                symbol=symbol, timeframe=timeframe, column=column,
-            )
+    if len(frame.index):
+        for column in BAR_COLUMNS:
+            if frame[column].dtype.kind not in "iuf":
+                raise _refuse(
+                    "every bar column is a number that casts to binary64", "dtype",
+                    symbol=symbol, timeframe=timeframe, column=column,
+                )
     try:
         selected = frame[BAR_COLUMNS].astype("float64")
     except (TypeError, ValueError):

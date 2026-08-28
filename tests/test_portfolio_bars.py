@@ -14,6 +14,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from nakagai.data.schema import BAR_COLUMNS
 from nakagai.engine.bars import (
     PortfolioBars,
     ReplayDependencies,
@@ -410,6 +411,30 @@ def test_empty_external_history_becomes_an_all_null_internal_frame():
     assert internal.isna().all().all()
 
 
+def test_plain_constructor_empty_external_frame_prepares_as_binary64():
+    request = base_request()
+    schedule = base_schedule()
+    dependencies = ReplayDependencies(
+        timeframes=("15m",), reference_pairs=(("IWM", "15m"),),
+    )
+    frames = frames_for(request, schedule, dependencies)
+    empty = pd.DataFrame(
+        columns=BAR_COLUMNS,
+        index=pd.DatetimeIndex([], tz="UTC", name="ts"),
+    )
+    assert set(empty.dtypes) == {np.dtype("object")}
+    frames[("IWM", "15m")] = empty
+
+    prepared = prepare_portfolio_bars(
+        request, PortfolioBars(frames), validate_schedule(request, schedule),
+        dependencies,
+    )
+
+    internal = prepared.frame("IWM", "15m")
+    assert set(internal.dtypes) == {np.dtype("float64")}
+    assert internal.isna().all().all()
+
+
 def test_sparse_external_history_refuses_a_surplus_scheduled_label():
     request = base_request()
     schedule = base_schedule()
@@ -710,19 +735,37 @@ def test_a_context_at_the_first_test_close_sees_no_test_session_daily_bar():
     assert list(context.bars["1d"].index) == [ts("2026-11-25T05:00:00Z")]
 
 
-def test_a_context_only_carries_the_declared_timeframes():
+@pytest.mark.parametrize(
+    ("prepared_timeframes", "supplied_timeframes"),
+    [
+        (("15m", "1h", "4h", "1d"), ("15m", "1d")),
+        (("15m", "1d"), ("15m", "1h", "4h", "1d")),
+    ],
+    ids=("narrower supplied closure", "wider supplied closure"),
+)
+def test_a_context_refuses_a_different_prepared_timeframe_closure(
+        prepared_timeframes, supplied_timeframes):
+    request = base_request()
+    schedule = base_schedule()
+    prepared_dependencies = ReplayDependencies(
+        timeframes=prepared_timeframes, reference_pairs=())
     prepared = prepare_portfolio_bars(
-        base_request(), PortfolioBars(base_frames()), base_validated_schedule(),
-        base_dependencies(),
+        request, PortfolioBars(frames_for(
+            request, schedule, prepared_dependencies)),
+        validate_schedule(request, schedule), prepared_dependencies,
     )
-    dependencies = ReplayDependencies(timeframes=("15m", "1d"), reference_pairs=())
-    context = build_scheduled_context(
-        prepared, "SPY", ts("2026-11-27T15:00:00Z"), base_validated_schedule(),
-        dependencies, vocabulary=core_vocabulary(),
-    )
-    assert set(context.bars) == {"15m", "1d"}
-    assert context.tfs.all == ("15m", "1d")
-    assert context.driving_bars is context.bars["15m"]
+    supplied_dependencies = ReplayDependencies(
+        timeframes=supplied_timeframes, reference_pairs=())
+
+    with pytest.raises(ReplayInputError) as raised:
+        build_scheduled_context(
+            prepared, "SPY", ts("2026-11-27T15:00:00Z"),
+            validate_schedule(request, schedule), supplied_dependencies,
+            vocabulary=core_vocabulary(),
+        )
+
+    assert raised.value.code == "mismatched_dependencies"
+    assert raised.value.details["field"] == "prepared"
 
 
 def test_a_context_refuses_anything_that_is_not_a_grammar():
