@@ -818,4 +818,38 @@ def test_the_causal_view_refuses_a_timeframe_it_does_not_carry():
     view = CausalFactorBars(symbol="SPY", timeframe="15m", frames={}, labels=())
 
     with pytest.raises(KeyError):
-        view.frame("1h")
+        view.frame("SPY", "1h")
+
+
+def test_rules_ic_margin_is_null_only_where_a_reference_observation_is_missing():
+    labels = pd.date_range(
+        "2026-11-25T14:30:00Z", periods=3, freq="15min", tz="UTC")
+    spy = bar_frame(labels, base=100.0)
+    qqq = bar_frame(labels, base=90.0)
+    qqq.iloc[1] = float("nan")
+    spec = {
+        "version": 2,
+        "name": "relative",
+        "timeframe": "15m",
+        "long": {"all": [{
+            "lhs": {"src": "close"}, "op": ">",
+            "rhs": {"src": "close", "sym": "QQQ"},
+        }]},
+        "risk": {
+            "stop": {"kind": "percent", "pct": 2.0},
+            "target": {"kind": "rr", "rr": 2.0},
+        },
+    }
+    definition = rules_definition(
+        "relative", "0" * 64, spec=spec, vocabulary_factory=core_vocabulary)
+    bars = CausalFactorBars(
+        symbol="SPY", timeframe="15m",
+        frames={("SPY", "15m"): spy, ("QQQ", "15m"): qqq},
+        labels=tuple(labels),
+    )
+
+    margins = definition.ic_factor({}, "SPY", bars, tuple(labels))
+
+    assert margins[0] is not None
+    assert margins[1] is None
+    assert margins[2] is not None

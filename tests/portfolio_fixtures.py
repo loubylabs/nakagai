@@ -1442,14 +1442,18 @@ def scripted_definition(play: ScriptedPlay, *, timeframes: tuple[str, ...] = ("1
 
 def _factor_call(play: ScriptedPlay, symbol: str, bars,
                  timestamps: tuple) -> FactorCall:
-    frame = bars.frame(bars.timeframe)
+    frame = bars.frame(symbol, bars.timeframe)
     return FactorCall(
         play_id=play.play_id,
         symbol=symbol,
         timeframe=bars.timeframe,
         timestamps=tuple(timestamps),
         labels=tuple(bars.labels),
-        rows=tuple((tf, len(bars.frame(tf))) for tf in sorted(bars.frames)),
+        rows=tuple(
+            (timeframe, len(bars.frame(symbol, timeframe)))
+            for pair_symbol, timeframe in sorted(bars.frames)
+            if pair_symbol == symbol
+        ),
         last_label=frame.index[-1] if len(frame.index) else None,
         highest_close=float(frame["close"].max()) if len(frame.index) else None,
     )

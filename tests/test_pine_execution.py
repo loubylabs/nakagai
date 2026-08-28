@@ -452,7 +452,8 @@ def _engine_decisions(spec: dict, side: str, chart=None, frames=None) -> np.ndar
     chart = CHART if chart is None else chart
     frames = FRAMES if frames is None else frames
     timeframe = spec["timeframe"]
-    lifted = FrameEval(frames, DEFAULT_TIMEFRAMES).driving_group(
+    pair_frames = {("SPY", tf): frame for tf, frame in frames.items()}
+    lifted = FrameEval("SPY", pair_frames, DEFAULT_TIMEFRAMES).driving_group(
         spec[side], timeframe).to_numpy()
     out = np.zeros(len(chart), dtype=bool)
     for i in range(len(chart)):

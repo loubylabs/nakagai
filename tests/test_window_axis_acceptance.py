@@ -64,7 +64,8 @@ def test_public_window_axis_handles_london_high_and_low_without_bespoke_terms():
         },
         index=index,
     )
-    evaluator = FrameEval({"15m": bars}, vocabulary=vocabulary)
+    evaluator = FrameEval(
+        "SPY", {("SPY", "15m"): bars}, vocabulary=vocabulary)
     london_high = evaluator.series(HIGH, "15m")
     london_low = evaluator.series(LOW, "15m")
     assert london_high.iloc[:-1].isna().all()

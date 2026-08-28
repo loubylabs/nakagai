@@ -276,6 +276,24 @@ def test_an_explicit_benchmark_symbol_needs_only_the_base_timeframe():
     assert ("IWM", "1h") not in prepared.pairs
 
 
+def test_exact_reference_closure_never_builds_a_symbol_timeframe_cross_product():
+    request = base_request(symbols=("SPY",))
+    schedule = base_schedule()
+    dependencies = ReplayDependencies(
+        timeframes=("15m",), reference_pairs=(("QQQ", "1d"),),
+    )
+    frames = frames_for(request, schedule, dependencies)
+
+    prepared = prepare_portfolio_bars(
+        request, PortfolioBars(frames), validate_schedule(request, schedule),
+        dependencies,
+    )
+
+    assert prepared.pairs == (("QQQ", "1d"), ("SPY", "15m"))
+    assert ("SPY", "1d") not in prepared.pairs
+    assert ("QQQ", "15m") not in prepared.pairs
+
+
 def test_a_trading_symbol_covers_the_tail_and_a_context_symbol_stops_at_test_end():
     request = tail_request()
     dependencies = ReplayDependencies(
@@ -345,6 +363,128 @@ def test_a_context_symbol_refuses_bars_past_its_own_boundary():
         scheduled_labels(base_schedule(), "15m", request.ic_tail_end))
     error = refuse(frames, request=request, dependencies=dependencies)
     assert (error.code, error.details["field"]) == ("missing_required_bar", "labels")
+
+
+def test_sparse_external_history_is_reindexed_without_forward_fill():
+    request = base_request()
+    schedule = base_schedule()
+    dependencies = ReplayDependencies(
+        timeframes=("15m",), reference_pairs=(("IWM", "15m"),),
+    )
+    frames = frames_for(request, schedule, dependencies)
+    expected = list(frames[("IWM", "15m")].index)
+    missing = expected[5]
+    supplied = frames[("IWM", "15m")].drop(index=missing)
+    frames[("IWM", "15m")] = supplied
+
+    prepared = prepare_portfolio_bars(
+        request, PortfolioBars(frames), validate_schedule(request, schedule),
+        dependencies,
+    )
+
+    internal = prepared.frame("IWM", "15m")
+    assert list(internal.index) == expected
+    assert internal.loc[missing].isna().all()
+    assert internal.iloc[4]["close"] == supplied.iloc[4]["close"]
+    assert internal.iloc[6]["close"] == supplied.iloc[5]["close"]
+    assert missing not in supplied.index
+
+
+def test_empty_external_history_becomes_an_all_null_internal_frame():
+    request = base_request()
+    schedule = base_schedule()
+    dependencies = ReplayDependencies(
+        timeframes=("15m",), reference_pairs=(("IWM", "15m"),),
+    )
+    frames = frames_for(request, schedule, dependencies)
+    frames[("IWM", "15m")] = frames[("IWM", "15m")].iloc[:0]
+
+    prepared = prepare_portfolio_bars(
+        request, PortfolioBars(frames), validate_schedule(request, schedule),
+        dependencies,
+    )
+
+    internal = prepared.frame("IWM", "15m")
+    assert len(internal) == len(scheduled_labels(
+        schedule, "15m", request.window.test_end))
+    assert internal.isna().all().all()
+
+
+def test_sparse_external_history_refuses_a_surplus_scheduled_label():
+    request = base_request()
+    schedule = base_schedule()
+    dependencies = ReplayDependencies(
+        timeframes=("15m",), reference_pairs=(("IWM", "15m"),),
+    )
+    frames = frames_for(request, schedule, dependencies)
+    external = frames[("IWM", "15m")]
+    frames[("IWM", "15m")] = pd.concat([
+        external,
+        bar_frame((ts("2026-11-27T18:00:00Z"),), base=200.0),
+    ])
+
+    error = refuse(frames, request=request, dependencies=dependencies)
+    assert (error.code, error.details["field"]) == (
+        "missing_required_bar", "labels")
+
+
+def test_pair_role_precedence_is_not_symbol_wide():
+    request = base_request(symbols=("AAPL",))
+    schedule = base_schedule()
+    dependencies = ReplayDependencies(
+        timeframes=("15m",), reference_pairs=(("AAPL", "1h"),),
+    )
+    frames = frames_for(request, schedule, dependencies)
+    hourly_missing = frames[("AAPL", "1h")].index[0]
+    frames[("AAPL", "1h")] = frames[("AAPL", "1h")].drop(
+        index=hourly_missing)
+
+    prepared = prepare_portfolio_bars(
+        request, PortfolioBars(frames), validate_schedule(request, schedule),
+        dependencies,
+    )
+    assert prepared.frame("AAPL", "1h").loc[hourly_missing].isna().all()
+
+    missing_15m = frames[("AAPL", "15m")].index[0]
+    frames[("AAPL", "15m")] = frames[("AAPL", "15m")].drop(index=missing_15m)
+    error = refuse(frames, request=request, dependencies=dependencies)
+    assert (error.code, error.details["symbol"], error.details["timeframe"]) == (
+        "missing_required_bar", "AAPL", "15m")
+
+
+def test_same_exact_pair_traded_role_precedes_external_role():
+    request = base_request(symbols=("AAPL",))
+    schedule = base_schedule()
+    dependencies = ReplayDependencies(
+        timeframes=("15m",), reference_pairs=(("AAPL", "15m"),),
+    )
+    frames = frames_for(request, schedule, dependencies)
+    assert list(frames) == [("AAPL", "15m")]
+    missing = frames[("AAPL", "15m")].index[0]
+    frames[("AAPL", "15m")] = frames[("AAPL", "15m")].drop(index=missing)
+
+    error = refuse(frames, request=request, dependencies=dependencies)
+    assert (error.code, error.details["symbol"], error.details["timeframe"]) == (
+        "missing_required_bar", "AAPL", "15m")
+
+
+def test_same_exact_pair_benchmark_role_precedes_external_role():
+    request = base_request(benchmark=BenchmarkSpec(
+        kind="single_symbol", symbol="IWM", weighting="equal", rebalance="never",
+    ))
+    schedule = base_schedule()
+    dependencies = ReplayDependencies(
+        timeframes=("15m",), reference_pairs=(("IWM", "15m"),),
+    )
+    frames = frames_for(request, schedule, dependencies)
+    assert list(key for key in frames if key == ("IWM", "15m")) == [
+        ("IWM", "15m")]
+    missing = frames[("IWM", "15m")].index[0]
+    frames[("IWM", "15m")] = frames[("IWM", "15m")].drop(index=missing)
+
+    error = refuse(frames, request=request, dependencies=dependencies)
+    assert (error.code, error.details["symbol"], error.details["timeframe"]) == (
+        "missing_required_bar", "IWM", "15m")
 
 
 # ----------------------------------------------------------- frame integrity

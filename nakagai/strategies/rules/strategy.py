@@ -30,30 +30,41 @@ ReferencePair: TypeAlias = tuple[str, str]
 
 
 def spec_timeframes(spec: Mapping) -> tuple:
-    """Every timeframe a RuleSpec reads, unvalidated and possibly repeated.
+    """Every driving-symbol timeframe a RuleSpec reads.
 
-    Two sources, and both are frames the replay has to prepare: the spec's own
-    `timeframe`, which its conditions are evaluated on, and any node's `tf`,
-    which moves that node's children onto another frame. An empty spec reads
-    neither, because an inert strategy returns before it touches a frame.
+    The spec's own `timeframe` is always a driving frame. A node-level `tf`
+    contributes only while lexical `sym` scope is still omitted. Once a node
+    names a symbol, that pair and every inherited descendant belong to
+    `spec_reference_pairs` instead. An empty spec reads neither, because an
+    inert strategy returns before it touches a frame.
 
     Values travel out exactly as the spec spelled them, so a caller building
     `StrategyDependencies` refuses an unsupported one through the same door
-    every other timeframe goes through. Keep this in step with `_bars_for` and
-    `_group_at`: a frame this misses is a frame nobody hydrates.
+    every other timeframe goes through. The two dependency walks stay
+    disjoint by role: this one never reconstructs references by crossing
+    symbols with timeframes.
     """
     if not isinstance(spec, Mapping) or not spec:
         return ()
-    found = [spec.get("timeframe", SPEC_TIMEFRAME_DEFAULT)]
-    stack: list = [spec]
+    host_timeframe = spec.get("timeframe", SPEC_TIMEFRAME_DEFAULT)
+    found = [host_timeframe]
+    stack: list[tuple[object, str | None, object]] = [
+        (spec, None, host_timeframe)
+    ]
     while stack:
-        node = stack.pop()
+        node, inherited_symbol, inherited_timeframe = stack.pop()
         if isinstance(node, Mapping):
-            if "tf" in node:
-                found.append(node["tf"])
-            stack.extend(node.values())
+            symbol = node.get("sym", inherited_symbol)
+            timeframe = node.get("tf", inherited_timeframe)
+            if symbol is None and "tf" in node:
+                found.append(timeframe)
+            stack.extend(
+                (value, symbol, timeframe) for value in node.values()
+            )
         elif isinstance(node, (tuple, list)):
-            stack.extend(node)
+            stack.extend(
+                (value, inherited_symbol, inherited_timeframe) for value in node
+            )
     return tuple(found)
 
 

@@ -98,6 +98,7 @@ def visible_counts(src_index: pd.DatetimeIndex, dst_close_times: pd.DatetimeInde
 
 def build_context(cache: BarCache, symbol: str, now: pd.Timestamp,
                   tfs: TimeframeSet = DEFAULT_TIMEFRAMES, *,
+                  reference_pairs: tuple[tuple[str, str], ...],
                   vocabulary: Vocabulary | None = None) -> MarketContext:
     """Point-in-time context at `now`.
 
@@ -108,13 +109,32 @@ def build_context(cache: BarCache, symbol: str, now: pd.Timestamp,
     invariant to defend.
     """
     from nakagai.strategies.rules.frame_eval import FrameEval
-    frames = {tf: cache.load(symbol, tf) for tf in tfs.all}
-    bars = {tf: closed_before(frames[tf], tf, now, tfs) for tf in tfs.all}
+    references = ReplayDependencies(
+        timeframes=tuple(tfs.all), reference_pairs=reference_pairs,
+    ).reference_pairs
+    driving_frames = {
+        (symbol, tf): cache.load(symbol, tf) for tf in tfs.all
+    }
+    pair_frames = dict(driving_frames)
+    for pair in references:
+        if pair in pair_frames:
+            continue
+        loaded = cache.load(*pair)
+        expected = driving_frames[(symbol, pair[1])].index
+        pair_frames[pair] = loaded.reindex(expected)
+    visible = {
+        pair: closed_before(frame, pair[1], now, tfs)
+        for pair, frame in pair_frames.items()
+    }
+    bars = {tf: visible[(symbol, tf)] for tf in tfs.all}
     # The evaluator sits over the CUT frames, whose last row is `now`, so this
     # door and `build_scheduled_context` index the same way and there is one
     # walker with one set of semantics rather than a point-in-time walker
     # beside a whole-frame one.
-    fe = FrameEval(bars, tfs, vocabulary=resolve_vocabulary(vocabulary))
+    fe = FrameEval(
+        symbol, MappingProxyType(visible), tfs,
+        vocabulary=resolve_vocabulary(vocabulary),
+    )
     # The span is not optional here. A point-in-time caller can only ever read
     # the LAST row of each frame, because the frames were just cut at `now`;
     # without a span the end-anchored primitives default to the whole frame and
@@ -122,9 +142,9 @@ def build_context(cache: BarCache, symbol: str, now: pd.Timestamp,
     # for. Measured on a three-year 15m SPY cache that took one spec, one
     # symbol, one bar from 0.001s to 11.4s, and the scan registry holds three
     # end-anchored specs run every 15 minutes.
-    for tf in tfs.all:
-        n = len(bars[tf])
-        fe.set_span(tf, max(n - 1, 0), n)
+    for pair, frame in visible.items():
+        n = len(frame)
+        fe.set_span(*pair, max(n - 1, 0), n)
     ctx = MarketContext(
         symbol=symbol, now=now, tfs=tfs, bars=MappingProxyType(bars), fe=fe,
         cursor=MappingProxyType({tf: len(bars[tf]) - 1 for tf in tfs.all}))
@@ -213,20 +233,27 @@ def build_scheduled_context(prepared: _ValidatedPortfolioBars, symbol: str,
     # two consumers holding one slice still read each other's writes. What
     # separates them is a slice each, which is why the replay calls this once
     # per runtime rather than once per symbol.
-    bars = {
-        tf: prepared.frame(symbol, tf).iloc[:(
-            closed if tf == BASE_TIMEFRAME
-            else schedule.available_context_count(tf, now))]
+    def visible_rows(timeframe: str) -> int:
+        return (closed if timeframe == BASE_TIMEFRAME
+                else schedule.available_context_count(timeframe, now))
+
+    pair_bars = {
+        (symbol, tf): prepared.frame(symbol, tf).iloc[:visible_rows(tf)]
         for tf in dependencies.timeframes
     }
+    for pair in dependencies.reference_pairs:
+        if pair not in pair_bars:
+            pair_bars[pair] = prepared.frame(*pair).iloc[:visible_rows(pair[1])]
+    bars = {tf: pair_bars[(symbol, tf)] for tf in dependencies.timeframes}
     tfs = _scheduled_timeframes(dependencies)
-    fe = FrameEval(bars, tfs, vocabulary=vocabulary)
+    fe = FrameEval(
+        symbol, MappingProxyType(pair_bars), tfs, vocabulary=vocabulary)
     # The span is not optional, for the same reason it is not optional in
     # build_context: without one, the end-anchored primitives walk the whole
     # frame to produce values no caller can read.
-    for tf in tfs.all:
-        rows = len(bars[tf])
-        fe.set_span(tf, max(rows - 1, 0), rows)
+    for pair, frame in pair_bars.items():
+        rows = len(frame)
+        fe.set_span(*pair, max(rows - 1, 0), rows)
     # Read-only mappings, which is a narrower claim than it looks and is not
     # what isolates two runtimes: that is one context each, decided by the
     # caller. These stop a strategy REPLACING an answer the door owns, and the

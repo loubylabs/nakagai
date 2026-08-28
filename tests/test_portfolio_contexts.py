@@ -41,9 +41,14 @@ import pandas as pd
 import pytest
 
 from nakagai.data.schema import DEFAULT_TIMEFRAMES, TimeframeSet
-from nakagai.engine.bars import ReplayDependencies
+from nakagai.engine.bars import (
+    PortfolioBars,
+    ReplayDependencies,
+    prepare_portfolio_bars,
+)
 from nakagai.engine.context import build_scheduled_context
 from nakagai.engine.portfolio_types import StrategyOutputError
+from nakagai.engine.schedule import validate_schedule
 from nakagai.strategies.base import MarketContext, Strategy
 from nakagai.strategies.composite.strategy import CompositeStrategy
 from nakagai.strategies.rules import RuleStrategy
@@ -58,6 +63,7 @@ from tests.portfolio_fixtures import (
     counting_definitions,
     fall_bucket_request,
     fall_bucket_schedule,
+    frames_for,
     prepared_for,
     replay_fixture,
     scripted_name,
@@ -157,18 +163,55 @@ def test_an_external_dependency_joins_only_after_its_own_availability():
     `available_at` and not at the traded symbols'.
     """
     dependencies = ReplayDependencies(
-        timeframes=("15m", "1h"),
-        reference_pairs=(("IWM", "15m"), ("IWM", "1h")))
+        timeframes=("15m", "1h"), reference_pairs=(("IWM", "1h"),))
     validated, prepared = prepared_for(base_request(), base_schedule(), dependencies)
     before = build_scheduled_context(
-        prepared, "IWM", ts("2026-11-27T14:45:00Z"), validated, dependencies,
+        prepared, "SPY", ts("2026-11-27T14:45:00Z"), validated, dependencies,
         vocabulary=core_vocabulary())
     after = build_scheduled_context(
-        prepared, "IWM", ts("2026-11-27T15:00:00Z"), validated, dependencies,
+        prepared, "SPY", ts("2026-11-27T15:00:00Z"), validated, dependencies,
         vocabulary=core_vocabulary())
-    assert list(before.bars["1h"].index) == [ts("2026-11-25T14:00:00Z")]
-    assert list(after.bars["1h"].index) == [ts("2026-11-25T14:00:00Z"),
-                                            ts("2026-11-27T14:00:00Z")]
+    assert set(before.bars) == {"15m", "1h"}
+    assert list(before.fe.on("IWM", "1h").index) == [
+        ts("2026-11-25T14:00:00Z")]
+    assert list(after.fe.on("IWM", "1h").index) == [
+        ts("2026-11-25T14:00:00Z"), ts("2026-11-27T14:00:00Z")]
+
+
+def test_scheduled_sparse_reference_matches_point_in_time_assembly(tmp_path):
+    from nakagai.data.cache import BarCache
+    from nakagai.data.schema import TimeframeSet
+    from nakagai.engine.context import build_context
+
+    dependencies = ReplayDependencies(
+        timeframes=("15m",), reference_pairs=(("IWM", "15m"),))
+    request, schedule = base_request(symbols=("SPY",)), base_schedule()
+    frames = frames_for(request, schedule, dependencies)
+    missing = frames[("IWM", "15m")].index[-2]
+    frames[("IWM", "15m")] = frames[("IWM", "15m")].drop(index=missing)
+    validated = validate_schedule(request, schedule)
+    prepared = prepare_portfolio_bars(
+        request, PortfolioBars(frames), validated, dependencies)
+    now = request.window.test_end
+    scheduled = build_scheduled_context(
+        prepared, "SPY", now, validated, dependencies,
+        vocabulary=core_vocabulary())
+
+    cache = BarCache(tmp_path / "cache")
+    cache.upsert("SPY", "15m", frames[("SPY", "15m")])
+    cache.upsert("IWM", "15m", frames[("IWM", "15m")])
+    point = build_context(
+        cache, "SPY", now,
+        TimeframeSet(
+            driving="15m", higher=(), deltas=DEFAULT_TIMEFRAMES.deltas,
+            session_aligned=DEFAULT_TIMEFRAMES.session_aligned,
+        ),
+        reference_pairs=(("IWM", "15m"),),
+        vocabulary=core_vocabulary(),
+    )
+
+    pd.testing.assert_frame_equal(
+        scheduled.fe.on("IWM", "15m"), point.fe.on("IWM", "15m"))
 
 
 def test_a_replay_builds_a_context_only_for_the_symbols_it_trades():

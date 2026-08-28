@@ -29,8 +29,10 @@ def _bars(closes, start="2026-01-05 14:30", freq="15min"):
 
 
 def _fe(b15, b1h=None, b1d=None):
-    return FrameEval({"15m": b15, "1h": b1h if b1h is not None else b15,
-                      "1d": b1d if b1d is not None else b15}, TFS)
+    frames = {"15m": b15, "1h": b1h if b1h is not None else b15,
+              "1d": b1d if b1d is not None else b15}
+    return FrameEval(
+        "SPY", {("SPY", tf): frame for tf, frame in frames.items()}, TFS)
 
 
 def test_comparison_margin_is_signed_distance():
@@ -75,7 +77,8 @@ def test_windowed_aggregate_margin_is_a_series():
     m = condition_margin({"lhs": {"src": "close"}, "op": ">",
                           "rhs": {"ind": "highest", "of": {"src": "high"},
                                   "window": "ny_open_30"}},
-                         FrameEval({"15m": b}, TFS, vocabulary=vocabulary),
+                         FrameEval("SPY", {("SPY", "15m"): b}, TFS,
+                                   vocabulary=vocabulary),
                          "15m")
     assert isinstance(m, pd.Series) and len(m) == len(b)
 

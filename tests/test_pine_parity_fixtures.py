@@ -56,7 +56,8 @@ def _pine(node: dict, bars: pd.DataFrame, vocabulary) -> pd.Series:
 def _assert_parity(node: dict, bars: pd.DataFrame, window: WindowSpec) -> None:
     vocabulary = core_vocabulary().with_windows(window)
     engine = FrameEval(
-        {"15m": bars}, vocabulary=vocabulary).series(node, "15m")
+        "SPY", {("SPY", "15m"): bars}, vocabulary=vocabulary,
+    ).series(node, "15m")
     pine = _pine(node, bars, vocabulary)
     np.testing.assert_allclose(
         pine.to_numpy(), engine.to_numpy(dtype="float64"),
@@ -105,7 +106,8 @@ def test_a_data_gap_crossing_open_clears_the_completed_weekday_value():
     vocabulary = core_vocabulary().with_windows(london)
     node = {"ind": "highest", "of": {"src": "high"}, "window": "london"}
     engine = FrameEval(
-        {"15m": bars}, vocabulary=vocabulary).series(node, "15m")
+        "SPY", {("SPY", "15m"): bars}, vocabulary=vocabulary,
+    ).series(node, "15m")
     pine = _pine(node, bars, vocabulary)
     local = bars.index.tz_convert("Europe/London")
     before_open = (
@@ -141,7 +143,8 @@ def test_a_data_gap_crossing_close_reveals_the_completed_weekday_value():
     vocabulary = core_vocabulary().with_windows(london)
     node = {"ind": "highest", "of": {"src": "high"}, "window": "london"}
     engine = FrameEval(
-        {"15m": bars}, vocabulary=vocabulary).series(node, "15m")
+        "SPY", {("SPY", "15m"): bars}, vocabulary=vocabulary,
+    ).series(node, "15m")
     pine = _pine(node, bars, vocabulary)
     local = bars.index.tz_convert("Europe/London")
     first_after_close = (
@@ -168,7 +171,8 @@ def test_ny_pm_becomes_visible_on_the_first_bar_at_or_after_its_close(
     vocabulary = core_vocabulary().with_windows(NY_PM)
     node = {"ind": "highest", "of": {"src": "high"}, "window": "ny_pm"}
     engine = FrameEval(
-        {"15m": bars}, vocabulary=vocabulary).series(node, "15m")
+        "SPY", {("SPY", "15m"): bars}, vocabulary=vocabulary,
+    ).series(node, "15m")
     pine = _pine(node, bars, vocabulary)
     local = bars.index.tz_convert("America/New_York")
     first_close = np.flatnonzero(
@@ -189,7 +193,8 @@ def test_an_early_close_partial_does_not_leak_after_the_next_ny_pm_opens():
     vocabulary = core_vocabulary().with_windows(NY_PM)
     node = {"ind": "highest", "of": {"src": "high"}, "window": "ny_pm"}
     engine = FrameEval(
-        {"15m": bars}, vocabulary=vocabulary).series(node, "15m")
+        "SPY", {("SPY", "15m"): bars}, vocabulary=vocabulary,
+    ).series(node, "15m")
     pine = _pine(node, bars, vocabulary)
     np.testing.assert_allclose(
         pine.to_numpy(), engine.to_numpy(dtype="float64"),
@@ -210,7 +215,8 @@ def test_saturday_regular_clock_rows_do_not_reopen_friday_s_xnys_window():
     vocabulary = core_vocabulary().with_windows(NY_AM)
     node = {"ind": "highest", "of": {"src": "high"}, "window": "ny_am"}
     engine = FrameEval(
-        {"15m": bars}, vocabulary=vocabulary).series(node, "15m")
+        "SPY", {("SPY", "15m"): bars}, vocabulary=vocabulary,
+    ).series(node, "15m")
     pine = _pine(node, bars, vocabulary)
     np.testing.assert_allclose(
         pine.to_numpy(), engine.to_numpy(dtype="float64"),
@@ -234,7 +240,8 @@ def test_an_absent_xnys_holiday_does_not_reopen_at_the_same_wall_clock():
         "ind": "last", "of": {"src": "close"}, "window": "postmarket",
     }
     engine = FrameEval(
-        {"15m": bars}, vocabulary=vocabulary).series(node, "15m")
+        "SPY", {("SPY", "15m"): bars}, vocabulary=vocabulary,
+    ).series(node, "15m")
     pine = _pine(node, bars, vocabulary)
     np.testing.assert_allclose(
         pine.to_numpy(), engine.to_numpy(dtype="float64"),
@@ -319,7 +326,8 @@ def test_prior_day_highest_skips_an_absent_holiday():
         "ind": "highest", "of": {"src": "high"}, "window": "prior_day",
     }
     engine = FrameEval(
-        {"15m": bars}, vocabulary=vocabulary).series(node, "15m")
+        "SPY", {("SPY", "15m"): bars}, vocabulary=vocabulary,
+    ).series(node, "15m")
     pine = _pine(node, bars, vocabulary)
     monday = local.date == pd.Timestamp("2026-07-06").date()
     tuesday = local.date == pd.Timestamp("2026-07-07").date()
@@ -366,7 +374,8 @@ def test_prior_day_lowest_keeps_an_observed_early_close_session():
         "ind": "lowest", "of": {"src": "low"}, "window": "prior_day",
     }
     engine = FrameEval(
-        {"15m": bars}, vocabulary=vocabulary).series(node, "15m")
+        "SPY", {("SPY", "15m"): bars}, vocabulary=vocabulary,
+    ).series(node, "15m")
     pine = _pine(node, bars, vocabulary)
     monday = local.date == pd.Timestamp("2026-11-30").date()
     tuesday = local.date == pd.Timestamp("2026-12-01").date()
@@ -458,7 +467,9 @@ def test_a_selected_frame_runs_the_window_state_inside_request_security():
         {"60": (hourly, pd.Timedelta(hours=1))})
     pine = as_series([row["nk_selected_probe"] for row in rows], chart)
     engine = FrameEval(
-        {"15m": chart, "1h": hourly}, vocabulary=vocabulary,
+        "SPY",
+        {("SPY", "15m"): chart, ("SPY", "1h"): hourly},
+        vocabulary=vocabulary,
     ).series(node, "15m")
     np.testing.assert_allclose(
         pine.to_numpy(), engine.to_numpy(dtype="float64"),

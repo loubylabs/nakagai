@@ -65,7 +65,7 @@ def test_injected_term_is_used_by_validation_and_frame_eval(make_bars):
     bars = make_bars(n=30)
     spec = _spec({"ind": "double_close"})
     assert validate_spec(spec, vocab) == []
-    assert FrameEval({"15m": bars}, vocabulary=vocab).series(
+    assert FrameEval("SPY", {("SPY", "15m"): bars}, vocabulary=vocab).series(
         {"ind": "double_close"}, "15m"
     ).equals(bars.close * 2)
 
@@ -106,7 +106,7 @@ def test_a_positional_vocabulary_cannot_bind_to_an_earlier_parameter():
         "validate_condition_group":
             lambda: validate_condition_group(group, "conditions", vocab),
         "FrameEval":
-            lambda: FrameEval({}, DEFAULT_TIMEFRAMES, vocab),
+            lambda: FrameEval("SPY", {}, DEFAULT_TIMEFRAMES, vocab),
         "build_context":
             lambda: build_context(None, "SPY", now, DEFAULT_TIMEFRAMES, vocab),
         "render_system_prompt":
@@ -256,7 +256,8 @@ def test_a_condition_typed_arg_gets_the_evaluator_injected_by_type(
     node = {"prim": "count_where",
             "when": {"lhs": {"src": "close"}, "op": ">", "rhs": {"src": "open"}}}
     assert validate_spec(_spec(node), vocab) == []
-    out = FrameEval({"15m": bars}, vocabulary=vocab).series(node, "15m")
+    out = FrameEval(
+        "SPY", {("SPY", "15m"): bars}, vocabulary=vocab).series(node, "15m")
     assert out.iloc[-1] == 5.0
 
 
@@ -294,7 +295,8 @@ def test_an_end_anchored_primitive_gets_the_evaluator_injected_too(make_bars):
     node = {"prim": "count_end",
             "when": {"lhs": {"src": "close"}, "op": ">", "rhs": {"src": "open"}}}
     assert validate_spec(_spec(node), vocab) == []
-    out = FrameEval({"15m": bars}, vocabulary=vocab).series(node, "15m")
+    out = FrameEval(
+        "SPY", {("SPY", "15m"): bars}, vocabulary=vocab).series(node, "15m")
     # row i is the count over bars[:i+1], so the last row counts every bar and
     # the first counts one: a broadcast tail value would read 30.0 on both.
     assert out.iloc[-1] == 30.0 and out.iloc[0] == 1.0

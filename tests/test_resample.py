@@ -253,7 +253,11 @@ def test_the_engine_gates_a_4h_bar_at_label_plus_four_hours(tmp_path, make_bars)
     noon = pd.Timestamp("2026-06-02 12:00", tz=ET)
     assert noon in cache.load("SPY", "4h").index                    # premise
 
-    before = build_context(cache, "SPY", pd.Timestamp("2026-06-02 15:45", tz=ET))
+    before = build_context(
+        cache, "SPY", pd.Timestamp("2026-06-02 15:45", tz=ET),
+        reference_pairs=())
     assert noon not in before.bars["4h"].index
-    on_the_bell = build_context(cache, "SPY", pd.Timestamp("2026-06-02 16:00", tz=ET))
+    on_the_bell = build_context(
+        cache, "SPY", pd.Timestamp("2026-06-02 16:00", tz=ET),
+        reference_pairs=())
     assert on_the_bell.bars["4h"].index[-1] == noon

@@ -635,19 +635,25 @@ def _spec_margins(spec: Mapping[str, JSONValue], bars,
     frames = dict(bars.frames)
     axis = bars.timeframe
     index = pd.DatetimeIndex(list(bars.labels))
+    timeframes = tuple(dict.fromkeys(
+        timeframe for _, timeframe in frames
+    ))
     evaluator = FrameEval(
+        bars.symbol,
         frames,
         TimeframeSet(
             driving=BASE_TIMEFRAME,
-            higher=tuple(tf for tf in frames if tf != BASE_TIMEFRAME),
+            higher=tuple(tf for tf in timeframes if tf != BASE_TIMEFRAME),
             deltas=DEFAULT_TIMEFRAMES.deltas,
             session_aligned=DEFAULT_TIMEFRAMES.session_aligned,
         ),
         vocabulary=vocabulary_factory(),
     )
-    rows = frames[axis].index
-    evaluator.set_span(axis, int(rows.searchsorted(index[0], side="left")),
-                       int(rows.searchsorted(index[-1], side="right")))
+    rows = frames[(bars.symbol, axis)].index
+    evaluator.set_span(
+        bars.symbol, axis, int(rows.searchsorted(index[0], side="left")),
+        int(rows.searchsorted(index[-1], side="right")),
+    )
     margin = spec_margin(spec, evaluator, index)
     if margin.empty:
         return (None,) * len(index)

@@ -18,7 +18,7 @@ def condition_margin(cond: dict, fe, tf: str) -> pd.Series:
     """Signed distance of a condition: positive = holds, magnitude = how
     strongly. Crosses grade the current gap; the cross event itself stays a
     signal-path concept."""
-    index = fe.on(tf).index
+    index = fe.on(fe.driving_symbol, tf).index
     lhs, rhs = fe.series(cond["lhs"], tf), fe.series(cond["rhs"], tf)
     if not isinstance(lhs, pd.Series):
         lhs = pd.Series(lhs, index=index)

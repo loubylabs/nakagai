@@ -40,7 +40,9 @@ def _fe():
     c = pd.Series(100 + rng.normal(0, 1, 120).cumsum(), index=idx)
     bars = pd.DataFrame({"open": c, "high": c + 0.5, "low": c - 0.5,
                          "close": c, "volume": 1000.0}, index=idx)
-    return FrameEval({"15m": bars, "1h": bars, "1d": bars}, TFS), bars
+    return FrameEval(
+        "SPY", {("SPY", tf): bars for tf in ("15m", "1h", "1d")}, TFS,
+    ), bars
 
 
 def test_eval_matches_direct_indicator_calls():

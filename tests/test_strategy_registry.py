@@ -319,6 +319,7 @@ def test_a_rules_definition_declares_exact_symbol_timeframe_pairs():
     }
     definition = rules_definition("relative_scope", "8a" * 32, spec=spec)
     declared = definition.dependencies({})
+    assert declared.timeframes == ("15m",)
     assert declared.reference_pairs == (("QQQ", "1d"), ("SPY", "15m"))
     assert ("SPY", "1d") not in declared.reference_pairs
     assert ("QQQ", "15m") not in declared.reference_pairs

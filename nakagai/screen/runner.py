@@ -9,9 +9,14 @@ hidden."""
 import pandas as pd
 
 from nakagai.data.resample import DERIVED
+from nakagai.data.schema import DEFAULT_TIMEFRAMES, TimeframeSet
 from nakagai.data.sync import derive_incremental, fetch_incremental
 from nakagai.engine.context import build_context
-from nakagai.screen.spec import max_lookback, referenced_timeframes
+from nakagai.screen.spec import (
+    max_lookback,
+    referenced_timeframes,
+    screen_reference_pairs,
+)
 from nakagai.strategies.rules.vocabulary import Vocabulary, resolve_vocabulary
 
 
@@ -32,41 +37,60 @@ def run_screen(spec: dict, symbols: list[str], cache, now=None,
     vocabulary = resolve_vocabulary(vocabulary)
     tf = spec.get("tf", "1d")
     needed = referenced_timeframes(spec)
-    fetched_needed = {tf for tf in needed if tf not in DERIVED}
-    fetched_needed.update(DERIVED[tf] for tf in needed if tf in DERIVED)
+    reference_pairs = screen_reference_pairs(spec)
+    context_tfs = TimeframeSet(
+        driving=DEFAULT_TIMEFRAMES.driving,
+        higher=tuple(
+            timeframe for timeframe in DEFAULT_TIMEFRAMES.higher
+            if timeframe in needed
+        ),
+        deltas=DEFAULT_TIMEFRAMES.deltas,
+        session_aligned=DEFAULT_TIMEFRAMES.session_aligned,
+    )
     lookback = max_lookback(spec)
     rows: list[dict] = []
     errors: list[str] = []
     skipped = 0
     for sym in sorted(symbols):
         sync_note = ""
+        pairs = list(dict.fromkeys(
+            [(sym, timeframe) for timeframe in sorted(needed)]
+            + list(reference_pairs)
+        ))
         if providers:
-            for sync_tf, provider in providers.items():
-                if sync_tf not in fetched_needed:
+            for pair_symbol, timeframe in pairs:
+                sync_tf = DERIVED.get(timeframe, timeframe)
+                provider = providers.get(sync_tf)
+                if provider is None:
                     continue
                 # A run-time sync only has sync_days of headroom by default,
                 # which a long lookback (e.g. sma200 on 1d) can't fit in.
                 # Intraday timeframes have no such lookback pressure here.
                 fetch_days = max(sync_days, lookback * 2) if sync_tf == "1d" else sync_days
                 try:
-                    fetch_incremental(cache, provider, sym, sync_tf,
+                    fetch_incremental(cache, provider, pair_symbol, sync_tf,
                                       now - pd.Timedelta(days=fetch_days), now)
                 except Exception as e:
                     # A transient sync failure shouldn't cost us the cached
                     # bars we already have: keep going and let the row's
                     # note carry the failure so cached bars still evaluate.
                     note = f"sync failed: {e}"
-                    errors.append(f"{sym}: {note}")
+                    errors.append(f"{pair_symbol}: {note}")
                     sync_note = note
-        for derived_tf in sorted(tf for tf in needed if tf in DERIVED):
+        for pair_symbol, derived_tf in (
+            pair for pair in pairs if pair[1] in DERIVED
+        ):
             try:
-                derive_incremental(cache, sym, derived_tf)
+                derive_incremental(cache, pair_symbol, derived_tf)
             except Exception as e:
                 note = f"sync failed: {e}"
-                errors.append(f"{sym}: {note}")
+                errors.append(f"{pair_symbol}: {note}")
                 sync_note = note
         try:
-            ctx = build_context(cache, sym, now, vocabulary=vocabulary)
+            ctx = build_context(
+                cache, sym, now, context_tfs, reference_pairs=reference_pairs,
+                vocabulary=vocabulary,
+            )
             bars = ctx.bars[tf]
             if bars.empty:
                 note = f"no {tf} bars cached"

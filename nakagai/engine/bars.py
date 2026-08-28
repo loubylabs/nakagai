@@ -8,12 +8,13 @@ into the mapping. `prepare_portfolio_bars` then takes a second, engine-owned
 copy that no caller has ever held a reference to.
 
 Preparation is the strict-refusal preflight. Every declared frame must exist,
-carry a UTC index that is exactly the labels the schedule declares up to that
-symbol's boundary, hold the five binary64 OHLCV columns, and satisfy bar
-geometry. Any failure raises `ReplayInputError(code="missing_required_bar")`
-and the whole replay is refused, before a strategy could have been built. The
-engine never forward-fills a price, drops a symbol, or settles a partial
-portfolio.
+hold the five binary64 OHLCV columns, and satisfy bar geometry. Traded and
+benchmark frames carry every scheduled label through their boundary. External
+reference frames may carry any scheduled subset, including no rows; the engine
+reindexes that valid subset onto the schedule and inserts null rows internally.
+Any failure raises `ReplayInputError(code="missing_required_bar")` and the whole
+replay is refused before a strategy could have been built. The engine never
+forward-fills a price, drops a symbol, or settles a partial portfolio.
 
 Two boundaries exist because two kinds of symbol have different jobs. A traded
 symbol is read by the IC lens after the trading replay ends, so it carries
@@ -225,6 +226,7 @@ def prepare_portfolio_bars(
                 "timeframe", timeframe=timeframe,
             )
     required = _required_labels(request, schedule, dependencies)
+    exact = _exact_pairs(request, dependencies)
     owned = bars._engine_copy()
     prepared: dict[tuple[str, str], pd.DataFrame] = {}
     for key in sorted(required, key=_key_order):
@@ -235,8 +237,11 @@ def prepare_portfolio_bars(
                 symbol=key[0], timeframe=key[1],
             )
         normalized = _normalized_frame(frame, key)
-        _require_scheduled_labels(normalized, key, required[key])
-        prepared[key] = normalized
+        if key in exact:
+            _require_scheduled_labels(normalized, key, required[key])
+            prepared[key] = normalized
+        else:
+            prepared[key] = _reindex_external(normalized, key, required[key])
     surplus = sorted(key for key in owned if key not in required)
     if surplus:
         raise _refuse(
@@ -256,15 +261,27 @@ def _required_labels(
         for timeframe in dependencies.timeframes:
             required[(symbol, timeframe)] = _scheduled_labels(
                 schedule, timeframe, request.ic_tail_end)
-    context_boundary = request.window.test_end
-    for symbol, timeframe in dependencies.reference_pairs:
-        required.setdefault((symbol, timeframe), _scheduled_labels(
-            schedule, timeframe, context_boundary))
     benchmark = request.benchmark.symbol
     if benchmark is not None:
         required.setdefault((benchmark, BASE_TIMEFRAME), _scheduled_labels(
-            schedule, BASE_TIMEFRAME, context_boundary))
+            schedule, BASE_TIMEFRAME, request.window.test_end))
+    for symbol, timeframe in dependencies.reference_pairs:
+        required.setdefault((symbol, timeframe), _scheduled_labels(
+            schedule, timeframe, request.window.test_end))
     return required
+
+
+def _exact_pairs(
+    request: PortfolioReplayRequest, dependencies: ReplayDependencies,
+) -> set[tuple[str, str]]:
+    """Pairs whose traded or benchmark role requires exact label coverage."""
+    exact = {
+        (symbol, timeframe)
+        for symbol in request.symbols for timeframe in dependencies.timeframes
+    }
+    if request.benchmark.symbol is not None:
+        exact.add((request.benchmark.symbol, BASE_TIMEFRAME))
+    return exact
 
 
 def _scheduled_labels(
@@ -367,7 +384,7 @@ def _require_scheduled_labels(
     `build_scheduled_context` depends on it: row `i` of a prepared frame is
     scheduled label `i`, or the cut would silently show the wrong bars.
     """
-    expected = pd.DatetimeIndex(list(labels), tz="UTC")
+    expected = pd.DatetimeIndex(list(labels), tz="UTC", name=frame.index.name)
     if frame.index.equals(expected):
         return
     absent = expected.difference(frame.index)
@@ -378,3 +395,19 @@ def _require_scheduled_labels(
         first_absent=absent[0].isoformat() if len(absent) else None,
         first_surplus=surplus[0].isoformat() if len(surplus) else None,
     )
+
+
+def _reindex_external(
+    frame: pd.DataFrame, key: tuple[str, str], labels: tuple[pd.Timestamp, ...],
+) -> pd.DataFrame:
+    """Place a valid external subset on the schedule without carrying values."""
+    expected = pd.DatetimeIndex(list(labels), tz="UTC", name=frame.index.name)
+    surplus = frame.index.difference(expected)
+    if len(surplus):
+        raise _refuse(
+            "an external frame carries only scheduled labels", "labels",
+            symbol=key[0], timeframe=key[1], expected=len(expected),
+            actual=len(frame.index), first_absent=None,
+            first_surplus=surplus[0].isoformat(),
+        )
+    return frame.reindex(expected)
