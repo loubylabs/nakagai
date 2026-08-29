@@ -16,10 +16,12 @@ from __future__ import annotations
 
 import json
 import os
+from decimal import Decimal
 from typing import NamedTuple, Protocol
 
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+_COST_SCALE = 1_000_000_000_000
 
 
 class ModelReply(NamedTuple):
@@ -41,6 +43,8 @@ class ModelReply(NamedTuple):
     output_tokens: int
     cache_read_tokens: int
     cache_write_tokens: int
+    cost_numerator: int
+    cost_from_provider: bool
     error: str
 
 
@@ -78,7 +82,8 @@ def openrouter_complete(*, model: str, api_key: str | None = None,
                  max_tokens: int) -> ModelReply:
         key = api_key or os.environ.get("OPENROUTER_API_KEY", "")
         if not key:
-            return ModelReply("", 0, 0, 0, 0, "no OPENROUTER_API_KEY is configured")
+            return ModelReply("", 0, 0, 0, 0, 0, False,
+                              "no OPENROUTER_API_KEY is configured")
         body: dict = {
             "model": model,
             "max_tokens": max_tokens,
@@ -95,10 +100,21 @@ def openrouter_complete(*, model: str, api_key: str | None = None,
                     OPENROUTER_URL, json=body,
                     headers={"Authorization": f"Bearer {key}"})
         except Exception as e:  # noqa: BLE001 - transport, nothing arrived
-            return ModelReply("", 0, 0, 0, 0, f"model call failed: {e}")
+            return ModelReply("", 0, 0, 0, 0, 0, False,
+                              f"model call failed: {e}")
         return _reply(resp)
 
     return complete
+
+
+def _cost_numerator(usage: dict) -> tuple[int, bool]:
+    cost = usage.get("cost")
+    if not isinstance(cost, (int, float)) or isinstance(cost, bool):
+        return 0, False
+    amount = Decimal(repr(cost))
+    if not amount.is_finite() or amount < 0:
+        return 0, False
+    return int(amount * _COST_SCALE), True
 
 
 def _reply(resp) -> ModelReply:
@@ -120,18 +136,20 @@ def _reply(resp) -> ModelReply:
         int((usage.get("prompt_tokens_details") or {}).get("cached_tokens") or 0),
         0,
     )
+    cost_numerator, cost_from_provider = _cost_numerator(usage)
     status = getattr(resp, "status_code", 0)
     if status < 200 or status >= 300:
         detail = doc.get("error") or {}
         message = detail.get("message") if isinstance(detail, dict) else detail
         return ModelReply(
-            "", *counts,
+            "", *counts, cost_numerator, cost_from_provider,
             f"model call failed: HTTP {status}: {message or 'no detail'}")
     try:
         choice = (doc.get("choices") or [{}])[0]
         text = (choice.get("message") or {}).get("content") or ""
     except Exception:  # noqa: BLE001
-        return ModelReply("", *counts, "model reply had no readable content")
+        return ModelReply("", *counts, cost_numerator, cost_from_provider,
+                          "model reply had no readable content")
     if not isinstance(text, str):
         text = json.dumps(text)
-    return ModelReply(text, *counts, "")
+    return ModelReply(text, *counts, cost_numerator, cost_from_provider, "")

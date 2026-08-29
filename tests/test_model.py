@@ -89,6 +89,7 @@ def test_a_failing_response_still_reports_what_it_billed(monkeypatch):
     assert reply.text == ""
 
 
+# Production break caught: a transport exception could invent a provider bill.
 def test_a_transport_failure_reports_zero_because_nothing_arrived(monkeypatch):
     """The other half, and the only case where zeros are honest."""
     import httpx
@@ -114,6 +115,7 @@ def test_a_transport_failure_reports_zero_because_nothing_arrived(monkeypatch):
 
     assert "model call failed" in reply.error
     assert reply.input_tokens == 0 and reply.output_tokens == 0
+    assert (reply.cost_numerator, reply.cost_from_provider) == (0, False)
 
 
 def test_the_system_prompt_rides_as_a_message_not_a_block_list(monkeypatch):
@@ -149,6 +151,7 @@ def test_no_pin_sends_no_provider_key(monkeypatch):
     assert "provider" not in calls[0]["body"]
 
 
+# Production break caught: a locally refused call could claim a provider bill.
 def test_a_missing_key_refuses_without_calling_out(monkeypatch):
     """Constructing costs nothing without a key; the refusal is at call time."""
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
@@ -157,6 +160,7 @@ def test_a_missing_key_refuses_without_calling_out(monkeypatch):
     reply = complete(system="s", messages=[], max_tokens=10)
 
     assert "OPENROUTER_API_KEY" in reply.error
+    assert (reply.cost_numerator, reply.cost_from_provider) == (0, False)
 
 
 def test_the_router_is_asked_to_report_what_it_charged(monkeypatch):
@@ -176,6 +180,7 @@ def test_cached_prompt_tokens_are_reported_when_the_router_sends_them(monkeypatc
     assert reply.cache_read_tokens == 40
 
 
+# Production break caught: malformed content could discard arrived usage.
 def test_an_unreadable_body_keeps_the_counts_it_could_read(monkeypatch):
     """Nothing after a response arrives may raise, and nothing may lose the
     cost on its way to complaining about the text."""
@@ -186,3 +191,34 @@ def test_an_unreadable_body_keeps_the_counts_it_could_read(monkeypatch):
 
     assert reply.input_tokens == 5 and reply.output_tokens == 2
     assert reply.text == ""
+
+
+# Production break caught: successful responses could discard usage.cost.
+def test_an_arrived_reply_carries_the_routers_exact_bill():
+    reply = model._reply(_ok(cost=0.00003256))
+
+    assert reply.cost_numerator == 32_560_000
+    assert reply.cost_from_provider is True
+
+
+# Production break caught: non-2xx responses could discard usage.cost.
+def test_a_failing_response_keeps_its_exact_bill():
+    reply = model._reply(_Resp(400, {
+        "error": {"message": "bad request"},
+        "usage": {"prompt_tokens": 9, "completion_tokens": 2,
+                  "cost": 0.000001234567},
+    }))
+
+    assert reply.error
+    assert reply.cost_numerator == 1_234_567
+    assert reply.cost_from_provider is True
+
+
+@pytest.mark.parametrize("cost", [None, True, "0.000001", float("nan"),
+                                  float("inf"), -0.000001])
+# Production break caught: malformed provider prices could raise or erase usage.
+def test_an_invalid_provider_cost_keeps_arrived_token_counts(cost):
+    reply = model._reply(_ok(cost=cost))
+
+    assert (reply.cost_numerator, reply.cost_from_provider) == (0, False)
+    assert (reply.input_tokens, reply.output_tokens) == (11, 7)

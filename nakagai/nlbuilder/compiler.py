@@ -43,6 +43,8 @@ class CompileResult:
     attempts: int = 0
     model: str = ""
     error: str = ""
+    cost_numerator: int = 0
+    cost_from_provider: bool = False
     usage: dict = field(default_factory=lambda: {
         "input_tokens": 0, "output_tokens": 0,
         "cache_read_tokens": 0, "cache_write_tokens": 0})
@@ -93,6 +95,12 @@ def _add_usage(result: CompileResult, reply: ModelReply) -> None:
     result.usage["output_tokens"] += reply.output_tokens
     result.usage["cache_read_tokens"] += reply.cache_read_tokens
     result.usage["cache_write_tokens"] += reply.cache_write_tokens
+    result.cost_numerator += reply.cost_numerator
+    result.cost_from_provider = (
+        reply.cost_from_provider
+        if result.attempts == 1
+        else result.cost_from_provider and reply.cost_from_provider
+    )
 
 
 def _check(kind: str, spec, plays: Mapping[str, Mapping] | None,
@@ -152,6 +160,7 @@ def compile_strategy(description: str, current_spec: dict | None = None,
             # the callable is the caller's, so this loop cannot assume it obeys.
             # A raise here would throw away every count already accumulated.
             result.error = f"model call failed: {e}"
+            result.cost_from_provider = False
             return result
         # Bill first, read second. The counts are a fact about a call that
         # already happened, so nothing below may reach a return ahead of them.
