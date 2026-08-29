@@ -47,6 +47,7 @@ def compile_screen(description: str, client=None, model: str = MODEL,
             # obeys. A raise escaping here would take every count already
             # accumulated by the earlier rounds with it.
             result.error = f"model call failed: {e}"
+            result.cost_from_provider = False
             return result
         # Bill first, read second: the counts are a fact about a call that
         # already happened, and a failure must not lose them on the way out.

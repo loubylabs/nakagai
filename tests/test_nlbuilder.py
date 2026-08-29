@@ -82,16 +82,31 @@ class FakeModel:
     delivered as a message.
     """
 
-    def __init__(self, replies, tokens=TOKENS, error=""):
+    def __init__(self, replies, tokens=TOKENS, error="", cost_numerator=0,
+                 cost_from_provider=False):
         self._replies = list(replies)
         self._tokens = tokens
         self._error = error
+        self._cost_numerator = cost_numerator
+        self._cost_from_provider = cost_from_provider
         self.requests = []
 
     def __call__(self, *, system, messages, max_tokens):
         self.requests.append({"system": system, "messages": messages,
                               "max_tokens": max_tokens})
-        return ModelReply(self._replies.pop(0), *self._tokens, self._error)
+        return ModelReply(self._replies.pop(0), *self._tokens,
+                          self._cost_numerator, self._cost_from_provider,
+                          self._error)
+
+
+class _MeteredReplies:
+    """A complete callable that returns the arrived replies it was given."""
+
+    def __init__(self, replies):
+        self._replies = list(replies)
+
+    def __call__(self, *, system, messages, max_tokens):
+        return self._replies.pop(0)
 
 
 def test_prompt_renders_registries_and_is_deterministic():
@@ -579,6 +594,30 @@ def test_usage_present_on_not_expressible():
     assert res.not_expressible and res.usage["input_tokens"] == 100
 
 
+# Production break caught: retry compilation could drop an arrived exact bill.
+def test_two_exact_bills_sum_when_validation_retries():
+    bad = json.dumps({"spec": {**GOOD_SPEC, "timeframe": "2h"}})
+    exact_two_attempt_result = compile_strategy("x", client=_MeteredReplies([
+        ModelReply(bad, *TOKENS, 1_111_111, True, ""),
+        ModelReply(json.dumps({"spec": GOOD_SPEC}), *TOKENS, 2_222_222, True, ""),
+    ]))
+
+    assert exact_two_attempt_result.cost_numerator == 3_333_333
+    assert exact_two_attempt_result.cost_from_provider is True
+
+
+# Production break caught: an unbilled retry could still claim full invoice evidence.
+def test_a_synthetic_retry_revokes_exact_bill_provenance():
+    bad = json.dumps({"spec": {**GOOD_SPEC, "timeframe": "2h"}})
+    mixed_two_attempt_result = compile_strategy("x", client=_MeteredReplies([
+        ModelReply(bad, *TOKENS, 1_111_111, True, ""),
+        ModelReply(json.dumps({"spec": GOOD_SPEC}), *TOKENS, 0, False, ""),
+    ]))
+
+    assert mixed_two_attempt_result.cost_numerator == 1_111_111
+    assert mixed_two_attempt_result.cost_from_provider is False
+
+
 BAD_SPEC_REPLY = json.dumps({"spec": {**GOOD_SPEC, "timeframe": "2h"}})
 
 
@@ -595,8 +634,8 @@ class _BilledFailure:
     def __call__(self, *, system, messages, max_tokens):
         self.calls += 1
         if self.calls == 1:
-            return ModelReply(BAD_SPEC_REPLY, *TOKENS, "")
-        return ModelReply("", *self._tokens, self._error)
+            return ModelReply(BAD_SPEC_REPLY, *TOKENS, 0, False, "")
+        return ModelReply("", *self._tokens, 0, False, self._error)
 
 
 def test_a_billed_failure_records_its_tokens_before_the_error():
@@ -635,15 +674,18 @@ class _RaisingModel:
     callable belongs to the caller, so the loop cannot assume it obeys. A raise
     escaping here would take every count already accumulated with it."""
 
-    def __init__(self, first_reply):
+    def __init__(self, first_reply, cost_numerator=0, cost_from_provider=False):
         self._sent = False
         self._first = first_reply
+        self._cost_numerator = cost_numerator
+        self._cost_from_provider = cost_from_provider
 
     def __call__(self, *, system, messages, max_tokens):
         if self._sent:
             raise RuntimeError("api down")
         self._sent = True
-        return ModelReply(self._first, *TOKENS, "")
+        return ModelReply(self._first, *TOKENS, self._cost_numerator,
+                          self._cost_from_provider, "")
 
 
 def test_a_callable_that_raises_returns_an_error_result_with_partial_usage():
@@ -652,6 +694,15 @@ def test_a_callable_that_raises_returns_an_error_result_with_partial_usage():
     assert res.spec is None
     assert res.attempts == 2                       # the raising attempt counts
     assert res.usage["input_tokens"] == 100        # attempt 1's usage survives
+
+
+# Production break caught: a callable exception could erase prior cost evidence.
+def test_a_raised_retry_revokes_exact_bill_provenance():
+    raised_after_exact_result = compile_strategy(
+        "x", client=_RaisingModel(BAD_SPEC_REPLY, 1_111_111, True))
+
+    assert raised_after_exact_result.cost_numerator == 1_111_111
+    assert raised_after_exact_result.cost_from_provider is False
 
 
 def test_no_client_means_openrouter_on_the_pinned_endpoint(monkeypatch):

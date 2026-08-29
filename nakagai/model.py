@@ -6,20 +6,24 @@ list and made "run the builder" mean "have an Anthropic key". Swapping that for
 another SDK would have moved the coupling rather than removed it.
 
 So a compiler is handed a CALLABLE instead. It knows nothing about providers,
-HTTP, credentials or money: it passes a system prompt, some messages and a
-token ceiling, and gets back text and the counts its caller needs to bill. The
-platform that owns the ledger builds the callable; anyone else can pass their
-own, and `openrouter_complete` below is the batteries-included one.
+HTTP, or credentials: it passes a system prompt, some messages and a token
+ceiling, and gets back text, token counts, and a cost numerator. The numerator
+is trillionths of a dollar, and its provenance says whether every completed
+attempt reported its exact provider bill. The platform that owns the ledger
+builds the callable; anyone else can pass their own, and `openrouter_complete`
+below is the batteries-included one.
 """
 
 from __future__ import annotations
 
 import json
 import os
+from decimal import Decimal
 from typing import NamedTuple, Protocol
 
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+_COST_SCALE = 1_000_000_000_000
 
 
 class ModelReply(NamedTuple):
@@ -34,6 +38,9 @@ class ModelReply(NamedTuple):
     A transport failure that never reached the provider is the other case, and
     it is the only one that reports zeros: nothing was billed because nothing
     arrived.
+
+    `cost_numerator` is in trillionths of a dollar. `cost_from_provider` is
+    true only when this arrived response reported its exact bill.
     """
 
     text: str
@@ -41,6 +48,8 @@ class ModelReply(NamedTuple):
     output_tokens: int
     cache_read_tokens: int
     cache_write_tokens: int
+    cost_numerator: int
+    cost_from_provider: bool
     error: str
 
 
@@ -78,7 +87,8 @@ def openrouter_complete(*, model: str, api_key: str | None = None,
                  max_tokens: int) -> ModelReply:
         key = api_key or os.environ.get("OPENROUTER_API_KEY", "")
         if not key:
-            return ModelReply("", 0, 0, 0, 0, "no OPENROUTER_API_KEY is configured")
+            return ModelReply("", 0, 0, 0, 0, 0, False,
+                              "no OPENROUTER_API_KEY is configured")
         body: dict = {
             "model": model,
             "max_tokens": max_tokens,
@@ -95,10 +105,28 @@ def openrouter_complete(*, model: str, api_key: str | None = None,
                     OPENROUTER_URL, json=body,
                     headers={"Authorization": f"Bearer {key}"})
         except Exception as e:  # noqa: BLE001 - transport, nothing arrived
-            return ModelReply("", 0, 0, 0, 0, f"model call failed: {e}")
+            return ModelReply("", 0, 0, 0, 0, 0, False,
+                              f"model call failed: {e}")
         return _reply(resp)
 
     return complete
+
+
+def _cost_numerator(usage: dict) -> tuple[int, bool]:
+    cost = usage.get("cost")
+    if not isinstance(cost, (int, float)) or isinstance(cost, bool):
+        return 0, False
+    amount = Decimal(repr(cost))
+    if not amount.is_finite() or amount < 0:
+        return 0, False
+    return int(amount * _COST_SCALE), True
+
+
+def _token_count(value) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError, OverflowError):
+        return 0
 
 
 def _reply(resp) -> ModelReply:
@@ -113,11 +141,19 @@ def _reply(resp) -> ModelReply:
         doc = resp.json()
     except Exception:  # noqa: BLE001
         doc = {}
+    if not isinstance(doc, dict):
+        doc = {}
     usage = doc.get("usage") or {}
+    if not isinstance(usage, dict):
+        usage = {}
+    prompt_details = usage.get("prompt_tokens_details") or {}
+    if not isinstance(prompt_details, dict):
+        prompt_details = {}
+    cost_numerator, cost_from_provider = _cost_numerator(usage)
     counts = (
-        int(usage.get("prompt_tokens") or 0),
-        int(usage.get("completion_tokens") or 0),
-        int((usage.get("prompt_tokens_details") or {}).get("cached_tokens") or 0),
+        _token_count(usage.get("prompt_tokens")),
+        _token_count(usage.get("completion_tokens")),
+        _token_count(prompt_details.get("cached_tokens")),
         0,
     )
     status = getattr(resp, "status_code", 0)
@@ -125,13 +161,14 @@ def _reply(resp) -> ModelReply:
         detail = doc.get("error") or {}
         message = detail.get("message") if isinstance(detail, dict) else detail
         return ModelReply(
-            "", *counts,
+            "", *counts, cost_numerator, cost_from_provider,
             f"model call failed: HTTP {status}: {message or 'no detail'}")
     try:
         choice = (doc.get("choices") or [{}])[0]
         text = (choice.get("message") or {}).get("content") or ""
     except Exception:  # noqa: BLE001
-        return ModelReply("", *counts, "model reply had no readable content")
+        return ModelReply("", *counts, cost_numerator, cost_from_provider,
+                          "model reply had no readable content")
     if not isinstance(text, str):
         text = json.dumps(text)
-    return ModelReply(text, *counts, "")
+    return ModelReply(text, *counts, cost_numerator, cost_from_provider, "")

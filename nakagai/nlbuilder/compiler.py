@@ -43,6 +43,8 @@ class CompileResult:
     attempts: int = 0
     model: str = ""
     error: str = ""
+    cost_numerator: int = 0
+    cost_from_provider: bool = False
     usage: dict = field(default_factory=lambda: {
         "input_tokens": 0, "output_tokens": 0,
         "cache_read_tokens": 0, "cache_write_tokens": 0})
@@ -81,18 +83,30 @@ def _parse(text: str) -> dict:
 
 
 def _add_usage(result: CompileResult, reply: ModelReply) -> None:
-    """Add one reply's counts to the running total.
+    """Add one reply's usage and bill evidence to the running total.
 
     Every reply that ARRIVED is added, a failing one included: the provider
     charged for it either way. Reporting zero there would record a billed call
     as free, and a caller settling a reserve against `usage` would never see
     the real amount. Only a transport failure that never reached a provider
     carries zeros, and it carries them honestly.
+
+    `cost_numerator` sums reported trillionths of a dollar. The aggregate is a
+    lower bound whenever `cost_from_provider` is false: it keeps every exact
+    numerator that arrived, but at least one attempt supplied no exact bill.
+    Provenance is true only when every completed attempt reported its exact
+    provider bill.
     """
     result.usage["input_tokens"] += reply.input_tokens
     result.usage["output_tokens"] += reply.output_tokens
     result.usage["cache_read_tokens"] += reply.cache_read_tokens
     result.usage["cache_write_tokens"] += reply.cache_write_tokens
+    result.cost_numerator += reply.cost_numerator
+    result.cost_from_provider = (
+        reply.cost_from_provider
+        if result.attempts == 1
+        else result.cost_from_provider and reply.cost_from_provider
+    )
 
 
 def _check(kind: str, spec, plays: Mapping[str, Mapping] | None,
@@ -152,6 +166,7 @@ def compile_strategy(description: str, current_spec: dict | None = None,
             # the callable is the caller's, so this loop cannot assume it obeys.
             # A raise here would throw away every count already accumulated.
             result.error = f"model call failed: {e}"
+            result.cost_from_provider = False
             return result
         # Bill first, read second. The counts are a fact about a call that
         # already happened, so nothing below may reach a return ahead of them.

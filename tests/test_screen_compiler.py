@@ -50,25 +50,34 @@ class _FakeModel:
     delivered as a message.
     """
 
-    def __init__(self, replies, tokens=(10, 5, 0, 0), error=""):
+    def __init__(self, replies, tokens=(10, 5, 0, 0), error="",
+                 cost_numerator=0, cost_from_provider=False):
         self._replies = list(replies)
         self._tokens = tokens
         self._error = error
+        self._cost_numerator = cost_numerator
+        self._cost_from_provider = cost_from_provider
         self.calls = []
 
     def __call__(self, *, system, messages, max_tokens):
         self.calls.append({"system": system, "messages": messages,
                            "max_tokens": max_tokens})
-        return ModelReply(self._replies.pop(0), *self._tokens, self._error)
+        return ModelReply(self._replies.pop(0), *self._tokens,
+                          self._cost_numerator, self._cost_from_provider,
+                          self._error)
 
 
+# Production break caught: the shared usage adder could omit provider cost.
 def test_compile_screen_happy_path():
-    client = _FakeModel([json.dumps({"spec": GOOD_SPEC, "clarifications": ["assumed daily"]})])
+    client = _FakeModel(
+        [json.dumps({"spec": GOOD_SPEC, "clarifications": ["assumed daily"]})],
+        cost_numerator=1_111_111, cost_from_provider=True)
     r = compile_screen("oversold on the daily", client=client)
     assert r.spec == GOOD_SPEC
     assert r.readback.startswith("Screen on 1d bars")
     assert r.clarifications == ["assumed daily"]
     assert r.attempts == 1 and r.error == ""
+    assert (r.cost_numerator, r.cost_from_provider) == (1_111_111, True)
 
 
 def test_screen_clarifications_accept_only_a_list():
@@ -289,6 +298,7 @@ def test_compile_screen_reports_zeros_when_nothing_arrived():
                        "cache_read_tokens": 0, "cache_write_tokens": 0}
 
 
+# Production break caught: a raised retry could leave a partial bill marked exact.
 def test_compile_screen_keeps_earlier_usage_when_a_callable_raises():
     """A caller's own `Complete` may break its contract and raise.
 
@@ -303,12 +313,16 @@ def test_compile_screen_keeps_earlier_usage_when_a_callable_raises():
             return super().__call__(system=system, messages=messages,
                                     max_tokens=max_tokens)
 
-    client = _RaisesOnTheSecondRound([json.dumps({"spec": {"version": 7}})])
+    client = _RaisesOnTheSecondRound(
+        [json.dumps({"spec": {"version": 7}})], cost_numerator=1_111_111,
+        cost_from_provider=True)
     r = compile_screen("x", client=client)
     assert r.error == "model call failed: socket closed"
     assert r.attempts == 2 and r.spec is None
     assert r.usage == {"input_tokens": 10, "output_tokens": 5,
                        "cache_read_tokens": 0, "cache_write_tokens": 0}
+    assert r.cost_numerator == 1_111_111
+    assert r.cost_from_provider is False
 
 
 def test_compile_screen_sends_a_plain_string_system_and_the_token_ceiling():
