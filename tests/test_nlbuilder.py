@@ -6,7 +6,9 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from nakagai.nlbuilder.compiler import _check, compile_strategy
+from nakagai.model import ModelReply
+from nakagai.nlbuilder import compiler
+from nakagai.nlbuilder.compiler import MODEL, PROVIDER, _check, compile_strategy
 from nakagai.nlbuilder.prompt import render_system_prompt
 from nakagai.strategies.catalog import catalog_definitions, load_entries
 from nakagai.strategies.rules import core_vocabulary, validate_spec
@@ -69,35 +71,27 @@ PROMPT_VOCABULARY = core_vocabulary().with_windows(
 )
 
 
-class _Block:
-    type = "text"
-    def __init__(self, text): self.text = text
+TOKENS = (100, 50, 10, 5)
 
 
-class _Usage:
-    def __init__(self, input_tokens=100, output_tokens=50,
-                 cache_read_input_tokens=10, cache_creation_input_tokens=5):
-        self.input_tokens = input_tokens
-        self.output_tokens = output_tokens
-        self.cache_read_input_tokens = cache_read_input_tokens
-        self.cache_creation_input_tokens = cache_creation_input_tokens
+class FakeModel:
+    """A `Complete` over queued replies; records every call for assertions.
 
+    Keyword-only like the protocol it stands in for, so a positional mistake
+    in the compiler is a TypeError here rather than a system prompt quietly
+    delivered as a message.
+    """
 
-class _Resp:
-    def __init__(self, text, usage=None):
-        self.content = [_Block(text)]
-        self.usage = usage or _Usage()
-
-
-class FakeClient:
-    """Yields queued replies; records every request for prompt assertions."""
-    def __init__(self, replies):
+    def __init__(self, replies, tokens=TOKENS, error=""):
         self._replies = list(replies)
+        self._tokens = tokens
+        self._error = error
         self.requests = []
-        self.messages = self
-    def create(self, **kwargs):
-        self.requests.append(kwargs)
-        return _Resp(self._replies.pop(0))
+
+    def __call__(self, *, system, messages, max_tokens):
+        self.requests.append({"system": system, "messages": messages,
+                              "max_tokens": max_tokens})
+        return ModelReply(self._replies.pop(0), *self._tokens, self._error)
 
 
 def test_prompt_renders_registries_and_is_deterministic():
@@ -370,27 +364,30 @@ def test_the_prompt_takes_the_catalog_the_way_core_ships_it():
 
 
 def test_happy_path_returns_spec_and_readback():
-    client = FakeClient([json.dumps({"spec": GOOD_SPEC, "clarifications": ["defaulted timeframe to 1h"]})])
+    client = FakeModel([json.dumps({"spec": GOOD_SPEC, "clarifications": ["defaulted timeframe to 1h"]})])
     res = compile_strategy("buy rsi dips", client=client)
     assert res.spec == GOOD_SPEC
     assert "dip" in res.readback
     assert res.clarifications == ["defaulted timeframe to 1h"]
     assert res.attempts == 1
-    assert client.requests[0]["system"][0]["cache_control"] == {"type": "ephemeral"}
+    # One plain string, not a block list: `cache_control` was Anthropic's, and
+    # this compiler no longer speaks any provider's dialect.
+    assert client.requests[0]["system"] == render_system_prompt()
+    assert client.requests[0]["max_tokens"] == 8000
 
 
 def test_blank_prompt_policy_keeps_the_strategy_prompt_byte_identical():
     expected = render_system_prompt().encode("utf-8")
     for policy in ("", " \n\t "):
-        client = FakeClient([json.dumps({"spec": GOOD_SPEC})])
+        client = FakeModel([json.dumps({"spec": GOOD_SPEC})])
         compile_strategy("buy rsi dips", client=client, prompt_policy=policy)
-        assert client.requests[0]["system"][0]["text"].encode("utf-8") == expected
+        assert client.requests[0]["system"].encode("utf-8") == expected
 
 
 def test_prompt_policy_is_appended_once_before_the_first_strategy_call():
     policy = "# House policy\n- one rule"
     bad = {**GOOD_SPEC, "timeframe": "2h"}
-    client = FakeClient([
+    client = FakeModel([
         json.dumps({"spec": bad}),
         json.dumps({"spec": GOOD_SPEC}),
     ])
@@ -398,7 +395,7 @@ def test_prompt_policy_is_appended_once_before_the_first_strategy_call():
         "buy rsi dips", client=client, prompt_policy=f"  {policy}\n")
     expected = render_system_prompt() + "\n\n" + policy
     assert result.attempts == 2
-    assert [call["system"][0]["text"] for call in client.requests] == [
+    assert [call["system"] for call in client.requests] == [
         expected, expected,
     ]
     assert expected.count(policy) == 1
@@ -414,7 +411,7 @@ def test_plain_string_candidate_validator_is_one_complete_error():
         assert spec == GOOD_SPEC
         return "house policy failed" if seen == 1 else []
 
-    client = FakeClient([
+    client = FakeModel([
         json.dumps({"spec": GOOD_SPEC}),
         json.dumps({"spec": GOOD_SPEC}),
     ])
@@ -429,7 +426,7 @@ def test_plain_string_candidate_validator_is_one_complete_error():
 
     terminal = compile_strategy(
         "buy rsi dips",
-        client=FakeClient([json.dumps({"spec": GOOD_SPEC})]),
+        client=FakeModel([json.dumps({"spec": GOOD_SPEC})]),
         max_retries=0,
         candidate_validator=lambda kind, spec: "house policy failed",
     )
@@ -440,7 +437,7 @@ def test_plain_string_candidate_validator_is_one_complete_error():
 
     ordered = compile_strategy(
         "buy rsi dips",
-        client=FakeClient([json.dumps({"spec": GOOD_SPEC})]),
+        client=FakeModel([json.dumps({"spec": GOOD_SPEC})]),
         max_retries=0,
         candidate_validator=lambda kind, spec: ("first error", "second error"),
     )
@@ -452,7 +449,7 @@ def test_plain_string_candidate_validator_is_one_complete_error():
 def test_strategy_normalizer_is_revalidated_before_the_caller_validator():
     validator_calls = []
     invalid = {"version": 2, "name": "normalized-invalid", "timeframe": "2h"}
-    client = FakeClient([
+    client = FakeModel([
         json.dumps({"spec": GOOD_SPEC}),
         json.dumps({"spec": GOOD_SPEC}),
     ])
@@ -489,7 +486,7 @@ def test_strategy_caller_channels_share_the_default_three_attempt_stream():
         return spec
 
     result = compile_strategy(
-        "buy rsi dips", client=FakeClient(replies),
+        "buy rsi dips", client=FakeModel(replies),
         candidate_normalizer=normalize,
         candidate_validator=lambda kind, spec: (
             "integer policy failed", "symbol policy failed"),
@@ -510,7 +507,7 @@ def test_strategy_caller_channels_share_the_default_three_attempt_stream():
 
 def test_strategy_readback_uses_the_native_valid_normalized_candidate():
     seen = []
-    client = FakeClient([json.dumps({"spec": GOOD_SPEC})])
+    client = FakeModel([json.dumps({"spec": GOOD_SPEC})])
     result = compile_strategy(
         "compare the market", client=client,
         candidate_normalizer=lambda kind, spec: RELATIVE_SCOPE_SPEC,
@@ -523,7 +520,7 @@ def test_strategy_readback_uses_the_native_valid_normalized_candidate():
 
 def test_validation_errors_trigger_retry_with_error_feedback():
     bad = {**GOOD_SPEC, "timeframe": "2h"}
-    client = FakeClient([json.dumps({"spec": bad}), json.dumps({"spec": GOOD_SPEC})])
+    client = FakeModel([json.dumps({"spec": bad}), json.dumps({"spec": GOOD_SPEC})])
     res = compile_strategy("buy rsi dips", client=client)
     assert res.spec == GOOD_SPEC and res.attempts == 2
     retry_text = json.dumps(client.requests[1]["messages"])
@@ -532,103 +529,156 @@ def test_validation_errors_trigger_retry_with_error_feedback():
 
 def test_gives_up_after_max_retries():
     bad = json.dumps({"spec": {**GOOD_SPEC, "timeframe": "2h"}})
-    client = FakeClient([bad, bad, bad])
+    client = FakeModel([bad, bad, bad])
     res = compile_strategy("x", client=client, max_retries=2)
     assert res.spec is None and res.attempts == 3
     assert "timeframe" in res.not_expressible
 
 
 def test_not_expressible_passthrough():
-    client = FakeClient([json.dumps({"not_expressible": "renko bars are not supported"})])
+    client = FakeModel([json.dumps({"not_expressible": "renko bars are not supported"})])
     res = compile_strategy("renko magic", client=client)
     assert res.spec is None and "renko" in res.not_expressible
 
 
 def test_json_fences_are_tolerated():
-    client = FakeClient(["```json\n" + json.dumps({"spec": GOOD_SPEC}) + "\n```"])
+    client = FakeModel(["```json\n" + json.dumps({"spec": GOOD_SPEC}) + "\n```"])
     assert compile_strategy("x", client=client).spec == GOOD_SPEC
 
 
 def test_revision_includes_current_spec_in_user_turn():
-    client = FakeClient([json.dumps({"spec": GOOD_SPEC})])
+    client = FakeModel([json.dumps({"spec": GOOD_SPEC})])
     compile_strategy("tighten the stop", current_spec=GOOD_SPEC, client=client)
     assert "current spec" in json.dumps(client.requests[0]["messages"]).lower()
 
 
-class _NoTextResp:
-    """A response with no text content block at all: a thinking-only turn.
-    `_text` raises StopIteration on this; the except clause names
-    StopIteration precisely to turn it into a retry, not a crash."""
-    def __init__(self):
-        self.content = []
-
-
-class _RawClient:
-    """Like FakeClient, but hands back exactly what's queued instead of
-    wrapping every reply in a text _Resp: the seam for injecting a response
-    object that has no text block at all."""
-    def __init__(self, replies):
-        self._replies = list(replies)
-        self.requests = []
-        self.messages = self
-
-    def create(self, **kwargs):
-        self.requests.append(kwargs)
-        return self._replies.pop(0)
-
-
-def test_textless_reply_retries_instead_of_crashing():
-    client = _RawClient([_NoTextResp(), _Resp(json.dumps({"spec": GOOD_SPEC}))])
+def test_an_empty_reply_retries_instead_of_crashing():
+    """A model that answers with nothing at all. `ModelReply.text` is always a
+    string, so this is the retry the empty case still has to become."""
+    client = FakeModel(["", json.dumps({"spec": GOOD_SPEC})])
     res = compile_strategy("buy rsi dips", client=client)
     assert res.spec == GOOD_SPEC
     assert res.attempts == 2
+    retry = [m for m in client.requests[1]["messages"] if m["role"] == "user"][-1]
+    assert "not parseable JSON" in retry["content"]
 
 
 def test_usage_is_summed_across_retries_with_cache_split():
     bad = {**GOOD_SPEC, "timeframe": "2h"}
-    client = FakeClient([json.dumps({"spec": bad}), json.dumps({"spec": GOOD_SPEC})])
+    client = FakeModel([json.dumps({"spec": bad}), json.dumps({"spec": GOOD_SPEC})])
     res = compile_strategy("buy rsi dips", client=client)
     assert res.attempts == 2
     assert res.usage == {"input_tokens": 200, "output_tokens": 100,
                          "cache_read_tokens": 20, "cache_write_tokens": 10}
-    assert res.model == "claude-opus-4-8"
+    assert res.model == "deepseek/deepseek-v4-flash-0731"
 
 
 def test_usage_present_on_not_expressible():
-    client = FakeClient([json.dumps({"not_expressible": "no renko"})])
+    client = FakeModel([json.dumps({"not_expressible": "no renko"})])
     res = compile_strategy("renko", client=client)
     assert res.not_expressible and res.usage["input_tokens"] == 100
 
 
-class _RaisingClient:
-    """First create() succeeds (invalid spec -> retry), second raises: the
-    seam for proving partial-loop usage survives an API failure."""
+BAD_SPEC_REPLY = json.dumps({"spec": {**GOOD_SPEC, "timeframe": "2h"}})
+
+
+class _BilledFailure:
+    """First call answers with an invalid spec (so the loop retries), second
+    comes back FAILED and non-free: the seam for the property `ModelReply`
+    exists to carry."""
+
+    def __init__(self, error, tokens):
+        self.calls = 0
+        self._error = error
+        self._tokens = tokens
+
+    def __call__(self, *, system, messages, max_tokens):
+        self.calls += 1
+        if self.calls == 1:
+            return ModelReply(BAD_SPEC_REPLY, *TOKENS, "")
+        return ModelReply("", *self._tokens, self._error)
+
+
+def test_a_billed_failure_records_its_tokens_before_the_error():
+    """The whole point of `ModelReply.error`. A response that ARRIVED and
+    failed was charged for, so its counts land in `usage` before the error ends
+    the loop. Billing after the error return instead records that call as free,
+    and a caller settling a reserve against `usage` under-reports by exactly
+    the failing attempt."""
+    res = compile_strategy("x", client=_BilledFailure(
+        "model call failed: HTTP 500: upstream fell over", (41, 7, 3, 2)))
+    assert res.error == "model call failed: HTTP 500: upstream fell over"
+    assert res.spec is None
+    assert res.attempts == 2                     # the failing attempt counts
+    assert res.usage == {"input_tokens": 141, "output_tokens": 57,
+                         "cache_read_tokens": 13, "cache_write_tokens": 7}
+
+
+def test_a_transport_failure_reports_the_error_and_bills_nothing():
+    """The other half, and the reason the counts cannot simply be assumed
+    non-zero on failure: nothing arrived, so nothing was charged. The compiler
+    reports what it was told rather than inventing either number."""
+    client = FakeModel([""], tokens=(0, 0, 0, 0),
+                       error="model call failed: connection reset")
+    res = compile_strategy("x", client=client)
+    assert res.error == "model call failed: connection reset"
+    assert res.spec is None
+    assert res.attempts == 1
+    assert res.usage == {"input_tokens": 0, "output_tokens": 0,
+                         "cache_read_tokens": 0, "cache_write_tokens": 0}
+
+
+class _RaisingModel:
+    """First call succeeds (invalid spec -> retry), second RAISES.
+
+    `Complete` says a failure comes back as `ModelReply.error`, but the
+    callable belongs to the caller, so the loop cannot assume it obeys. A raise
+    escaping here would take every count already accumulated with it."""
+
     def __init__(self, first_reply):
         self._sent = False
         self._first = first_reply
-        self.messages = self
 
-    def create(self, **kwargs):
+    def __call__(self, *, system, messages, max_tokens):
         if self._sent:
             raise RuntimeError("api down")
         self._sent = True
-        return _Resp(self._first)
+        return ModelReply(self._first, *TOKENS, "")
 
 
-def test_client_exception_returns_error_result_with_partial_usage():
-    bad = json.dumps({"spec": {**GOOD_SPEC, "timeframe": "2h"}})
-    res = compile_strategy("x", client=_RaisingClient(bad))
+def test_a_callable_that_raises_returns_an_error_result_with_partial_usage():
+    res = compile_strategy("x", client=_RaisingModel(BAD_SPEC_REPLY))
     assert "api down" in res.error
     assert res.spec is None
     assert res.attempts == 2                       # the raising attempt counts
     assert res.usage["input_tokens"] == 100        # attempt 1's usage survives
 
 
-def test_usageless_response_is_tolerated():
-    # _NoTextResp has no usage attribute at all; must not crash the summing.
-    client = _RawClient([_NoTextResp(), _Resp(json.dumps({"spec": GOOD_SPEC}))])
-    res = compile_strategy("buy rsi dips", client=client)
-    assert res.spec == GOOD_SPEC and res.usage["input_tokens"] == 100
+def test_no_client_means_openrouter_on_the_pinned_endpoint(monkeypatch):
+    """What a caller who supplies nothing gets. Porting the call shape while
+    leaving the old model id would send a Claude id to OpenRouter and fail at
+    request time, so the id is asserted literally, and so is the provider pin:
+    one id is served by many providers at different quantizations."""
+    built = []
+
+    def fake_openrouter_complete(**kwargs):
+        built.append(kwargs)
+        return FakeModel([json.dumps({"spec": GOOD_SPEC})])
+
+    monkeypatch.setattr(compiler, "openrouter_complete", fake_openrouter_complete)
+
+    assert compile_strategy("buy rsi dips").spec == GOOD_SPEC
+    assert built == [{"model": "deepseek/deepseek-v4-flash-0731",
+                      "provider": {"require_parameters": True,
+                                   "order": ["alibaba"],
+                                   "allow_fallbacks": False}}]
+    assert (MODEL, PROVIDER) == (built[0]["model"], built[0]["provider"])
+
+    # And a caller naming a model still selects it, which is what `result.model`
+    # claims it did.
+    res = compile_strategy("buy rsi dips", model="qwen/qwen3-max")
+    assert built[1]["model"] == "qwen/qwen3-max"
+    assert res.model == "qwen/qwen3-max"
 
 
 GOOD_COMPOSITE = {
@@ -641,7 +691,7 @@ GOOD_COMPOSITE = {
 
 
 def test_composite_kind_validates_and_describes_as_a_composite():
-    client = FakeClient([json.dumps({"kind": "composite", "spec": GOOD_COMPOSITE})])
+    client = FakeModel([json.dumps({"kind": "composite", "spec": GOOD_COMPOSITE})])
     res = compile_strategy("combine them", client=client, plays=_PLAYS)
     assert res.kind == "composite"
     assert res.spec == GOOD_COMPOSITE
@@ -649,20 +699,20 @@ def test_composite_kind_validates_and_describes_as_a_composite():
 
 
 def test_missing_kind_defaults_to_rules():
-    client = FakeClient([json.dumps({"spec": GOOD_SPEC})])
+    client = FakeModel([json.dumps({"spec": GOOD_SPEC})])
     res = compile_strategy("buy rsi dips", client=client, plays=_PLAYS)
     assert res.kind == "rules" and res.spec == GOOD_SPEC
 
 
 def test_unrecognized_kind_falls_back_to_rules():
-    client = FakeClient([json.dumps({"kind": "Composite", "spec": GOOD_SPEC})])
+    client = FakeModel([json.dumps({"kind": "Composite", "spec": GOOD_SPEC})])
     res = compile_strategy("buy rsi dips", client=client, plays=_PLAYS)
     assert res.kind == "rules" and res.spec == GOOD_SPEC
 
 
 def test_bad_vote_tree_retries_with_composite_errors():
     bad = {**GOOD_COMPOSITE, "long": {"all": ["a", "zz"]}}
-    client = FakeClient([json.dumps({"kind": "composite", "spec": bad}),
+    client = FakeModel([json.dumps({"kind": "composite", "spec": bad}),
                          json.dumps({"kind": "composite", "spec": GOOD_COMPOSITE})])
     res = compile_strategy("combine", client=client, plays=_PLAYS)
     assert res.spec == GOOD_COMPOSITE and res.attempts == 2
@@ -674,7 +724,7 @@ def test_bad_rules_leg_retries_with_block_prefixed_errors():
            "blocks": {"a": {"strategy": "donchian_breakout"},
                       "b": {"strategy": "rules",
                             "params": {"spec": {**GOOD_SPEC, "timeframe": "2h"}}}}}
-    client = FakeClient([json.dumps({"kind": "composite", "spec": bad}),
+    client = FakeModel([json.dumps({"kind": "composite", "spec": bad}),
                          json.dumps({"kind": "composite", "spec": GOOD_COMPOSITE})])
     res = compile_strategy("combine", client=client, plays=_PLAYS)
     assert res.spec == GOOD_COMPOSITE and res.attempts == 2
@@ -682,16 +732,16 @@ def test_bad_rules_leg_retries_with_block_prefixed_errors():
 
 
 def test_composite_without_plays_is_rejected_not_crashed():
-    client = FakeClient([json.dumps({"kind": "composite", "spec": GOOD_COMPOSITE})] * 3)
+    client = FakeModel([json.dumps({"kind": "composite", "spec": GOOD_COMPOSITE})] * 3)
     res = compile_strategy("combine", client=client, max_retries=2)
     assert res.spec is None
     assert "not available" in res.not_expressible
 
 
 def test_plays_reach_the_system_prompt():
-    client = FakeClient([json.dumps({"kind": "composite", "spec": GOOD_COMPOSITE})])
+    client = FakeModel([json.dumps({"kind": "composite", "spec": GOOD_COMPOSITE})])
     compile_strategy("combine", client=client, plays=_PLAYS)
-    assert "donchian_breakout" in client.requests[0]["system"][0]["text"]
+    assert "donchian_breakout" in client.requests[0]["system"]
 
 
 def test_a_bespoke_leg_the_caller_never_declared_is_sent_back():
@@ -703,7 +753,7 @@ def test_a_bespoke_leg_the_caller_never_declared_is_sent_back():
     `_CARDS` is the catalog without the bespoke leg, exactly what core's own
     `catalog_definitions` registers."""
     assert "rules" not in _CARDS
-    client = FakeClient([json.dumps({"kind": "composite", "spec": GOOD_COMPOSITE})] * 3)
+    client = FakeModel([json.dumps({"kind": "composite", "spec": GOOD_COMPOSITE})] * 3)
     res = compile_strategy("combine", client=client, plays=_CARDS, max_retries=2)
     assert res.spec is None
     assert "unknown strategy 'rules'" in res.not_expressible
@@ -716,7 +766,7 @@ def test_a_malformed_strategy_name_becomes_a_retry_not_a_crash():
     platform turned that into a 503 rather than sending the model back."""
     malformed = {**GOOD_COMPOSITE,
                  "blocks": {**GOOD_COMPOSITE["blocks"], "a": {"strategy": []}}}
-    client = FakeClient([json.dumps({"kind": "composite", "spec": malformed}),
+    client = FakeModel([json.dumps({"kind": "composite", "spec": malformed}),
                          json.dumps({"kind": "composite", "spec": GOOD_COMPOSITE})])
     res = compile_strategy("combine", client=client, plays=_PLAYS)
     assert res.spec == GOOD_COMPOSITE and res.attempts == 2
@@ -731,7 +781,7 @@ def test_an_unknown_play_is_sent_back_by_name():
     invented = {**GOOD_COMPOSITE,
                 "blocks": {**GOOD_COMPOSITE["blocks"],
                            "a": {"strategy": "golden_cross"}}}
-    client = FakeClient([json.dumps({"kind": "composite", "spec": invented}),
+    client = FakeModel([json.dumps({"kind": "composite", "spec": invented}),
                          json.dumps({"kind": "composite", "spec": GOOD_COMPOSITE})])
     res = compile_strategy("combine", client=client, plays=_PLAYS)
     assert res.spec == GOOD_COMPOSITE and res.attempts == 2
@@ -751,7 +801,7 @@ def test_a_catalog_play_carrying_param_overrides_is_sent_back():
              "blocks": {"a": {"strategy": "donchian_breakout",
                               "params": {"n": 55}},
                         "b": {"strategy": "rules", "params": {"spec": GOOD_SPEC}}}}
-    client = FakeClient([json.dumps({"kind": "composite", "spec": tuned}),
+    client = FakeModel([json.dumps({"kind": "composite", "spec": tuned}),
                          json.dumps({"kind": "composite", "spec": GOOD_COMPOSITE})])
     res = compile_strategy("combine", client=client, plays=_PLAYS)
     assert res.spec == GOOD_COMPOSITE and res.attempts == 2
@@ -784,7 +834,7 @@ def test_composite_check_does_not_drop_the_caller_vocabulary():
 def test_a_reply_that_is_valid_json_but_not_an_object_is_a_retry():
     """`json.loads` returns a list for `[]`, and the loop read `.get` off it.
     Valid JSON is not the contract; the contract is exactly one JSON object."""
-    client = FakeClient(["[]", json.dumps({"spec": GOOD_SPEC})])
+    client = FakeModel(["[]", json.dumps({"spec": GOOD_SPEC})])
     res = compile_strategy("buy dips", client=client)
     assert res.spec == GOOD_SPEC and res.attempts == 2
     retry = [m for m in client.requests[1]["messages"] if m["role"] == "user"][-1]
@@ -802,7 +852,7 @@ def test_a_hostile_rules_leg_inside_a_composite_is_a_retry():
                                                 "op": ">", "rhs": 1}]},
                               "risk": {"stop": {"kind": "atr", "n": 14, "mult": 2.0},
                                        "target": {"kind": "rr", "rr": 2.0}}}}}}}
-    client = FakeClient([json.dumps({"kind": "composite", "spec": hostile}),
+    client = FakeModel([json.dumps({"kind": "composite", "spec": hostile}),
                          json.dumps({"kind": "composite", "spec": GOOD_COMPOSITE})])
     res = compile_strategy("combine", client=client, plays=_PLAYS)
     assert res.spec == GOOD_COMPOSITE and res.attempts == 2
@@ -815,7 +865,7 @@ def test_a_reply_json_cannot_even_parse_is_a_retry():
     interpreter's digit limit, not the JSONDecodeError the retry boundary named,
     so a reply the model could have corrected escaped the loop instead."""
     huge = '{"spec": ' + "9" * 5000 + "}"
-    client = FakeClient([huge, json.dumps({"spec": GOOD_SPEC})])
+    client = FakeModel([huge, json.dumps({"spec": GOOD_SPEC})])
     res = compile_strategy("buy dips", client=client)
     assert res.spec == GOOD_SPEC and res.attempts == 2
     retry = [m for m in client.requests[1]["messages"] if m["role"] == "user"][-1]
@@ -829,7 +879,7 @@ def _deep(levels: int) -> str:
 def test_a_reply_nested_past_the_decoder_is_a_retry():
     """`json.loads` raises RecursionError inside the decoder itself, which is
     not a ValueError, so a reply nested thousands deep escaped the loop."""
-    client = FakeClient(['{"spec": ' + _deep(10_000) + "}",
+    client = FakeModel(['{"spec": ' + _deep(10_000) + "}",
                          json.dumps({"spec": GOOD_SPEC})])
     res = compile_strategy("buy dips", client=client)
     assert res.spec == GOOD_SPEC and res.attempts == 2
@@ -847,7 +897,7 @@ def test_an_absurdly_nested_vote_tree_is_a_retry():
     # grammar it was given: a validator stricter than its own prompt burns
     # retries on a rule nobody stated.
     assert "nest at most" in render_system_prompt(_PLAYS)
-    client = FakeClient([json.dumps({"kind": "composite", "spec": deep}),
+    client = FakeModel([json.dumps({"kind": "composite", "spec": deep}),
                          json.dumps({"kind": "composite", "spec": GOOD_COMPOSITE})])
     res = compile_strategy("combine", client=client, plays=_PLAYS)
     assert res.spec == GOOD_COMPOSITE and res.attempts == 2
@@ -868,7 +918,7 @@ def test_a_number_the_canon_cannot_hold_is_a_retry():
     huge = {**GOOD_SPEC,
             "long": {"all": [{"lhs": {"src": "close"}, "op": ">",
                               "rhs": 10 ** 1000}]}}
-    client = FakeClient([json.dumps({"spec": huge}),
+    client = FakeModel([json.dumps({"spec": huge}),
                          json.dumps({"spec": GOOD_SPEC})])
     res = compile_strategy("buy dips", client=client)
     assert res.spec == GOOD_SPEC and res.attempts == 2
@@ -901,7 +951,7 @@ def test_an_injected_intraday_primitive_is_a_retry_not_a_keyerror():
     daily = {**GOOD_SPEC, "timeframe": "1d",
              "long": {"all": [{"lhs": {"prim": "custom_intraday"},
                                "op": ">", "rhs": 0}]}}
-    client = FakeClient([json.dumps({"spec": daily}),
+    client = FakeModel([json.dumps({"spec": daily}),
                          json.dumps({"spec": GOOD_SPEC})])
     res = compile_strategy("x", client=client, vocabulary=vocab)
     assert res.spec == GOOD_SPEC and res.attempts == 2
