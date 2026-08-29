@@ -6,10 +6,12 @@ list and made "run the builder" mean "have an Anthropic key". Swapping that for
 another SDK would have moved the coupling rather than removed it.
 
 So a compiler is handed a CALLABLE instead. It knows nothing about providers,
-HTTP, credentials or money: it passes a system prompt, some messages and a
-token ceiling, and gets back text and the counts its caller needs to bill. The
-platform that owns the ledger builds the callable; anyone else can pass their
-own, and `openrouter_complete` below is the batteries-included one.
+HTTP, or credentials: it passes a system prompt, some messages and a token
+ceiling, and gets back text, token counts, and a cost numerator. The numerator
+is trillionths of a dollar, and its provenance says whether every completed
+attempt reported its exact provider bill. The platform that owns the ledger
+builds the callable; anyone else can pass their own, and `openrouter_complete`
+below is the batteries-included one.
 """
 
 from __future__ import annotations
@@ -36,6 +38,9 @@ class ModelReply(NamedTuple):
     A transport failure that never reached the provider is the other case, and
     it is the only one that reports zeros: nothing was billed because nothing
     arrived.
+
+    `cost_numerator` is in trillionths of a dollar. `cost_from_provider` is
+    true only when this arrived response reported its exact bill.
     """
 
     text: str
@@ -117,6 +122,13 @@ def _cost_numerator(usage: dict) -> tuple[int, bool]:
     return int(amount * _COST_SCALE), True
 
 
+def _token_count(value) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
 def _reply(resp) -> ModelReply:
     """One arrived response, read for its text AND its cost.
 
@@ -129,14 +141,21 @@ def _reply(resp) -> ModelReply:
         doc = resp.json()
     except Exception:  # noqa: BLE001
         doc = {}
+    if not isinstance(doc, dict):
+        doc = {}
     usage = doc.get("usage") or {}
+    if not isinstance(usage, dict):
+        usage = {}
+    prompt_details = usage.get("prompt_tokens_details") or {}
+    if not isinstance(prompt_details, dict):
+        prompt_details = {}
+    cost_numerator, cost_from_provider = _cost_numerator(usage)
     counts = (
-        int(usage.get("prompt_tokens") or 0),
-        int(usage.get("completion_tokens") or 0),
-        int((usage.get("prompt_tokens_details") or {}).get("cached_tokens") or 0),
+        _token_count(usage.get("prompt_tokens")),
+        _token_count(usage.get("completion_tokens")),
+        _token_count(prompt_details.get("cached_tokens")),
         0,
     )
-    cost_numerator, cost_from_provider = _cost_numerator(usage)
     status = getattr(resp, "status_code", 0)
     if status < 200 or status >= 300:
         detail = doc.get("error") or {}

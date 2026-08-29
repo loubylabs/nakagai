@@ -222,3 +222,26 @@ def test_an_invalid_provider_cost_keeps_arrived_token_counts(cost):
 
     assert (reply.cost_numerator, reply.cost_from_provider) == (0, False)
     assert (reply.input_tokens, reply.output_tokens) == (11, 7)
+
+
+# Production break caught: a non-object JSON body could escape the model boundary.
+def test_a_non_dictionary_response_returns_a_zero_usage_reply():
+    reply = model._reply(_Resp(200, ["not", "an", "object"]))
+
+    assert reply.text == "" and reply.error == ""
+    assert (reply.input_tokens, reply.output_tokens) == (0, 0)
+    assert (reply.cost_numerator, reply.cost_from_provider) == (0, False)
+
+
+# Production break caught: malformed tokens could erase an arrived exact provider bill.
+def test_malformed_token_counts_do_not_discard_an_arrived_exact_bill():
+    reply = model._reply(_Resp(200, {
+        "choices": [{"message": {"content": "{}"}}],
+        "usage": {"prompt_tokens": "not an integer", "completion_tokens": 7,
+                  "prompt_tokens_details": {"cached_tokens": []},
+                  "cost": 0.000001234567},
+    }))
+
+    assert (reply.input_tokens, reply.output_tokens) == (0, 7)
+    assert reply.cache_read_tokens == 0
+    assert (reply.cost_numerator, reply.cost_from_provider) == (1_234_567, True)

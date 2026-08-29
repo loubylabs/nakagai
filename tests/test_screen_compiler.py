@@ -298,6 +298,7 @@ def test_compile_screen_reports_zeros_when_nothing_arrived():
                        "cache_read_tokens": 0, "cache_write_tokens": 0}
 
 
+# Production break caught: a raised retry could leave a partial bill marked exact.
 def test_compile_screen_keeps_earlier_usage_when_a_callable_raises():
     """A caller's own `Complete` may break its contract and raise.
 
@@ -312,12 +313,16 @@ def test_compile_screen_keeps_earlier_usage_when_a_callable_raises():
             return super().__call__(system=system, messages=messages,
                                     max_tokens=max_tokens)
 
-    client = _RaisesOnTheSecondRound([json.dumps({"spec": {"version": 7}})])
+    client = _RaisesOnTheSecondRound(
+        [json.dumps({"spec": {"version": 7}})], cost_numerator=1_111_111,
+        cost_from_provider=True)
     r = compile_screen("x", client=client)
     assert r.error == "model call failed: socket closed"
     assert r.attempts == 2 and r.spec is None
     assert r.usage == {"input_tokens": 10, "output_tokens": 5,
                        "cache_read_tokens": 0, "cache_write_tokens": 0}
+    assert r.cost_numerator == 1_111_111
+    assert r.cost_from_provider is False
 
 
 def test_compile_screen_sends_a_plain_string_system_and_the_token_ceiling():

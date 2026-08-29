@@ -83,13 +83,19 @@ def _parse(text: str) -> dict:
 
 
 def _add_usage(result: CompileResult, reply: ModelReply) -> None:
-    """Add one reply's counts to the running total.
+    """Add one reply's usage and bill evidence to the running total.
 
     Every reply that ARRIVED is added, a failing one included: the provider
     charged for it either way. Reporting zero there would record a billed call
     as free, and a caller settling a reserve against `usage` would never see
     the real amount. Only a transport failure that never reached a provider
     carries zeros, and it carries them honestly.
+
+    `cost_numerator` sums reported trillionths of a dollar. The aggregate is a
+    lower bound whenever `cost_from_provider` is false: it keeps every exact
+    numerator that arrived, but at least one attempt supplied no exact bill.
+    Provenance is true only when every completed attempt reported its exact
+    provider bill.
     """
     result.usage["input_tokens"] += reply.input_tokens
     result.usage["output_tokens"] += reply.output_tokens
