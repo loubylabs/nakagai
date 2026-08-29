@@ -1,9 +1,10 @@
-"""compile_screen: the NL->ScreenSpec loop, exercised with a fake client."""
+"""compile_screen: the NL->ScreenSpec loop, exercised with a fake model."""
 
 import json
-from types import SimpleNamespace
 
-from nakagai.screen.compiler import compile_screen
+from nakagai.model import ModelReply
+from nakagai.screen import compiler
+from nakagai.screen.compiler import MAX_TOKENS, MODEL, compile_screen
 from nakagai.screen.prompt import render_screen_prompt
 
 GOOD_SPEC = {"version": 1, "tf": "1d",
@@ -41,24 +42,28 @@ RELATIVE_SCOPE_READBACK = (
 )
 
 
-class _FakeClient:
-    def __init__(self, replies):
-        self._replies = list(replies)
-        self.calls = []
-        self.messages = SimpleNamespace(create=self._create)
+class _FakeModel:
+    """A `Complete` over a fixed list of replies, recording every call.
 
-    def _create(self, **kwargs):
-        self.calls.append(kwargs)
-        text = self._replies.pop(0)
-        return SimpleNamespace(
-            content=[SimpleNamespace(type="text", text=text)],
-            usage=SimpleNamespace(input_tokens=10, output_tokens=5,
-                                  cache_read_input_tokens=0,
-                                  cache_creation_input_tokens=0))
+    Keyword-only like the protocol it stands in for, so a positional mistake
+    in the compiler is a TypeError here rather than a system prompt quietly
+    delivered as a message.
+    """
+
+    def __init__(self, replies, tokens=(10, 5, 0, 0), error=""):
+        self._replies = list(replies)
+        self._tokens = tokens
+        self._error = error
+        self.calls = []
+
+    def __call__(self, *, system, messages, max_tokens):
+        self.calls.append({"system": system, "messages": messages,
+                           "max_tokens": max_tokens})
+        return ModelReply(self._replies.pop(0), *self._tokens, self._error)
 
 
 def test_compile_screen_happy_path():
-    client = _FakeClient([json.dumps({"spec": GOOD_SPEC, "clarifications": ["assumed daily"]})])
+    client = _FakeModel([json.dumps({"spec": GOOD_SPEC, "clarifications": ["assumed daily"]})])
     r = compile_screen("oversold on the daily", client=client)
     assert r.spec == GOOD_SPEC
     assert r.readback.startswith("Screen on 1d bars")
@@ -68,7 +73,7 @@ def test_compile_screen_happy_path():
 
 def test_screen_clarifications_accept_only_a_list():
     for sent in (None, "assumed daily"):
-        client = _FakeClient([
+        client = _FakeModel([
             json.dumps({"spec": GOOD_SPEC, "clarifications": sent})])
         result = compile_screen("oversold", client=client)
         assert result.spec == GOOD_SPEC
@@ -78,15 +83,15 @@ def test_screen_clarifications_accept_only_a_list():
 def test_blank_prompt_policy_keeps_the_screen_prompt_byte_identical():
     expected = render_screen_prompt().encode("utf-8")
     for policy in ("", " \n\t "):
-        client = _FakeClient([json.dumps({"spec": GOOD_SPEC})])
+        client = _FakeModel([json.dumps({"spec": GOOD_SPEC})])
         compile_screen("oversold", client=client, prompt_policy=policy)
-        assert client.calls[0]["system"][0]["text"].encode("utf-8") == expected
+        assert client.calls[0]["system"].encode("utf-8") == expected
 
 
 def test_prompt_policy_is_appended_once_before_the_first_screen_call():
     policy = "# House policy\n- one rule"
     bad = {"version": 7}
-    client = _FakeClient([
+    client = _FakeModel([
         json.dumps({"spec": bad}),
         json.dumps({"spec": GOOD_SPEC}),
     ])
@@ -94,7 +99,7 @@ def test_prompt_policy_is_appended_once_before_the_first_screen_call():
         "oversold", client=client, prompt_policy=f"  {policy}\n")
     expected = render_screen_prompt() + "\n\n" + policy
     assert result.attempts == 2
-    assert [call["system"][0]["text"] for call in client.calls] == [
+    assert [call["system"] for call in client.calls] == [
         expected, expected,
     ]
     assert expected.count(policy) == 1
@@ -110,7 +115,7 @@ def test_plain_string_candidate_validator_is_one_complete_error():
         assert spec == GOOD_SPEC
         return "house policy failed" if seen == 1 else []
 
-    client = _FakeClient([
+    client = _FakeModel([
         json.dumps({"spec": GOOD_SPEC}),
         json.dumps({"spec": GOOD_SPEC}),
     ])
@@ -125,7 +130,7 @@ def test_plain_string_candidate_validator_is_one_complete_error():
 
     terminal = compile_screen(
         "oversold",
-        client=_FakeClient([json.dumps({"spec": GOOD_SPEC})]),
+        client=_FakeModel([json.dumps({"spec": GOOD_SPEC})]),
         max_retries=0,
         candidate_validator=lambda kind, spec: "house policy failed",
     )
@@ -136,7 +141,7 @@ def test_plain_string_candidate_validator_is_one_complete_error():
 
     ordered = compile_screen(
         "oversold",
-        client=_FakeClient([json.dumps({"spec": GOOD_SPEC})]),
+        client=_FakeModel([json.dumps({"spec": GOOD_SPEC})]),
         max_retries=0,
         candidate_validator=lambda kind, spec: ("first error", "second error"),
     )
@@ -147,7 +152,7 @@ def test_plain_string_candidate_validator_is_one_complete_error():
 
 def test_screen_normalizer_is_revalidated_before_the_caller_validator():
     validator_calls = []
-    client = _FakeClient([
+    client = _FakeModel([
         json.dumps({"spec": GOOD_SPEC}),
         json.dumps({"spec": GOOD_SPEC}),
     ])
@@ -183,7 +188,7 @@ def test_screen_caller_channels_share_the_default_three_attempt_stream():
         return spec
 
     result = compile_screen(
-        "oversold", client=_FakeClient(replies),
+        "oversold", client=_FakeModel(replies),
         candidate_normalizer=normalize,
         candidate_validator=lambda kind, spec: (
             "integer policy failed", "symbol policy failed"),
@@ -204,7 +209,7 @@ def test_screen_caller_channels_share_the_default_three_attempt_stream():
 
 def test_screen_readback_uses_the_native_valid_normalized_candidate():
     seen = []
-    client = _FakeClient([json.dumps({"spec": GOOD_SPEC})])
+    client = _FakeModel([json.dumps({"spec": GOOD_SPEC})])
     result = compile_screen(
         "compare the market", client=client,
         candidate_normalizer=lambda kind, spec: RELATIVE_SCOPE_SPEC,
@@ -217,7 +222,7 @@ def test_screen_readback_uses_the_native_valid_normalized_candidate():
 
 def test_compile_screen_retries_on_validator_errors_and_feeds_them_back():
     bad = {"version": 1, "conditions": {"all": [{"lhs": {"ind": "nope"}, "op": "<", "rhs": 1}]}}
-    client = _FakeClient([json.dumps({"spec": bad}), json.dumps({"spec": GOOD_SPEC})])
+    client = _FakeModel([json.dumps({"spec": bad}), json.dumps({"spec": GOOD_SPEC})])
     r = compile_screen("oversold", client=client)
     assert r.spec == GOOD_SPEC and r.attempts == 2
     retry_user = client.calls[1]["messages"][-1]["content"]
@@ -226,7 +231,7 @@ def test_compile_screen_retries_on_validator_errors_and_feeds_them_back():
 
 def test_screen_reply_with_an_integer_past_the_decoder_limit_retries():
     huge = '{"spec": ' + "9" * 5000 + "}"
-    client = _FakeClient([huge, json.dumps({"spec": GOOD_SPEC})])
+    client = _FakeModel([huge, json.dumps({"spec": GOOD_SPEC})])
     result = compile_screen("oversold", client=client)
     assert result.spec == GOOD_SPEC
     assert result.attempts == 2
@@ -235,7 +240,7 @@ def test_screen_reply_with_an_integer_past_the_decoder_limit_retries():
 
 def test_screen_reply_nested_past_the_decoder_limit_retries():
     nested = "[" * 10_000 + "]" * 10_000
-    client = _FakeClient([
+    client = _FakeModel([
         '{"spec": ' + nested + "}",
         json.dumps({"spec": GOOD_SPEC}),
     ])
@@ -246,24 +251,101 @@ def test_screen_reply_nested_past_the_decoder_limit_retries():
 
 
 def test_compile_screen_not_expressible_passes_through():
-    client = _FakeClient([json.dumps({"not_expressible": "no earnings data"})])
+    client = _FakeModel([json.dumps({"not_expressible": "no earnings data"})])
     r = compile_screen("earnings beats", client=client)
     assert r.not_expressible == "no earnings data" and r.spec is None
 
 
 def test_compile_screen_gives_up_after_retries():
     bad = json.dumps({"spec": {"version": 7}})
-    client = _FakeClient([bad, bad, bad])
+    client = _FakeModel([bad, bad, bad])
     r = compile_screen("x", client=client, max_retries=2)
     assert r.spec is None and "could not produce a valid spec" in r.not_expressible
 
 
-def test_compile_screen_api_failure_keeps_usage():
-    class _Boom(_FakeClient):
-        def _create(self, **kwargs):
-            raise RuntimeError("api down")
-    r = compile_screen("x", client=_Boom([]))
-    assert r.error.startswith("model call failed") and r.spec is None
+def test_compile_screen_bills_a_failing_reply_that_arrived():
+    """A response that arrived was billed, even when it carried no spec.
+
+    The counts must land in `usage` BEFORE the error short-circuits the loop.
+    Dropping that leaves a caller settling a reserve against zeros, which
+    records a real charge as free.
+    """
+    failing = _FakeModel([""], tokens=(11, 7, 3, 2),
+                         error="model call failed: HTTP 500: overloaded")
+    r = compile_screen("x", client=failing)
+    assert r.error == "model call failed: HTTP 500: overloaded"
+    assert r.spec is None and r.attempts == 1
+    assert r.usage == {"input_tokens": 11, "output_tokens": 7,
+                       "cache_read_tokens": 3, "cache_write_tokens": 2}
+
+
+def test_compile_screen_reports_zeros_when_nothing_arrived():
+    """The other half of the same rule: a transport failure billed nothing."""
+    never_sent = _FakeModel([""], tokens=(0, 0, 0, 0),
+                            error="model call failed: connection refused")
+    r = compile_screen("x", client=never_sent)
+    assert r.error == "model call failed: connection refused"
+    assert r.usage == {"input_tokens": 0, "output_tokens": 0,
+                       "cache_read_tokens": 0, "cache_write_tokens": 0}
+
+
+def test_compile_screen_keeps_earlier_usage_when_a_callable_raises():
+    """A caller's own `Complete` may break its contract and raise.
+
+    The rounds before it were still billed, so the failure comes back as
+    `result.error` rather than as an exception that carries those counts out
+    of the function with it.
+    """
+    class _RaisesOnTheSecondRound(_FakeModel):
+        def __call__(self, *, system, messages, max_tokens):
+            if self.calls:
+                raise RuntimeError("socket closed")
+            return super().__call__(system=system, messages=messages,
+                                    max_tokens=max_tokens)
+
+    client = _RaisesOnTheSecondRound([json.dumps({"spec": {"version": 7}})])
+    r = compile_screen("x", client=client)
+    assert r.error == "model call failed: socket closed"
+    assert r.attempts == 2 and r.spec is None
+    assert r.usage == {"input_tokens": 10, "output_tokens": 5,
+                       "cache_read_tokens": 0, "cache_write_tokens": 0}
+
+
+def test_compile_screen_sends_a_plain_string_system_and_the_token_ceiling():
+    client = _FakeModel([json.dumps({"spec": GOOD_SPEC})])
+    compile_screen("oversold", client=client)
+    call = client.calls[0]
+    assert isinstance(call["system"], str)
+    assert call["max_tokens"] == MAX_TOKENS
+    assert call["messages"] == [{"role": "user", "content": "oversold"}]
+
+
+def test_compile_screen_model_argument_selects_the_callable(monkeypatch):
+    """`model` names the model, it is not just the label on the result.
+
+    It used to ride along on every `messages.create` call. A `Complete` closes
+    over its model id instead, so the argument has to reach the place the
+    callable is built or it silently becomes decoration on a compile that ran
+    against the default.
+    """
+    seen = []
+    client = _FakeModel([json.dumps({"spec": GOOD_SPEC})])
+
+    def _spy(passed, model):
+        seen.append((passed, model))
+        return client
+
+    monkeypatch.setattr(compiler, "_client_or_default", _spy)
+    result = compile_screen("oversold", model="deepseek/some-other-id")
+    assert seen == [(None, "deepseek/some-other-id")]
+    assert result.model == "deepseek/some-other-id"
+
+
+def test_compile_screen_no_longer_defaults_to_an_anthropic_model():
+    """The point of the port: nothing here names Claude or needs an SDK."""
+    assert "claude" not in MODEL and "/" in MODEL
+    client = _FakeModel([json.dumps({"spec": GOOD_SPEC})])
+    assert compile_screen("oversold", client=client).model == MODEL
 
 
 def test_screen_prompt_teaches_the_conditions_only_contract():
