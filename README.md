@@ -22,10 +22,10 @@ screener compiler.
   directory of JSON specs into frozen `StrategyDefinition` values a registry
   bundle takes.
 - `screen/`: a conditions-only screener over the same RuleSpec grammar. Evaluation
-  is deterministic and LLM-free; an optional English-to-spec compiler shares the
-  `nlbuilder` extra with `nlbuilder/`, which installs `anthropic`.
-- `nlbuilder/`: English-to-RuleSpec compilation via the Claude API, behind the
-  optional `nlbuilder` extra (installs `anthropic`).
+  is deterministic and LLM-free; an optional English-to-spec compiler is
+  supplied a model callable by its caller and needs no extra.
+- `nlbuilder/`: English-to-RuleSpec compilation through a model callable the
+  caller supplies (`model.py`), with an OpenRouter default. No vendor SDK.
 - `stats.py`: poolable return moments, the deflated-Sharpe family (PSR, DSR,
   minimum track record length), and the Benjamini-Hochberg false-discovery
   control, which together are how a candidate is priced for how many candidates
@@ -738,8 +738,10 @@ uv sync --all-extras
 uv run pytest
 ```
 
-`uv sync --all-extras` pulls in `anthropic` so the `nlbuilder` tests run too; the
-rest of the package works fine without it.
+The compilers need no extra. They take a `model.Complete` callable, and the
+built-in `model.openrouter_complete` speaks OpenRouter over `httpx`, which is
+already a core dependency. Their tests pass a fake callable and reach no
+network at all.
 
 ## License
 
