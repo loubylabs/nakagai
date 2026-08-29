@@ -966,7 +966,17 @@ def test_outer_ema_masks_a_missing_descendant_then_recovers():
         4.65079365079365,
     ])
 
-    np.testing.assert_array_equal(out.to_numpy(), want)
+    # Tolerance, not equality, and the tolerance is the point of the comment.
+    # The MASK is what this test is about: index 0 and index 3 must be NaN and
+    # index 4 must recover, and `assert_allclose` compares NaN positionally by
+    # default, so that half is still exact. The VALUES are an EMA of a masked
+    # series, and the platform's core-integration job caught the last bit
+    # moving: 4.650793650793651 against 4.65079365079365, one ULP, 8.9e-16
+    # absolute. Core's own CI never saw it because it runs core's own lock; the
+    # platform installs core beside its own numpy and pandas, and a different
+    # accumulation order in one reduction is enough. Pinning an EMA to the last
+    # bit asserts a property of a dependency's summation, not of this code.
+    np.testing.assert_allclose(out.to_numpy(), want, rtol=1e-12)
 
 
 @pytest.mark.parametrize("node", [

@@ -1,6 +1,6 @@
 [project]
 name = "nakagai"
-version = "0.10.0"
+version = "0.10.1"
 description = "Deterministic core for rule-driven trading agents: bar cache, portfolio replay engine, RuleSpec strategy DSL, screener"
 readme = "README.md"
 license = "MIT"
