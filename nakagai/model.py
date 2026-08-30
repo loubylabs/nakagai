@@ -44,6 +44,8 @@ class ModelReply(NamedTuple):
 
     `cost_numerator` is in trillionths of a dollar. `cost_from_provider` is
     true only when this arrived response reported its exact bill.
+    `rate_table_complete` is true only when its validated counters can price
+    the complete response from a conservative rate table.
     `spend_unknown` is true when an attempted call may have an unobserved bill.
     """
 
@@ -54,6 +56,7 @@ class ModelReply(NamedTuple):
     cache_write_tokens: int
     cost_numerator: int
     cost_from_provider: bool
+    rate_table_complete: bool
     spend_unknown: bool
     error: str
 
@@ -92,7 +95,7 @@ def openrouter_complete(*, model: str, api_key: str | None = None,
                  max_tokens: int) -> ModelReply:
         key = api_key or os.environ.get("OPENROUTER_API_KEY", "")
         if not key:
-            return ModelReply("", 0, 0, 0, 0, 0, False, False,
+            return ModelReply("", 0, 0, 0, 0, 0, False, False, False,
                               "no OPENROUTER_API_KEY is configured")
         body: dict = {
             "model": model,
@@ -110,7 +113,7 @@ def openrouter_complete(*, model: str, api_key: str | None = None,
                     OPENROUTER_URL, json=body,
                     headers={"Authorization": f"Bearer {key}"})
         except Exception as e:  # noqa: BLE001 - transport, nothing arrived
-            return ModelReply("", 0, 0, 0, 0, 0, False, True,
+            return ModelReply("", 0, 0, 0, 0, 0, False, False, True,
                               f"model call failed: {e}")
         return _reply(resp)
 
@@ -141,7 +144,7 @@ def _token_count(payload: dict, key: str, *, required: bool) -> tuple[int, bool]
 
 
 def _billing_evidence(raw_usage) -> tuple[tuple[int, int, int, int], int,
-                                          bool, bool]:
+                                          bool, bool, bool]:
     """Classify the complete bill while retaining each valid lower bound.
 
     An exact provider cost settles the response on its own. Without one, the
@@ -180,7 +183,8 @@ def _billing_evidence(raw_usage) -> tuple[tuple[int, int, int, int], int,
     counts = (input_tokens, output_tokens,
               cache_read_tokens, cache_write_tokens)
     spend_unknown = not (cost_from_provider or counters_complete)
-    return counts, cost_numerator, cost_from_provider, spend_unknown
+    return (counts, cost_numerator, cost_from_provider,
+            counters_complete, spend_unknown)
 
 
 def _reply(resp) -> ModelReply:
@@ -197,7 +201,8 @@ def _reply(resp) -> ModelReply:
         doc = {}
     if not isinstance(doc, dict):
         doc = {}
-    counts, cost_numerator, cost_from_provider, spend_unknown = (
+    (counts, cost_numerator, cost_from_provider, rate_table_complete,
+     spend_unknown) = (
         _billing_evidence(doc.get("usage"))
     )
     status = getattr(resp, "status_code", 0)
@@ -205,16 +210,17 @@ def _reply(resp) -> ModelReply:
         detail = doc.get("error") or {}
         message = detail.get("message") if isinstance(detail, dict) else detail
         return ModelReply(
-            "", *counts, cost_numerator, cost_from_provider, spend_unknown,
+            "", *counts, cost_numerator, cost_from_provider,
+            rate_table_complete, spend_unknown,
             f"model call failed: HTTP {status}: {message or 'no detail'}")
     try:
         choice = (doc.get("choices") or [{}])[0]
         text = (choice.get("message") or {}).get("content") or ""
     except Exception:  # noqa: BLE001
         return ModelReply("", *counts, cost_numerator, cost_from_provider,
-                          spend_unknown,
+                          rate_table_complete, spend_unknown,
                           "model reply had no readable content")
     if not isinstance(text, str):
         text = json.dumps(text)
     return ModelReply(text, *counts, cost_numerator, cost_from_provider,
-                      spend_unknown, "")
+                      rate_table_complete, spend_unknown, "")

@@ -83,12 +83,14 @@ class FakeModel:
     """
 
     def __init__(self, replies, tokens=TOKENS, error="", cost_numerator=0,
-                 cost_from_provider=False, spend_unknown=False):
+                 cost_from_provider=False, rate_table_complete=True,
+                 spend_unknown=False):
         self._replies = list(replies)
         self._tokens = tokens
         self._error = error
         self._cost_numerator = cost_numerator
         self._cost_from_provider = cost_from_provider
+        self._rate_table_complete = rate_table_complete
         self._spend_unknown = spend_unknown
         self.requests = []
 
@@ -97,7 +99,8 @@ class FakeModel:
                               "max_tokens": max_tokens})
         return ModelReply(self._replies.pop(0), *self._tokens,
                           self._cost_numerator, self._cost_from_provider,
-                          self._spend_unknown, self._error)
+                          self._rate_table_complete, self._spend_unknown,
+                          self._error)
 
 
 class _MeteredReplies:
@@ -606,9 +609,9 @@ def test_a_fresh_compile_result_has_zero_unknown_spend_and_retries():
 def test_two_exact_bills_sum_when_validation_retries():
     bad = json.dumps({"spec": {**GOOD_SPEC, "timeframe": "2h"}})
     exact_two_attempt_result = compile_strategy("x", client=_MeteredReplies([
-        ModelReply(bad, *TOKENS, 1_111_111, True, False, ""),
+        ModelReply(bad, *TOKENS, 1_111_111, True, False, False, ""),
         ModelReply(json.dumps({"spec": GOOD_SPEC}), *TOKENS,
-                   2_222_222, True, False, ""),
+                   2_222_222, True, False, False, ""),
     ]))
 
     assert exact_two_attempt_result.cost_numerator == 3_333_333
@@ -617,13 +620,83 @@ def test_two_exact_bills_sum_when_validation_retries():
     assert exact_two_attempt_result.retries_taken == 1
 
 
+# Production break caught: alternating complete settlement bases could be
+# flattened into one certain aggregate that neither basis could settle.
+def test_mixed_exact_only_and_counter_only_retries_are_unknown():
+    bad = json.dumps({"spec": {**GOOD_SPEC, "timeframe": "2h"}})
+    result = compile_strategy("x", client=_MeteredReplies([
+        ModelReply(bad, *TOKENS, 1_111_111, True, False, False, ""),
+        ModelReply(json.dumps({"spec": GOOD_SPEC}), *TOKENS,
+                   0, False, True, False, ""),
+    ]))
+
+    assert result.spec == GOOD_SPEC
+    assert result.usage == {
+        "input_tokens": 200,
+        "output_tokens": 100,
+        "cache_read_tokens": 20,
+        "cache_write_tokens": 10,
+    }
+    assert result.cost_numerator == 1_111_111
+    assert result.cost_from_provider is False
+    assert result.spend_unknown is True
+    assert result.retries_taken == 1
+
+
+def test_mixed_counter_only_and_exact_only_retries_are_unknown():
+    bad = json.dumps({"spec": {**GOOD_SPEC, "timeframe": "2h"}})
+    result = compile_strategy("x", client=_MeteredReplies([
+        ModelReply(bad, *TOKENS, 0, False, True, False, ""),
+        ModelReply(json.dumps({"spec": GOOD_SPEC}), *TOKENS,
+                   1_111_111, True, False, False, ""),
+    ]))
+
+    assert result.spec == GOOD_SPEC
+    assert result.usage == {
+        "input_tokens": 200,
+        "output_tokens": 100,
+        "cache_read_tokens": 20,
+        "cache_write_tokens": 10,
+    }
+    assert result.cost_numerator == 1_111_111
+    assert result.cost_from_provider is False
+    assert result.spend_unknown is True
+    assert result.retries_taken == 1
+
+
+def test_all_counter_complete_retries_remain_table_priceable():
+    bad = json.dumps({"spec": {**GOOD_SPEC, "timeframe": "2h"}})
+    result = compile_strategy("x", client=_MeteredReplies([
+        ModelReply(bad, *TOKENS, 0, False, True, False, ""),
+        ModelReply(json.dumps({"spec": GOOD_SPEC}), *TOKENS,
+                   0, False, True, False, ""),
+    ]))
+
+    assert result.cost_numerator == 0
+    assert result.cost_from_provider is False
+    assert result.spend_unknown is False
+
+
+def test_exact_and_counter_complete_can_join_a_counter_only_retry():
+    bad = json.dumps({"spec": {**GOOD_SPEC, "timeframe": "2h"}})
+    result = compile_strategy("x", client=_MeteredReplies([
+        ModelReply(bad, *TOKENS, 1_111_111, True, True, False, ""),
+        ModelReply(json.dumps({"spec": GOOD_SPEC}), *TOKENS,
+                   0, False, True, False, ""),
+    ]))
+
+    assert result.cost_numerator == 1_111_111
+    assert result.cost_from_provider is False
+    assert result.spend_unknown is False
+
+
 # Production break caught: an unknown earlier attempt could be erased by a retry.
 def test_unknown_spend_is_ored_across_arrived_retries():
     bad = json.dumps({"spec": {**GOOD_SPEC, "timeframe": "2h"}})
     result = compile_strategy("x", client=_MeteredReplies([
-        ModelReply(bad, *TOKENS, 1_111_111, True, True, ""),
+        ModelReply(bad, *TOKENS, 1_111_111, True, True, True, ""),
         ModelReply(json.dumps({"spec": GOOD_SPEC}), *TOKENS,
-                   2_222_222, True, False, ""),
+                   2_222_222, True, True, False, ""),
     ]))
 
     assert result.cost_numerator == 3_333_333
@@ -636,9 +709,9 @@ def test_unknown_spend_is_ored_across_arrived_retries():
 def test_a_synthetic_retry_revokes_exact_bill_provenance():
     bad = json.dumps({"spec": {**GOOD_SPEC, "timeframe": "2h"}})
     mixed_two_attempt_result = compile_strategy("x", client=_MeteredReplies([
-        ModelReply(bad, *TOKENS, 1_111_111, True, False, ""),
+        ModelReply(bad, *TOKENS, 1_111_111, True, True, False, ""),
         ModelReply(json.dumps({"spec": GOOD_SPEC}), *TOKENS,
-                   0, False, False, ""),
+                   0, False, True, False, ""),
     ]))
 
     assert mixed_two_attempt_result.cost_numerator == 1_111_111
@@ -668,7 +741,7 @@ def test_malformed_arrived_evidence_is_sticky_and_keeps_known_lower_bounds():
     result = compile_strategy("x", client=_MeteredReplies([
         incomplete,
         ModelReply(json.dumps({"spec": GOOD_SPEC}), *TOKENS,
-                   2_222_222, True, False, ""),
+                   2_222_222, True, True, False, ""),
     ]))
 
     assert result.usage == {
@@ -696,8 +769,10 @@ class _BilledFailure:
     def __call__(self, *, system, messages, max_tokens):
         self.calls += 1
         if self.calls == 1:
-            return ModelReply(BAD_SPEC_REPLY, *TOKENS, 0, False, False, "")
-        return ModelReply("", *self._tokens, 0, False, False, self._error)
+            return ModelReply(
+                BAD_SPEC_REPLY, *TOKENS, 0, False, True, False, "")
+        return ModelReply(
+            "", *self._tokens, 0, False, True, False, self._error)
 
 
 def test_a_billed_failure_records_its_tokens_before_the_error():
@@ -719,6 +794,7 @@ def test_a_transport_failure_reports_zero_observed_usage_and_unknown_spend():
     """No response supplied usage, but the attempted delivery may be billed."""
     client = FakeModel([""], tokens=(0, 0, 0, 0),
                        error="model call failed: connection reset",
+                       rate_table_complete=False,
                        spend_unknown=True)
     res = compile_strategy("x", client=client)
     assert res.error == "model call failed: connection reset"
@@ -748,7 +824,7 @@ class _RaisingModel:
             raise RuntimeError("api down")
         self._sent = True
         return ModelReply(self._first, *TOKENS, self._cost_numerator,
-                          self._cost_from_provider, False, "")
+                          self._cost_from_provider, True, False, "")
 
 
 def test_a_callable_that_raises_returns_an_error_result_with_partial_usage():
@@ -795,6 +871,25 @@ def test_no_client_means_openrouter_on_the_pinned_endpoint(monkeypatch):
     res = compile_strategy("buy rsi dips", model="qwen/qwen3-max")
     assert built[1]["model"] == "qwen/qwen3-max"
     assert res.model == "qwen/qwen3-max"
+
+
+def test_missing_default_key_is_a_known_zero_attempt_compile(monkeypatch):
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+
+    result = compile_strategy("buy rsi dips")
+
+    assert "OPENROUTER_API_KEY" in result.error
+    assert result.attempts == 0
+    assert result.retries_taken == 0
+    assert result.usage == {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0,
+    }
+    assert result.cost_numerator == 0
+    assert result.cost_from_provider is False
+    assert result.spend_unknown is False
 
 
 GOOD_COMPOSITE = {
