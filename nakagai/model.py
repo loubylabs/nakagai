@@ -25,6 +25,8 @@ from typing import NamedTuple, Protocol
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 _COST_SCALE = 1_000_000_000_000
+_LEDGER_INTEGER_MAX = 2_147_483_647
+_SIGNED_BIGINT_MAX = 2 ** 63 - 1
 
 
 class ModelReply(NamedTuple):
@@ -122,14 +124,63 @@ def _cost_numerator(usage: dict) -> tuple[int, bool]:
     amount = Decimal(repr(cost))
     if not amount.is_finite() or amount < 0:
         return 0, False
-    return int(amount * _COST_SCALE), True
+    numerator = amount * _COST_SCALE
+    if numerator > _SIGNED_BIGINT_MAX:
+        return 0, False
+    return int(numerator), True
 
 
-def _token_count(value) -> int:
-    try:
-        return int(value or 0)
-    except (TypeError, ValueError, OverflowError):
-        return 0
+def _token_count(payload: dict, key: str, *, required: bool) -> tuple[int, bool]:
+    """Return one safe ledger count and whether its evidence is valid."""
+    if key not in payload:
+        return 0, not required
+    value = payload[key]
+    if type(value) is not int or not 0 <= value <= _LEDGER_INTEGER_MAX:
+        return 0, False
+    return value, True
+
+
+def _billing_evidence(raw_usage) -> tuple[tuple[int, int, int, int], int,
+                                          bool, bool]:
+    """Classify the complete bill while retaining each valid lower bound.
+
+    An exact provider cost settles the response on its own. Without one, the
+    two required token counters and the optional prompt detail counters must
+    form the same valid shape the platform can price from its rate table.
+    Invalid fields contribute zero independently, so one malformed counter
+    cannot erase valid counts beside it.
+    """
+    usage_valid = isinstance(raw_usage, dict)
+    usage = raw_usage if usage_valid else {}
+    cost_numerator, cost_from_provider = _cost_numerator(usage)
+
+    input_tokens, input_valid = _token_count(
+        usage, "prompt_tokens", required=True)
+    output_tokens, output_valid = _token_count(
+        usage, "completion_tokens", required=True)
+
+    raw_details = usage.get("prompt_tokens_details", {})
+    details_valid = isinstance(raw_details, dict)
+    details = raw_details if details_valid else {}
+    cache_read_tokens, cache_read_valid = _token_count(
+        details, "cached_tokens", required=False)
+    cache_write_tokens, cache_write_valid = _token_count(
+        details, "cache_write_tokens", required=False)
+
+    subsets_valid = cache_read_tokens + cache_write_tokens <= input_tokens
+    counters_complete = (
+        usage_valid
+        and input_valid
+        and output_valid
+        and details_valid
+        and cache_read_valid
+        and cache_write_valid
+        and subsets_valid
+    )
+    counts = (input_tokens, output_tokens,
+              cache_read_tokens, cache_write_tokens)
+    spend_unknown = not (cost_from_provider or counters_complete)
+    return counts, cost_numerator, cost_from_provider, spend_unknown
 
 
 def _reply(resp) -> ModelReply:
@@ -146,32 +197,24 @@ def _reply(resp) -> ModelReply:
         doc = {}
     if not isinstance(doc, dict):
         doc = {}
-    usage = doc.get("usage") or {}
-    if not isinstance(usage, dict):
-        usage = {}
-    prompt_details = usage.get("prompt_tokens_details") or {}
-    if not isinstance(prompt_details, dict):
-        prompt_details = {}
-    cost_numerator, cost_from_provider = _cost_numerator(usage)
-    counts = (
-        _token_count(usage.get("prompt_tokens")),
-        _token_count(usage.get("completion_tokens")),
-        _token_count(prompt_details.get("cached_tokens")),
-        0,
+    counts, cost_numerator, cost_from_provider, spend_unknown = (
+        _billing_evidence(doc.get("usage"))
     )
     status = getattr(resp, "status_code", 0)
     if status < 200 or status >= 300:
         detail = doc.get("error") or {}
         message = detail.get("message") if isinstance(detail, dict) else detail
         return ModelReply(
-            "", *counts, cost_numerator, cost_from_provider, False,
+            "", *counts, cost_numerator, cost_from_provider, spend_unknown,
             f"model call failed: HTTP {status}: {message or 'no detail'}")
     try:
         choice = (doc.get("choices") or [{}])[0]
         text = (choice.get("message") or {}).get("content") or ""
     except Exception:  # noqa: BLE001
-        return ModelReply("", *counts, cost_numerator, cost_from_provider, False,
+        return ModelReply("", *counts, cost_numerator, cost_from_provider,
+                          spend_unknown,
                           "model reply had no readable content")
     if not isinstance(text, str):
         text = json.dumps(text)
-    return ModelReply(text, *counts, cost_numerator, cost_from_provider, False, "")
+    return ModelReply(text, *counts, cost_numerator, cost_from_provider,
+                      spend_unknown, "")
