@@ -6,7 +6,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from nakagai.model import ModelReply
+from nakagai.model import ModelReply, _reply
 from nakagai.nlbuilder import compiler
 from nakagai.nlbuilder.compiler import MODEL, PROVIDER, _check, compile_strategy
 from nakagai.nlbuilder.prompt import render_system_prompt
@@ -646,6 +646,41 @@ def test_a_synthetic_retry_revokes_exact_bill_provenance():
 
 
 BAD_SPEC_REPLY = json.dumps({"spec": {**GOOD_SPEC, "timeframe": "2h"}})
+
+
+class _ArrivedResponse:
+    status_code = 200
+
+    def __init__(self, doc):
+        self._doc = doc
+
+    def json(self):
+        return self._doc
+
+
+# Production break caught: malformed evidence on a retry could be forgotten.
+def test_malformed_arrived_evidence_is_sticky_and_keeps_known_lower_bounds():
+    incomplete = _reply(_ArrivedResponse({
+        "choices": [{"message": {"content": BAD_SPEC_REPLY}}],
+        "usage": {"prompt_tokens": 17,
+                  "prompt_tokens_details": {"cached_tokens": 4}},
+    }))
+    result = compile_strategy("x", client=_MeteredReplies([
+        incomplete,
+        ModelReply(json.dumps({"spec": GOOD_SPEC}), *TOKENS,
+                   2_222_222, True, False, ""),
+    ]))
+
+    assert result.usage == {
+        "input_tokens": 117,
+        "output_tokens": 50,
+        "cache_read_tokens": 14,
+        "cache_write_tokens": 5,
+    }
+    assert result.cost_numerator == 2_222_222
+    assert result.cost_from_provider is False
+    assert result.spend_unknown is True
+    assert result.retries_taken == 1
 
 
 class _BilledFailure:

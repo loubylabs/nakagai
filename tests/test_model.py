@@ -198,12 +198,28 @@ def test_an_unreadable_body_keeps_the_counts_it_could_read(monkeypatch):
     assert reply.spend_unknown is False
 
 
+# Production break caught: arrival alone could clear an unreadable bill.
+def test_unreadable_json_has_unknown_spend():
+    class _Unreadable:
+        status_code = 200
+
+        def json(self):
+            raise ValueError("not JSON")
+
+    reply = model._reply(_Unreadable())
+
+    assert (reply.input_tokens, reply.output_tokens) == (0, 0)
+    assert (reply.cost_numerator, reply.cost_from_provider) == (0, False)
+    assert reply.spend_unknown is True
+
+
 # Production break caught: successful responses could discard usage.cost.
 def test_an_arrived_reply_carries_the_routers_exact_bill():
     reply = model._reply(_ok(cost=0.00003256))
 
     assert reply.cost_numerator == 32_560_000
     assert reply.cost_from_provider is True
+    assert reply.spend_unknown is False
 
 
 # Production break caught: non-2xx responses could discard usage.cost.
@@ -217,10 +233,11 @@ def test_a_failing_response_keeps_its_exact_bill():
     assert reply.error
     assert reply.cost_numerator == 1_234_567
     assert reply.cost_from_provider is True
+    assert reply.spend_unknown is False
 
 
 @pytest.mark.parametrize("cost", [None, True, "0.000001", float("nan"),
-                                  float("inf"), -0.000001])
+                                  float("inf"), -0.000001, 10_000_000])
 # Production break caught: malformed provider prices could raise or erase usage.
 def test_an_invalid_provider_cost_keeps_arrived_token_counts(cost):
     reply = model._reply(_ok(cost=cost))
@@ -236,6 +253,102 @@ def test_a_non_dictionary_response_returns_a_zero_usage_reply():
     assert reply.text == "" and reply.error == ""
     assert (reply.input_tokens, reply.output_tokens) == (0, 0)
     assert (reply.cost_numerator, reply.cost_from_provider) == (0, False)
+    assert reply.spend_unknown is True
+
+
+@pytest.mark.parametrize("usage", [None, [], "missing"])
+# Production break caught: missing usage could settle an arrived call at zero.
+def test_missing_or_non_object_usage_has_unknown_spend(usage):
+    doc = {"choices": [{"message": {"content": "{}"}}]}
+    if usage is not None:
+        doc["usage"] = usage
+
+    reply = model._reply(_Resp(200, doc))
+
+    assert (reply.input_tokens, reply.output_tokens) == (0, 0)
+    assert reply.spend_unknown is True
+
+
+@pytest.mark.parametrize(
+    ("usage", "expected"),
+    [
+        ({"prompt_tokens": 11}, (11, 0, 0, 0)),
+        ({"completion_tokens": 7}, (0, 7, 0, 0)),
+        ({"prompt_tokens": True, "completion_tokens": 7},
+         (0, 7, 0, 0)),
+        ({"prompt_tokens": 11, "completion_tokens": -1},
+         (11, 0, 0, 0)),
+        ({"prompt_tokens": 11, "completion_tokens": 7,
+          "prompt_tokens_details": {"cached_tokens": "2",
+                                    "cache_write_tokens": 3}},
+         (11, 7, 0, 3)),
+        ({"prompt_tokens": 11, "completion_tokens": 7,
+          "prompt_tokens_details": {"cached_tokens": 2,
+                                    "cache_write_tokens": 2_147_483_648}},
+         (11, 7, 2, 0)),
+    ],
+)
+# Production break caught: coerced or partial counters could pose as a bill.
+def test_incomplete_or_invalid_counters_preserve_valid_lower_bounds(
+        usage, expected):
+    reply = model._reply(_Resp(200, {
+        "choices": [{"message": {"content": "{}"}}],
+        "usage": usage,
+    }))
+
+    assert (reply.input_tokens, reply.output_tokens,
+            reply.cache_read_tokens, reply.cache_write_tokens) == expected
+    assert reply.spend_unknown is True
+
+
+@pytest.mark.parametrize("details", [None, [], {"cached_tokens": -1}])
+def test_invalid_prompt_details_make_rate_table_evidence_incomplete(details):
+    reply = model._reply(_Resp(200, {
+        "choices": [{"message": {"content": "{}"}}],
+        "usage": {"prompt_tokens": 11, "completion_tokens": 7,
+                  "prompt_tokens_details": details},
+    }))
+
+    assert (reply.input_tokens, reply.output_tokens) == (11, 7)
+    assert reply.spend_unknown is True
+
+
+def test_prompt_subsets_cannot_exceed_the_reported_prompt_total():
+    reply = model._reply(_Resp(200, {
+        "choices": [{"message": {"content": "{}"}}],
+        "usage": {"prompt_tokens": 11, "completion_tokens": 7,
+                  "prompt_tokens_details": {"cached_tokens": 8,
+                                            "cache_write_tokens": 4}},
+    }))
+
+    assert (reply.input_tokens, reply.output_tokens,
+            reply.cache_read_tokens, reply.cache_write_tokens) == (11, 7, 8, 4)
+    assert reply.spend_unknown is True
+
+
+def test_complete_rate_table_counters_make_arrived_spend_known():
+    reply = model._reply(_Resp(200, {
+        "choices": [{"message": {"content": "{}"}}],
+        "usage": {"prompt_tokens": 11, "completion_tokens": 7,
+                  "prompt_tokens_details": {"cached_tokens": 2,
+                                            "cache_write_tokens": 3}},
+    }))
+
+    assert (reply.input_tokens, reply.output_tokens,
+            reply.cache_read_tokens, reply.cache_write_tokens) == (11, 7, 2, 3)
+    assert (reply.cost_numerator, reply.cost_from_provider) == (0, False)
+    assert reply.spend_unknown is False
+
+
+def test_http_error_uses_the_same_incomplete_evidence_rule():
+    reply = model._reply(_Resp(429, {
+        "error": {"message": "limited"},
+        "usage": {"prompt_tokens": 11},
+    }))
+
+    assert reply.error
+    assert reply.input_tokens == 11
+    assert reply.spend_unknown is True
 
 
 # Production break caught: malformed tokens could erase an arrived exact provider bill.
@@ -250,3 +363,4 @@ def test_malformed_token_counts_do_not_discard_an_arrived_exact_bill():
     assert (reply.input_tokens, reply.output_tokens) == (0, 7)
     assert reply.cache_read_tokens == 0
     assert (reply.cost_numerator, reply.cost_from_provider) == (1_234_567, True)
+    assert reply.spend_unknown is False
