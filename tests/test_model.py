@@ -177,11 +177,59 @@ def test_the_router_is_asked_to_report_what_it_charged(monkeypatch):
 
 def test_cached_prompt_tokens_are_reported_when_the_router_sends_them(monkeypatch):
     complete, _ = _complete(
-        monkeypatch, [_ok(prompt_tokens_details={"cached_tokens": 40})])
+        monkeypatch, [_ok(prompt_tokens=100,
+                          prompt_tokens_details={"cached_tokens": 40})])
 
     reply = complete(system="s", messages=[], max_tokens=10)
 
+    assert reply.input_tokens == 60
     assert reply.cache_read_tokens == 40
+
+
+def test_cache_read_and_write_are_removed_from_prompt_total_once():
+    reply = model._reply(_ok(
+        prompt_tokens=100,
+        completion_tokens=7,
+        prompt_tokens_details={
+            "cached_tokens": 25,
+            "cache_write_tokens": 15,
+        },
+    ))
+
+    assert (reply.input_tokens, reply.output_tokens,
+            reply.cache_read_tokens, reply.cache_write_tokens) == (
+                60, 7, 25, 15)
+    assert reply.rate_table_complete is True
+    assert reply.spend_unknown is False
+
+
+def test_missing_optional_cache_counts_are_valid_zero_subsets():
+    reply = model._reply(_ok(prompt_tokens=100, completion_tokens=7))
+
+    assert (reply.input_tokens, reply.output_tokens,
+            reply.cache_read_tokens, reply.cache_write_tokens) == (
+                100, 7, 0, 0)
+    assert reply.rate_table_complete is True
+    assert reply.spend_unknown is False
+
+
+def test_exact_provider_cost_keeps_valid_cache_normalization():
+    reply = model._reply(_ok(
+        prompt_tokens=100,
+        completion_tokens=7,
+        prompt_tokens_details={
+            "cached_tokens": 25,
+            "cache_write_tokens": 15,
+        },
+        cost=0.00003256,
+    ))
+
+    assert (reply.input_tokens, reply.output_tokens,
+            reply.cache_read_tokens, reply.cache_write_tokens) == (
+                60, 7, 25, 15)
+    assert reply.cost_from_provider is True
+    assert reply.rate_table_complete is True
+    assert reply.spend_unknown is False
 
 
 # Production break caught: malformed content could discard arrived usage.
@@ -281,11 +329,11 @@ def test_missing_or_non_object_usage_has_unknown_spend(usage):
         ({"prompt_tokens": 11, "completion_tokens": 7,
           "prompt_tokens_details": {"cached_tokens": "2",
                                     "cache_write_tokens": 3}},
-         (11, 7, 0, 3)),
+         (0, 7, 0, 3)),
         ({"prompt_tokens": 11, "completion_tokens": 7,
           "prompt_tokens_details": {"cached_tokens": 2,
                                     "cache_write_tokens": 2_147_483_648}},
-         (11, 7, 2, 0)),
+         (0, 7, 2, 0)),
     ],
 )
 # Production break caught: coerced or partial counters could pose as a bill.
@@ -309,7 +357,7 @@ def test_invalid_prompt_details_make_rate_table_evidence_incomplete(details):
                   "prompt_tokens_details": details},
     }))
 
-    assert (reply.input_tokens, reply.output_tokens) == (11, 7)
+    assert (reply.input_tokens, reply.output_tokens) == (0, 7)
     assert reply.spend_unknown is True
 
 
@@ -322,7 +370,7 @@ def test_prompt_subsets_cannot_exceed_the_reported_prompt_total():
     }))
 
     assert (reply.input_tokens, reply.output_tokens,
-            reply.cache_read_tokens, reply.cache_write_tokens) == (11, 7, 8, 4)
+            reply.cache_read_tokens, reply.cache_write_tokens) == (0, 7, 8, 4)
     assert reply.spend_unknown is True
 
 
@@ -335,7 +383,7 @@ def test_complete_rate_table_counters_make_arrived_spend_known():
     }))
 
     assert (reply.input_tokens, reply.output_tokens,
-            reply.cache_read_tokens, reply.cache_write_tokens) == (11, 7, 2, 3)
+            reply.cache_read_tokens, reply.cache_write_tokens) == (6, 7, 2, 3)
     assert (reply.cost_numerator, reply.cost_from_provider) == (0, False)
     assert reply.spend_unknown is False
 
@@ -383,4 +431,33 @@ def test_malformed_token_counts_do_not_discard_an_arrived_exact_bill():
     assert (reply.input_tokens, reply.output_tokens) == (0, 7)
     assert reply.cache_read_tokens == 0
     assert (reply.cost_numerator, reply.cost_from_provider) == (1_234_567, True)
+    assert reply.spend_unknown is False
+
+
+@pytest.mark.parametrize(
+    ("details", "expected"),
+    [
+        ({"cached_tokens": True, "cache_write_tokens": 15},
+         (0, 7, 0, 15)),
+        ({"cached_tokens": -1, "cache_write_tokens": 15},
+         (0, 7, 0, 15)),
+        ({"cached_tokens": 25, "cache_write_tokens": 2_147_483_648},
+         (0, 7, 25, 0)),
+        ({"cached_tokens": 90, "cache_write_tokens": 15},
+         (0, 7, 90, 15)),
+    ],
+)
+def test_invalid_cache_subsets_keep_only_independent_lower_bounds(
+        details, expected):
+    reply = model._reply(_ok(
+        prompt_tokens=100,
+        completion_tokens=7,
+        prompt_tokens_details=details,
+        cost=0.00003256,
+    ))
+
+    assert (reply.input_tokens, reply.output_tokens,
+            reply.cache_read_tokens, reply.cache_write_tokens) == expected
+    assert reply.cost_from_provider is True
+    assert reply.rate_table_complete is False
     assert reply.spend_unknown is False

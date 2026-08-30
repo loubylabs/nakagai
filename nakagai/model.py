@@ -150,14 +150,19 @@ def _billing_evidence(raw_usage) -> tuple[tuple[int, int, int, int], int,
     An exact provider cost settles the response on its own. Without one, the
     two required token counters and the optional prompt detail counters must
     form the same valid shape the platform can price from its rate table.
-    Invalid fields contribute zero independently, so one malformed counter
-    cannot erase valid counts beside it.
+
+    OpenRouter's prompt total includes the cache read and write subsets. Emit
+    uncached input only when that complete subset relationship validates.
+    Otherwise emit zero uncached input while retaining each independently
+    valid cache and output lower bound. Invalid fields contribute zero. An
+    exact cost may still settle the bill, but it does not make incoherent
+    usage safe to normalize.
     """
     usage_valid = isinstance(raw_usage, dict)
     usage = raw_usage if usage_valid else {}
     cost_numerator, cost_from_provider = _cost_numerator(usage)
 
-    input_tokens, input_valid = _token_count(
+    prompt_tokens, prompt_valid = _token_count(
         usage, "prompt_tokens", required=True)
     output_tokens, output_valid = _token_count(
         usage, "completion_tokens", required=True)
@@ -170,14 +175,21 @@ def _billing_evidence(raw_usage) -> tuple[tuple[int, int, int, int], int,
     cache_write_tokens, cache_write_valid = _token_count(
         details, "cache_write_tokens", required=False)
 
-    subsets_valid = cache_read_tokens + cache_write_tokens <= input_tokens
-    counters_complete = (
-        usage_valid
-        and input_valid
-        and output_valid
+    subsets_valid = (
+        prompt_valid
         and details_valid
         and cache_read_valid
         and cache_write_valid
+        and cache_read_tokens + cache_write_tokens <= prompt_tokens
+    )
+    input_tokens = (
+        prompt_tokens - cache_read_tokens - cache_write_tokens
+        if subsets_valid
+        else 0
+    )
+    counters_complete = (
+        usage_valid
+        and output_valid
         and subsets_valid
     )
     counts = (input_tokens, output_tokens,
