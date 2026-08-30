@@ -592,6 +592,48 @@ def test_usage_is_summed_across_retries_with_cache_split():
     assert res.model == "deepseek/deepseek-v4-flash-0731"
 
 
+def test_normalized_cache_subsets_are_summed_across_arrived_retries():
+    bad = json.dumps({"spec": {**GOOD_SPEC, "timeframe": "2h"}})
+    first = _reply(_ArrivedResponse({
+        "choices": [{"message": {"content": bad}}],
+        "usage": {
+            "prompt_tokens": 100,
+            "completion_tokens": 7,
+            "prompt_tokens_details": {
+                "cached_tokens": 25,
+                "cache_write_tokens": 15,
+            },
+        },
+    }))
+    second = _reply(_ArrivedResponse({
+        "choices": [{"message": {
+            "content": json.dumps({"spec": GOOD_SPEC}),
+        }}],
+        "usage": {
+            "prompt_tokens": 80,
+            "completion_tokens": 9,
+            "prompt_tokens_details": {
+                "cached_tokens": 10,
+                "cache_write_tokens": 20,
+            },
+        },
+    }))
+
+    result = compile_strategy("buy rsi dips", client=_MeteredReplies([
+        first,
+        second,
+    ]))
+
+    assert result.usage == {
+        "input_tokens": 110,
+        "output_tokens": 16,
+        "cache_read_tokens": 35,
+        "cache_write_tokens": 35,
+    }
+    assert result.spend_unknown is False
+    assert result.retries_taken == 1
+
+
 def test_usage_present_on_not_expressible():
     client = FakeModel([json.dumps({"not_expressible": "no renko"})])
     res = compile_strategy("renko", client=client)
@@ -745,7 +787,7 @@ def test_malformed_arrived_evidence_is_sticky_and_keeps_known_lower_bounds():
     ]))
 
     assert result.usage == {
-        "input_tokens": 117,
+        "input_tokens": 113,
         "output_tokens": 50,
         "cache_read_tokens": 14,
         "cache_write_tokens": 5,
