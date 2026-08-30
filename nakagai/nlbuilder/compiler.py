@@ -41,10 +41,12 @@ class CompileResult:
     clarifications: list[str] = field(default_factory=list)
     not_expressible: str = ""
     attempts: int = 0
+    retries_taken: int = 0
     model: str = ""
     error: str = ""
     cost_numerator: int = 0
     cost_from_provider: bool = False
+    spend_unknown: bool = False
     usage: dict = field(default_factory=lambda: {
         "input_tokens": 0, "output_tokens": 0,
         "cache_read_tokens": 0, "cache_write_tokens": 0})
@@ -88,25 +90,30 @@ def _add_usage(result: CompileResult, reply: ModelReply) -> None:
     Every reply that ARRIVED is added, a failing one included: the provider
     charged for it either way. Reporting zero there would record a billed call
     as free, and a caller settling a reserve against `usage` would never see
-    the real amount. Only a transport failure that never reached a provider
-    carries zeros, and it carries them honestly.
+    the real amount. A transport failure carries zero observed usage because
+    no response supplied counts, while its unknown-spend bit records that the
+    provider may still have accepted the call.
 
     `cost_numerator` sums reported trillionths of a dollar. The aggregate is a
     lower bound whenever `cost_from_provider` is false: it keeps every exact
     numerator that arrived, but at least one attempt supplied no exact bill.
     Provenance is true only when every completed attempt reported its exact
-    provider bill.
+    provider bill and no attempt has unknown spend. `spend_unknown` is sticky
+    because a later arrived response cannot prove an earlier uncertain call
+    was free.
     """
     result.usage["input_tokens"] += reply.input_tokens
     result.usage["output_tokens"] += reply.output_tokens
     result.usage["cache_read_tokens"] += reply.cache_read_tokens
     result.usage["cache_write_tokens"] += reply.cache_write_tokens
     result.cost_numerator += reply.cost_numerator
+    exact_bill = reply.cost_from_provider and not reply.spend_unknown
     result.cost_from_provider = (
-        reply.cost_from_provider
+        exact_bill
         if result.attempts == 1
-        else result.cost_from_provider and reply.cost_from_provider
+        else result.cost_from_provider and exact_bill
     )
+    result.spend_unknown = result.spend_unknown or reply.spend_unknown
 
 
 def _check(kind: str, spec, plays: Mapping[str, Mapping] | None,
@@ -158,6 +165,7 @@ def compile_strategy(description: str, current_spec: dict | None = None,
     last_errors: list[str] = []
     for _ in range(max_retries + 1):
         result.attempts += 1
+        result.retries_taken = result.attempts - 1
         try:
             reply = complete(system=system, messages=messages,
                              max_tokens=MAX_TOKENS)
@@ -167,6 +175,7 @@ def compile_strategy(description: str, current_spec: dict | None = None,
             # A raise here would throw away every count already accumulated.
             result.error = f"model call failed: {e}"
             result.cost_from_provider = False
+            result.spend_unknown = True
             return result
         # Bill first, read second. The counts are a fact about a call that
         # already happened, so nothing below may reach a return ahead of them.
