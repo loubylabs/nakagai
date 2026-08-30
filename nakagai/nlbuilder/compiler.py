@@ -52,6 +52,15 @@ class CompileResult:
         "cache_read_tokens": 0, "cache_write_tokens": 0})
 
 
+@dataclass(frozen=True)
+class _AggregateBillingEvidence:
+    """Settlement bases shared by every attempted response so far."""
+
+    all_provider: bool
+    all_rate_table: bool
+    delivery_uncertain: bool
+
+
 def _client_or_default(client, model: str = MODEL) -> Complete:
     """The `Complete` this compile runs against.
 
@@ -65,6 +74,20 @@ def _client_or_default(client, model: str = MODEL) -> Complete:
     if client is not None:
         return client
     return openrouter_complete(model=model, provider=PROVIDER)
+
+
+def _reply_attempted(reply: ModelReply) -> bool:
+    """Whether the reply represents a provider call that may have a bill.
+
+    Every attempted response has one settlement basis or explicitly unknown
+    spend. The only reply with none of those facts is the credential refusal,
+    which occurs before transport and therefore contributes no attempt.
+    """
+    return bool(
+        reply.cost_from_provider
+        or reply.rate_table_complete
+        or reply.spend_unknown
+    )
 
 
 def _parse(text: str) -> dict:
@@ -84,7 +107,11 @@ def _parse(text: str) -> dict:
     return doc
 
 
-def _add_usage(result: CompileResult, reply: ModelReply) -> None:
+def _add_usage(
+    result: CompileResult,
+    reply: ModelReply,
+    evidence: _AggregateBillingEvidence | None,
+) -> _AggregateBillingEvidence:
     """Add one reply's usage and bill evidence to the running total.
 
     Every reply that ARRIVED is added, a failing one included: the provider
@@ -94,26 +121,43 @@ def _add_usage(result: CompileResult, reply: ModelReply) -> None:
     no response supplied counts, while its unknown-spend bit records that the
     provider may still have accepted the call.
 
-    `cost_numerator` sums reported trillionths of a dollar. The aggregate is a
-    lower bound whenever `cost_from_provider` is false: it keeps every exact
-    numerator that arrived, but at least one attempt supplied no exact bill.
-    Provenance is true only when every completed attempt reported its exact
-    provider bill and no attempt has unknown spend. `spend_unknown` is sticky
-    because a later arrived response cannot prove an earlier uncertain call
-    was free.
+    `cost_numerator` sums reported trillionths of a dollar. Exact provider
+    provenance survives only when every attempt reported exact cost. Table
+    settlement survives only when every attempt supplied complete counters.
+    Alternating between those bases leaves neither one complete, so the
+    aggregate is unknown while every safe numerator and counter remains.
+    Delivery uncertainty is sticky because a later arrived response cannot
+    prove an earlier uncertain call was free.
     """
     result.usage["input_tokens"] += reply.input_tokens
     result.usage["output_tokens"] += reply.output_tokens
     result.usage["cache_read_tokens"] += reply.cache_read_tokens
     result.usage["cache_write_tokens"] += reply.cache_write_tokens
     result.cost_numerator += reply.cost_numerator
-    exact_bill = reply.cost_from_provider and not reply.spend_unknown
+    if evidence is None:
+        evidence = _AggregateBillingEvidence(
+            all_provider=reply.cost_from_provider,
+            all_rate_table=reply.rate_table_complete,
+            delivery_uncertain=reply.spend_unknown,
+        )
+    else:
+        evidence = _AggregateBillingEvidence(
+            all_provider=evidence.all_provider and reply.cost_from_provider,
+            all_rate_table=(
+                evidence.all_rate_table and reply.rate_table_complete
+            ),
+            delivery_uncertain=(
+                evidence.delivery_uncertain or reply.spend_unknown
+            ),
+        )
     result.cost_from_provider = (
-        exact_bill
-        if result.attempts == 1
-        else result.cost_from_provider and exact_bill
+        evidence.all_provider and not evidence.delivery_uncertain
     )
-    result.spend_unknown = result.spend_unknown or reply.spend_unknown
+    result.spend_unknown = (
+        evidence.delivery_uncertain
+        or not (evidence.all_provider or evidence.all_rate_table)
+    )
+    return evidence
 
 
 def _check(kind: str, spec, plays: Mapping[str, Mapping] | None,
@@ -162,6 +206,7 @@ def compile_strategy(description: str, current_spec: dict | None = None,
     messages = [{"role": "user", "content": user}]
     result = CompileResult()
     result.model = model
+    billing_evidence: _AggregateBillingEvidence | None = None
     last_errors: list[str] = []
     for _ in range(max_retries + 1):
         result.attempts += 1
@@ -177,9 +222,14 @@ def compile_strategy(description: str, current_spec: dict | None = None,
             result.cost_from_provider = False
             result.spend_unknown = True
             return result
+        if not _reply_attempted(reply):
+            result.attempts -= 1
+            result.retries_taken = max(result.attempts - 1, 0)
+            result.error = reply.error
+            return result
         # Bill first, read second. The counts are a fact about a call that
         # already happened, so nothing below may reach a return ahead of them.
-        _add_usage(result, reply)
+        billing_evidence = _add_usage(result, reply, billing_evidence)
         if reply.error:
             result.error = reply.error
             return result

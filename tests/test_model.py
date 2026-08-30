@@ -340,6 +340,26 @@ def test_complete_rate_table_counters_make_arrived_spend_known():
     assert reply.spend_unknown is False
 
 
+# Production break caught: compilers could not distinguish the two complete
+# settlement bases after combining retries.
+def test_each_reply_exposes_whether_its_rate_table_evidence_is_complete():
+    exact_only = model._reply(_Resp(200, {
+        "choices": [{"message": {"content": "{}"}}],
+        "usage": {"prompt_tokens": "invalid", "cost": 0.000001234567},
+    }))
+    counters_only = model._reply(_Resp(200, {
+        "choices": [{"message": {"content": "{}"}}],
+        "usage": {"prompt_tokens": 11, "completion_tokens": 7},
+    }))
+
+    assert exact_only.cost_from_provider is True
+    assert exact_only.rate_table_complete is False
+    assert exact_only.spend_unknown is False
+    assert counters_only.cost_from_provider is False
+    assert counters_only.rate_table_complete is True
+    assert counters_only.spend_unknown is False
+
+
 def test_http_error_uses_the_same_incomplete_evidence_rule():
     reply = model._reply(_Resp(429, {
         "error": {"message": "limited"},

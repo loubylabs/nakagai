@@ -5,8 +5,9 @@ the loop itself is a thin copy because the two prompts' contracts differ
 (extract a common core only if a third compiler ever appears)."""
 
 from nakagai.nlbuilder.compiler import (
-    CandidateNormalizer, CandidateValidator, CompileResult, _add_usage,
-    _client_or_default, _parse,
+    CandidateNormalizer, CandidateValidator, CompileResult,
+    _AggregateBillingEvidence, _add_usage, _client_or_default, _parse,
+    _reply_attempted,
 )
 from nakagai.screen.prompt import render_screen_prompt
 from nakagai.screen.spec import describe_screen, validate_screen_spec
@@ -35,6 +36,7 @@ def compile_screen(description: str, client=None, model: str = MODEL,
     messages = [{"role": "user", "content": description.strip()}]
     result = CompileResult()
     result.model = model
+    billing_evidence: _AggregateBillingEvidence | None = None
     last_errors: list[str] = []
     for _ in range(max_retries + 1):
         result.attempts += 1
@@ -51,9 +53,14 @@ def compile_screen(description: str, client=None, model: str = MODEL,
             result.cost_from_provider = False
             result.spend_unknown = True
             return result
+        if not _reply_attempted(reply):
+            result.attempts -= 1
+            result.retries_taken = max(result.attempts - 1, 0)
+            result.error = reply.error
+            return result
         # Bill first, read second: the counts are a fact about a call that
         # already happened, and a failure must not lose them on the way out.
-        _add_usage(result, reply)
+        billing_evidence = _add_usage(result, reply, billing_evidence)
         if reply.error:
             result.error = reply.error
             return result

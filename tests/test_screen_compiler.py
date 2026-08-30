@@ -52,12 +52,13 @@ class _FakeModel:
 
     def __init__(self, replies, tokens=(10, 5, 0, 0), error="",
                  cost_numerator=0, cost_from_provider=False,
-                 spend_unknown=False):
+                 rate_table_complete=True, spend_unknown=False):
         self._replies = list(replies)
         self._tokens = tokens
         self._error = error
         self._cost_numerator = cost_numerator
         self._cost_from_provider = cost_from_provider
+        self._rate_table_complete = rate_table_complete
         self._spend_unknown = spend_unknown
         self.calls = []
 
@@ -66,7 +67,18 @@ class _FakeModel:
                            "max_tokens": max_tokens})
         return ModelReply(self._replies.pop(0), *self._tokens,
                           self._cost_numerator, self._cost_from_provider,
-                          self._spend_unknown, self._error)
+                          self._rate_table_complete, self._spend_unknown,
+                          self._error)
+
+
+class _MeteredReplies:
+    """A complete callable that returns its queued evidence-bearing replies."""
+
+    def __init__(self, replies):
+        self._replies = list(replies)
+
+    def __call__(self, *, system, messages, max_tokens):
+        return self._replies.pop(0)
 
 
 # Production break caught: the shared usage adder could omit provider cost.
@@ -82,6 +94,71 @@ def test_compile_screen_happy_path():
     assert (r.cost_numerator, r.cost_from_provider) == (1_111_111, True)
     assert r.spend_unknown is False
     assert r.retries_taken == 0
+
+
+# Production break caught: screen retries could combine one exact-only bill
+# with one counter-only bill and report a certain hybrid aggregate.
+def test_screen_mixed_exact_only_and_counter_only_retries_are_unknown():
+    bad = json.dumps({"spec": {"version": 7}})
+    result = compile_screen("x", client=_MeteredReplies([
+        ModelReply(bad, 10, 5, 0, 0,
+                   1_111_111, True, False, False, ""),
+        ModelReply(json.dumps({"spec": GOOD_SPEC}), 10, 5, 0, 0,
+                   0, False, True, False, ""),
+    ]))
+
+    assert result.spec == GOOD_SPEC
+    assert result.usage == {
+        "input_tokens": 20,
+        "output_tokens": 10,
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0,
+    }
+    assert result.cost_numerator == 1_111_111
+    assert result.cost_from_provider is False
+    assert result.spend_unknown is True
+    assert result.retries_taken == 1
+
+
+def test_screen_mixed_counter_only_and_exact_only_retries_are_unknown():
+    bad = json.dumps({"spec": {"version": 7}})
+    result = compile_screen("x", client=_MeteredReplies([
+        ModelReply(bad, 10, 5, 0, 0,
+                   0, False, True, False, ""),
+        ModelReply(json.dumps({"spec": GOOD_SPEC}), 10, 5, 0, 0,
+                   1_111_111, True, False, False, ""),
+    ]))
+
+    assert result.spec == GOOD_SPEC
+    assert result.usage == {
+        "input_tokens": 20,
+        "output_tokens": 10,
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0,
+    }
+    assert result.cost_numerator == 1_111_111
+    assert result.cost_from_provider is False
+    assert result.spend_unknown is True
+    assert result.retries_taken == 1
+
+
+def test_missing_default_key_is_a_known_zero_attempt_screen(monkeypatch):
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+
+    result = compile_screen("oversold")
+
+    assert "OPENROUTER_API_KEY" in result.error
+    assert result.attempts == 0
+    assert result.retries_taken == 0
+    assert result.usage == {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0,
+    }
+    assert result.cost_numerator == 0
+    assert result.cost_from_provider is False
+    assert result.spend_unknown is False
 
 
 def test_screen_clarifications_accept_only_a_list():
@@ -296,6 +373,7 @@ def test_compile_screen_reports_zeros_when_nothing_arrived():
     """No response supplied usage, but the attempted delivery may be billed."""
     never_sent = _FakeModel([""], tokens=(0, 0, 0, 0),
                             error="model call failed: connection refused",
+                            rate_table_complete=False,
                             spend_unknown=True)
     r = compile_screen("x", client=never_sent)
     assert r.error == "model call failed: connection refused"
