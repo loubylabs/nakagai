@@ -51,12 +51,14 @@ class _FakeModel:
     """
 
     def __init__(self, replies, tokens=(10, 5, 0, 0), error="",
-                 cost_numerator=0, cost_from_provider=False):
+                 cost_numerator=0, cost_from_provider=False,
+                 spend_unknown=False):
         self._replies = list(replies)
         self._tokens = tokens
         self._error = error
         self._cost_numerator = cost_numerator
         self._cost_from_provider = cost_from_provider
+        self._spend_unknown = spend_unknown
         self.calls = []
 
     def __call__(self, *, system, messages, max_tokens):
@@ -64,7 +66,7 @@ class _FakeModel:
                            "max_tokens": max_tokens})
         return ModelReply(self._replies.pop(0), *self._tokens,
                           self._cost_numerator, self._cost_from_provider,
-                          self._error)
+                          self._spend_unknown, self._error)
 
 
 # Production break caught: the shared usage adder could omit provider cost.
@@ -78,6 +80,8 @@ def test_compile_screen_happy_path():
     assert r.clarifications == ["assumed daily"]
     assert r.attempts == 1 and r.error == ""
     assert (r.cost_numerator, r.cost_from_provider) == (1_111_111, True)
+    assert r.spend_unknown is False
+    assert r.retries_taken == 0
 
 
 def test_screen_clarifications_accept_only_a_list():
@@ -289,13 +293,16 @@ def test_compile_screen_bills_a_failing_reply_that_arrived():
 
 
 def test_compile_screen_reports_zeros_when_nothing_arrived():
-    """The other half of the same rule: a transport failure billed nothing."""
+    """No response supplied usage, but the attempted delivery may be billed."""
     never_sent = _FakeModel([""], tokens=(0, 0, 0, 0),
-                            error="model call failed: connection refused")
+                            error="model call failed: connection refused",
+                            spend_unknown=True)
     r = compile_screen("x", client=never_sent)
     assert r.error == "model call failed: connection refused"
     assert r.usage == {"input_tokens": 0, "output_tokens": 0,
                        "cache_read_tokens": 0, "cache_write_tokens": 0}
+    assert r.spend_unknown is True
+    assert r.retries_taken == 0
 
 
 # Production break caught: a raised retry could leave a partial bill marked exact.
@@ -323,6 +330,8 @@ def test_compile_screen_keeps_earlier_usage_when_a_callable_raises():
                        "cache_read_tokens": 0, "cache_write_tokens": 0}
     assert r.cost_numerator == 1_111_111
     assert r.cost_from_provider is False
+    assert r.spend_unknown is True
+    assert r.retries_taken == 1
 
 
 def test_compile_screen_sends_a_plain_string_system_and_the_token_ceiling():

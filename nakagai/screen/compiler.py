@@ -38,6 +38,7 @@ def compile_screen(description: str, client=None, model: str = MODEL,
     last_errors: list[str] = []
     for _ in range(max_retries + 1):
         result.attempts += 1
+        result.retries_taken = result.attempts - 1
         try:
             reply = complete(system=system, messages=messages,
                              max_tokens=MAX_TOKENS)
@@ -48,6 +49,7 @@ def compile_screen(description: str, client=None, model: str = MODEL,
             # accumulated by the earlier rounds with it.
             result.error = f"model call failed: {e}"
             result.cost_from_provider = False
+            result.spend_unknown = True
             return result
         # Bill first, read second: the counts are a fact about a call that
         # already happened, and a failure must not lose them on the way out.

@@ -83,12 +83,13 @@ class FakeModel:
     """
 
     def __init__(self, replies, tokens=TOKENS, error="", cost_numerator=0,
-                 cost_from_provider=False):
+                 cost_from_provider=False, spend_unknown=False):
         self._replies = list(replies)
         self._tokens = tokens
         self._error = error
         self._cost_numerator = cost_numerator
         self._cost_from_provider = cost_from_provider
+        self._spend_unknown = spend_unknown
         self.requests = []
 
     def __call__(self, *, system, messages, max_tokens):
@@ -96,7 +97,7 @@ class FakeModel:
                               "max_tokens": max_tokens})
         return ModelReply(self._replies.pop(0), *self._tokens,
                           self._cost_numerator, self._cost_from_provider,
-                          self._error)
+                          self._spend_unknown, self._error)
 
 
 class _MeteredReplies:
@@ -594,24 +595,50 @@ def test_usage_present_on_not_expressible():
     assert res.not_expressible and res.usage["input_tokens"] == 100
 
 
+def test_a_fresh_compile_result_has_zero_unknown_spend_and_retries():
+    result = compiler.CompileResult()
+
+    assert result.spend_unknown is False
+    assert result.retries_taken == 0
+
+
 # Production break caught: retry compilation could drop an arrived exact bill.
 def test_two_exact_bills_sum_when_validation_retries():
     bad = json.dumps({"spec": {**GOOD_SPEC, "timeframe": "2h"}})
     exact_two_attempt_result = compile_strategy("x", client=_MeteredReplies([
-        ModelReply(bad, *TOKENS, 1_111_111, True, ""),
-        ModelReply(json.dumps({"spec": GOOD_SPEC}), *TOKENS, 2_222_222, True, ""),
+        ModelReply(bad, *TOKENS, 1_111_111, True, False, ""),
+        ModelReply(json.dumps({"spec": GOOD_SPEC}), *TOKENS,
+                   2_222_222, True, False, ""),
     ]))
 
     assert exact_two_attempt_result.cost_numerator == 3_333_333
     assert exact_two_attempt_result.cost_from_provider is True
+    assert exact_two_attempt_result.spend_unknown is False
+    assert exact_two_attempt_result.retries_taken == 1
+
+
+# Production break caught: an unknown earlier attempt could be erased by a retry.
+def test_unknown_spend_is_ored_across_arrived_retries():
+    bad = json.dumps({"spec": {**GOOD_SPEC, "timeframe": "2h"}})
+    result = compile_strategy("x", client=_MeteredReplies([
+        ModelReply(bad, *TOKENS, 1_111_111, True, True, ""),
+        ModelReply(json.dumps({"spec": GOOD_SPEC}), *TOKENS,
+                   2_222_222, True, False, ""),
+    ]))
+
+    assert result.cost_numerator == 3_333_333
+    assert result.cost_from_provider is False
+    assert result.spend_unknown is True
+    assert result.retries_taken == 1
 
 
 # Production break caught: an unbilled retry could still claim full invoice evidence.
 def test_a_synthetic_retry_revokes_exact_bill_provenance():
     bad = json.dumps({"spec": {**GOOD_SPEC, "timeframe": "2h"}})
     mixed_two_attempt_result = compile_strategy("x", client=_MeteredReplies([
-        ModelReply(bad, *TOKENS, 1_111_111, True, ""),
-        ModelReply(json.dumps({"spec": GOOD_SPEC}), *TOKENS, 0, False, ""),
+        ModelReply(bad, *TOKENS, 1_111_111, True, False, ""),
+        ModelReply(json.dumps({"spec": GOOD_SPEC}), *TOKENS,
+                   0, False, False, ""),
     ]))
 
     assert mixed_two_attempt_result.cost_numerator == 1_111_111
@@ -634,8 +661,8 @@ class _BilledFailure:
     def __call__(self, *, system, messages, max_tokens):
         self.calls += 1
         if self.calls == 1:
-            return ModelReply(BAD_SPEC_REPLY, *TOKENS, 0, False, "")
-        return ModelReply("", *self._tokens, 0, False, self._error)
+            return ModelReply(BAD_SPEC_REPLY, *TOKENS, 0, False, False, "")
+        return ModelReply("", *self._tokens, 0, False, False, self._error)
 
 
 def test_a_billed_failure_records_its_tokens_before_the_error():
@@ -653,18 +680,19 @@ def test_a_billed_failure_records_its_tokens_before_the_error():
                          "cache_read_tokens": 13, "cache_write_tokens": 7}
 
 
-def test_a_transport_failure_reports_the_error_and_bills_nothing():
-    """The other half, and the reason the counts cannot simply be assumed
-    non-zero on failure: nothing arrived, so nothing was charged. The compiler
-    reports what it was told rather than inventing either number."""
+def test_a_transport_failure_reports_zero_observed_usage_and_unknown_spend():
+    """No response supplied usage, but the attempted delivery may be billed."""
     client = FakeModel([""], tokens=(0, 0, 0, 0),
-                       error="model call failed: connection reset")
+                       error="model call failed: connection reset",
+                       spend_unknown=True)
     res = compile_strategy("x", client=client)
     assert res.error == "model call failed: connection reset"
     assert res.spec is None
     assert res.attempts == 1
     assert res.usage == {"input_tokens": 0, "output_tokens": 0,
                          "cache_read_tokens": 0, "cache_write_tokens": 0}
+    assert res.spend_unknown is True
+    assert res.retries_taken == 0
 
 
 class _RaisingModel:
@@ -685,7 +713,7 @@ class _RaisingModel:
             raise RuntimeError("api down")
         self._sent = True
         return ModelReply(self._first, *TOKENS, self._cost_numerator,
-                          self._cost_from_provider, "")
+                          self._cost_from_provider, False, "")
 
 
 def test_a_callable_that_raises_returns_an_error_result_with_partial_usage():
@@ -703,6 +731,8 @@ def test_a_raised_retry_revokes_exact_bill_provenance():
 
     assert raised_after_exact_result.cost_numerator == 1_111_111
     assert raised_after_exact_result.cost_from_provider is False
+    assert raised_after_exact_result.spend_unknown is True
+    assert raised_after_exact_result.retries_taken == 1
 
 
 def test_no_client_means_openrouter_on_the_pinned_endpoint(monkeypatch):

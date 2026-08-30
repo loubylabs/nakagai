@@ -87,11 +87,13 @@ def test_a_failing_response_still_reports_what_it_billed(monkeypatch):
     assert reply.input_tokens == 900, "a billed call must not report zero cost"
     assert reply.output_tokens == 3
     assert reply.text == ""
+    assert reply.spend_unknown is False
 
 
-# Production break caught: a transport exception could invent a provider bill.
-def test_a_transport_failure_reports_zero_because_nothing_arrived(monkeypatch):
-    """The other half, and the only case where zeros are honest."""
+# Production break caught: a transport exception could hide an uncertain bill.
+def test_a_transport_failure_reports_zero_observed_usage_and_unknown_spend(
+        monkeypatch):
+    """No response supplied usage, but delivery may have reached the provider."""
     import httpx
 
     class _Boom:
@@ -116,6 +118,7 @@ def test_a_transport_failure_reports_zero_because_nothing_arrived(monkeypatch):
     assert "model call failed" in reply.error
     assert reply.input_tokens == 0 and reply.output_tokens == 0
     assert (reply.cost_numerator, reply.cost_from_provider) == (0, False)
+    assert reply.spend_unknown is True
 
 
 def test_the_system_prompt_rides_as_a_message_not_a_block_list(monkeypatch):
@@ -161,6 +164,7 @@ def test_a_missing_key_refuses_without_calling_out(monkeypatch):
 
     assert "OPENROUTER_API_KEY" in reply.error
     assert (reply.cost_numerator, reply.cost_from_provider) == (0, False)
+    assert reply.spend_unknown is False
 
 
 def test_the_router_is_asked_to_report_what_it_charged(monkeypatch):
@@ -191,6 +195,7 @@ def test_an_unreadable_body_keeps_the_counts_it_could_read(monkeypatch):
 
     assert reply.input_tokens == 5 and reply.output_tokens == 2
     assert reply.text == ""
+    assert reply.spend_unknown is False
 
 
 # Production break caught: successful responses could discard usage.cost.
