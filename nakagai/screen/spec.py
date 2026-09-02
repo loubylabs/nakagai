@@ -14,6 +14,7 @@ from nakagai.strategies.rules.strategy import (
     ReferencePair, expression_reference_pairs,
 )
 from nakagai.strategies.rules.vocabulary import Vocabulary, resolve_vocabulary
+from nakagai.screen.facts import DISCOVERY_FACTS
 
 VERSION = 1
 _KEYS = {"version", "tf", "conditions"}
@@ -42,7 +43,8 @@ def validate_screen_spec(spec, *,
         # per symbol keeps it out of the rows, where it reads as no matches.
         errs.extend(validate_condition_group(spec["conditions"], "conditions",
                                              tf if tf in TIMEFRAMES else "1h",
-                                             vocabulary=vocabulary))
+                                             vocabulary=vocabulary,
+                                             allowed_facts=DISCOVERY_FACTS))
     unknown = set(spec) - _KEYS
     if unknown:
         errs.append(f"unknown keys {sorted(unknown)}")
@@ -53,7 +55,8 @@ def describe_screen(spec: dict, *,
                     vocabulary: Vocabulary | None = None) -> str:
     """Plain-English restatement of a validated screen: the trust step."""
     return (f"Screen on {spec.get('tf', '1d')} bars, matching symbols where "
-            + group_text(spec["conditions"], resolve_vocabulary(vocabulary)))
+            + group_text(spec["conditions"], resolve_vocabulary(vocabulary),
+                         allowed_facts=DISCOVERY_FACTS))
 
 
 def referenced_timeframes(spec: dict) -> set[str]:

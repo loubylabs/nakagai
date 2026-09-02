@@ -178,6 +178,15 @@ def test_valid_v2_spec_passes():
     assert validate_spec(ORB) == []
 
 
+def test_rules_reject_a_current_discovery_fact():
+    spec = {**ORB, "long": {"all": [
+        {"lhs": {"fact": "market_cap"}, "op": ">",
+         "rhs": 1_000_000_000},
+    ]}}
+    assert any("expression object needs" in error
+               for error in validate_spec(spec))
+
+
 def test_a_four_hour_spec_validates():
     """4h is a real timeframe, derived from cached 1h bars (nakagai/data/
     resample.py), so the grammar accepts it on the spec and on a leaf."""

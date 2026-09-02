@@ -60,7 +60,7 @@ def _freeze_json(value: object) -> object:
     return value
 
 
-def _frame_from_rows(rows: list[Mapping[str, object]]) -> pd.DataFrame:
+def frame_from_rows(rows: list[Mapping[str, object]]) -> pd.DataFrame:
     """Alpaca's raw bar dicts to the canonical schema. One implementation,
     shared by the single-symbol and multi-symbol fetches."""
     if not rows:
@@ -139,7 +139,7 @@ class AlpacaProvider(DataProvider):
             if not token:
                 break
             params["page_token"] = token
-        return _frame_from_rows(rows)
+        return frame_from_rows(rows)
 
     def fetch_bars_multi(self, symbols: list[str], timeframe: str,
                          start: pd.Timestamp,

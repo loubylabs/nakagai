@@ -11,6 +11,7 @@ from nakagai.data.alpaca import (
     AlpacaBarBatchResult,
     AlpacaBarMember,
     AlpacaProvider,
+    frame_from_rows,
 )
 
 START = pd.Timestamp("2026-06-01", tz="UTC")
@@ -46,6 +47,16 @@ def test_fetch_paginates_and_normalizes():
     assert list(df.columns) == ["open", "high", "low", "close", "volume"]
     assert df.index[0] == pd.Timestamp("2026-06-01 13:30", tz="UTC")
     assert len(captured) == 2
+
+
+def test_public_row_converter_normalizes_provider_rows():
+    frame = frame_from_rows(PAGE1["bars"])
+    assert list(frame.columns) == ["open", "high", "low", "close", "volume"]
+    assert frame.index.tolist() == [
+        pd.Timestamp("2026-06-01 13:30", tz="UTC"),
+        pd.Timestamp("2026-06-01 13:45", tz="UTC"),
+    ]
+    assert frame["close"].tolist() == [1.2, 1.4]
 
 
 def test_missing_credentials_fails_fast(monkeypatch):

@@ -53,6 +53,46 @@ ABOVE_QQQ = {"version": 1, "tf": "1h", "conditions": {"all": [{
 }]}}
 
 
+LOW_FLOAT = {"version": 1, "tf": "1d", "conditions": {"all": [{
+    "lhs": {"fact": "float_shares"}, "op": "<", "rhs": 20_000_000,
+}]}}
+
+
+LOW_FLOAT_ABOVE_SMA20 = {
+    "version": 1,
+    "tf": "1d",
+    "conditions": {"all": [
+        {"lhs": {"fact": "float_shares"}, "op": "<", "rhs": 20_000_000},
+        {"lhs": {"src": "close"}, "op": ">",
+         "rhs": {"ind": "sma", "n": 20}},
+    ]},
+}
+
+
+def _above_sma20():
+    return {
+        "lhs": {"src": "close"},
+        "op": ">",
+        "rhs": {"ind": "sma", "n": 20},
+    }
+
+
+class _ExplodingCache:
+    def load(self, symbol, timeframe):
+        raise AssertionError(f"bar cache loaded for {symbol} {timeframe}")
+
+
+class _TrackingCache:
+    def __init__(self, cache):
+        self.cache = cache
+        self.loaded_symbols = []
+
+    def load(self, symbol, timeframe):
+        if symbol not in self.loaded_symbols:
+            self.loaded_symbols.append(symbol)
+        return self.cache.load(symbol, timeframe)
+
+
 def _injected():
     return core_vocabulary().with_terms(
         Term("double_close", "series", {}, {}, lambda s, _a: s * 2))
@@ -72,6 +112,71 @@ def test_run_screen_evaluates_an_injected_term(cache):
     fallback = run_screen(DOUBLE_CLOSE, ["UP"], cache, now=NOW)
     assert fallback["rows"][0]["matched"] is None
     assert fallback["errors"] and "double_close" in fallback["errors"][0]
+
+
+def test_fact_only_screen_never_loads_bar_cache():
+    result = run_screen(
+        LOW_FLOAT,
+        ["LOW", "HIGH"],
+        _ExplodingCache(),
+        facts={
+            "LOW": {"float_shares": 5_000_000},
+            "HIGH": {"float_shares": 50_000_000},
+        },
+    )
+    assert [(row["symbol"], row["matched"]) for row in result["rows"]] == [
+        ("LOW", True),
+        ("HIGH", False),
+    ]
+
+
+def test_mixed_screen_loads_bars_only_for_unknown_symbols(cache):
+    cache.upsert("CHECK", "1d", _daily_bars(np.linspace(50, 100, 60)))
+    tracking = _TrackingCache(cache)
+    result = run_screen(
+        LOW_FLOAT_ABOVE_SMA20,
+        ["PRUNED", "CHECK"],
+        tracking,
+        facts={
+            "PRUNED": {"float_shares": 50_000_000},
+            "CHECK": {"float_shares": 5_000_000},
+        },
+    )
+    assert tracking.loaded_symbols == ["CHECK"]
+    assert {row["symbol"]: row["matched"] for row in result["rows"]} == {
+        "CHECK": True,
+        "PRUNED": False,
+    }
+
+
+def test_fact_only_unknown_records_the_missing_fact_without_loading_bars():
+    result = run_screen(LOW_FLOAT, ["UNKNOWN"], _ExplodingCache(), facts={})
+    assert result["rows"] == [{
+        "symbol": "UNKNOWN",
+        "matched": None,
+        "last_close": None,
+        "bar_time": "",
+        "note": "facts unavailable: float_shares",
+    }]
+
+
+@pytest.mark.parametrize("conditions,symbol", [
+    ({"all": [LOW_FLOAT["conditions"]["all"][0], _above_sma20()]}, "UP"),
+    ({"any": [LOW_FLOAT["conditions"]["all"][0], _above_sma20()]}, "DOWN"),
+    ({"not": {"all": [
+        LOW_FLOAT["conditions"]["all"][0], _above_sma20(),
+    ]}}, "UP"),
+], ids=["all", "any", "not"])
+def test_mixed_unknown_records_the_missing_fact_after_technical_evaluation(
+        cache, conditions, symbol):
+    spec = {"version": 1, "tf": "1d", "conditions": conditions}
+    result = run_screen(spec, [symbol], cache, facts={})
+    row = result["rows"][0]
+    assert row["matched"] is None
+    assert row["note"] == "facts unavailable: float_shares"
+    assert row["last_close"] is not None
+    assert row["bar_time"]
+    assert result["universe"] == {"screened": 1, "skipped": 1}
 
 
 def test_run_screen_matches_and_sorts_matched_first(cache):

@@ -15,6 +15,7 @@ entitles a decision at exactly one of them. A strategy asks the context for
 both and derives neither, so a schedule cannot be overruled downstream of it.
 """
 
+from collections.abc import Mapping
 from types import MappingProxyType
 
 import numpy as np
@@ -101,7 +102,9 @@ def visible_counts(src_index: pd.DatetimeIndex, dst_close_times: pd.DatetimeInde
 def build_context(cache: BarCache, symbol: str, now: pd.Timestamp,
                   tfs: TimeframeSet = DEFAULT_TIMEFRAMES, *,
                   reference_pairs: tuple[tuple[str, str], ...],
-                  vocabulary: Vocabulary | None = None) -> MarketContext:
+                  vocabulary: Vocabulary | None = None,
+                  facts: Mapping[str, float | int | None] | None = None,
+                  ) -> MarketContext:
     """Point-in-time context at `now`.
 
     closed_before still runs per timeframe per call. It is a searchsorted plus
@@ -137,6 +140,7 @@ def build_context(cache: BarCache, symbol: str, now: pd.Timestamp,
     fe = FrameEval(
         symbol, MappingProxyType(visible), tfs,
         vocabulary=resolve_vocabulary(vocabulary),
+        facts=facts,
     )
     # The span is not optional here. A point-in-time caller can only ever read
     # the LAST row of each frame, because the frames were just cut at `now`;

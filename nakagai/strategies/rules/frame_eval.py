@@ -26,46 +26,13 @@ import pandas as pd
 
 from nakagai.data.schema import DEFAULT_TIMEFRAMES, TimeframeSet, _is_session_frame
 from nakagai.engine.context import visible_counts
+from nakagai.strategies.rules.arithmetic import apply_math
 from nakagai.strategies.rules.primitives import end_anchored_series
 from nakagai.strategies.rules.spec import is_group_node
 from nakagai.strategies.rules.vocabulary import (
     Vocabulary, is_condition_rule, resolve_vocabulary,
 )
 from nakagai.strategies.rules.windows import aggregate_window
-
-
-def _as_series(v, like):
-    if isinstance(v, pd.Series):
-        return v
-    idx = like.index if isinstance(like, pd.Series) else None
-    return pd.Series(v, index=idx)
-
-
-def _math(op: str, args: list):
-    """The RuleSpec math ops over scalars and series, mixed freely.
-
-    Division maps a zero denominator to NaN rather than raising or producing an
-    infinity: a condition over NaN reads False, which is the honest answer for
-    a ratio that does not exist on that bar.
-    """
-    if op == "abs":
-        return args[0].abs() if isinstance(args[0], pd.Series) else abs(args[0])
-    out = args[0]
-    for a in args[1:]:
-        if op == "+":
-            out = out + a
-        elif op == "-":
-            out = out - a
-        elif op == "*":
-            out = out * a
-        elif op == "/":
-            denom = a.replace(0.0, float("nan")) if isinstance(a, pd.Series) else \
-                (float("nan") if a == 0 else a)
-            out = out / denom
-        elif op in ("min", "max"):
-            both = pd.concat([_as_series(out, a), _as_series(a, out)], axis=1)
-            out = both.min(axis=1) if op == "min" else both.max(axis=1)
-    return out
 
 
 def _cross_prev(node, v: pd.Series, vocabulary: Vocabulary) -> pd.Series:
@@ -133,7 +100,8 @@ class FrameEval:
     def __init__(self, driving_symbol: str,
                  frames: Mapping[tuple[str, str], pd.DataFrame],
                  tfs: TimeframeSet = DEFAULT_TIMEFRAMES, *,
-                 vocabulary: Vocabulary | None = None):
+                 vocabulary: Vocabulary | None = None,
+                 facts: Mapping[str, float | int | None] | None = None):
         bad = [key for key in frames
                if not (isinstance(key, tuple) and len(key) == 2
                        and all(isinstance(part, str) for part in key))]
@@ -145,6 +113,7 @@ class FrameEval:
         self._frames = frames
         self.tfs = tfs
         self.vocabulary = resolve_vocabulary(vocabulary)
+        self.facts = facts or {}
         self._cache: dict = {}
         self._maps: dict = {}
         self._spans: dict = {}
@@ -293,13 +262,21 @@ class FrameEval:
     def _eval(self, node: dict, pair: tuple[str, str]):
         frame = self._frames[pair]
         mask = self._own_missing(pair).copy()
+        if "fact" in node:
+            value = self.facts.get(node["fact"])
+            if (isinstance(value, bool)
+                    or not isinstance(value, (int, float))
+                    or not np.isfinite(value)):
+                value = np.nan
+            out = pd.Series(value, index=frame.index, dtype="float64")
+            return out, pd.Series(False, index=frame.index, dtype=bool)
         if "src" in node:
             return self._masked(frame[node["src"]], mask), mask
         if "op" in node:
             children = [self._series_result(a, pair) for a in node["args"]]
             for _, child_mask in children:
                 mask |= child_mask
-            out = _math(node["op"], [value for value, _ in children])
+            out = apply_math(node["op"], [value for value, _ in children])
             return self._masked(out, mask), mask
         if "ind" in node:
             name = node["ind"]
@@ -456,6 +433,11 @@ class FrameEval:
         public boundary, per N3-D4."""
         return self._group_reduce_na(
             group, self.driving_symbol, tf).fillna(False).astype(bool)
+
+    def group_verdict(self, group: dict, tf: str) -> bool | None:
+        """Latest group value, preserving unknown as a Python `None`."""
+        value = self._group_reduce_na(group, self.driving_symbol, tf).iloc[-1]
+        return None if pd.isna(value) else bool(value)
 
     def driving_group(self, group: dict, tf: str) -> pd.Series:
         """`group` as a boolean series on the DRIVING index, computed once.

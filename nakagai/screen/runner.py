@@ -6,12 +6,15 @@ failure never aborts evaluation: it is noted on the row and cached bars still
 evaluate. Every row carries its own bar_time so staleness is visible, never
 hidden."""
 
+from collections.abc import Mapping
+
 import pandas as pd
 
 from nakagai.data.resample import DERIVED
 from nakagai.data.schema import DEFAULT_TIMEFRAMES, TimeframeSet
 from nakagai.data.sync import derive_incremental, fetch_incremental
 from nakagai.engine.context import build_context
+from nakagai.screen.planner import plan_symbol
 from nakagai.screen.spec import (
     max_lookback,
     referenced_timeframes,
@@ -28,7 +31,11 @@ def _row(symbol: str, matched=None, last_close=None,
 
 def run_screen(spec: dict, symbols: list[str], cache, now=None,
                providers: dict | None = None, sync_days: int = 60, *,
-               vocabulary: Vocabulary | None = None) -> dict:
+               vocabulary: Vocabulary | None = None,
+               facts: Mapping[
+                   str, Mapping[str, float | int | None]
+               ] | None = None,
+               ) -> dict:
     now = now if now is not None else pd.Timestamp.now(tz="UTC")
     # The same vocabulary the spec was validated against. A screen that
     # validated clean under an injected term must be evaluable under it too;
@@ -52,6 +59,16 @@ def run_screen(spec: dict, symbols: list[str], cache, now=None,
     errors: list[str] = []
     skipped = 0
     for sym in sorted(symbols):
+        symbol_facts = (facts or {}).get(sym, {})
+        planned = plan_symbol(spec["conditions"], symbol_facts)
+        if planned.verdict is not None:
+            rows.append(_row(sym, matched=planned.verdict))
+            continue
+        if not planned.needs_technical:
+            names = ", ".join(planned.missing_facts)
+            rows.append(_row(sym, note=f"facts unavailable: {names}"))
+            skipped += 1
+            continue
         sync_note = ""
         pairs = list(dict.fromkeys(
             [(sym, timeframe) for timeframe in sorted(needed)]
@@ -90,6 +107,7 @@ def run_screen(spec: dict, symbols: list[str], cache, now=None,
             ctx = build_context(
                 cache, sym, now, context_tfs, reference_pairs=reference_pairs,
                 vocabulary=vocabulary,
+                facts=symbol_facts,
             )
             bars = ctx.bars[tf]
             if bars.empty:
@@ -111,11 +129,27 @@ def run_screen(spec: dict, symbols: list[str], cache, now=None,
             # at now"; the driving index never enters it, and must not, because a
             # symbol screened on an intraday timeframe may have no intraday bars
             # to carry a cursor.
-            matched = bool(ctx.fe.group_series(spec["conditions"], tf).iloc[-1])
-            rows.append(_row(sym, matched=matched,
-                             last_close=float(bars["close"].iloc[-1]),
-                             bar_time=bars.index[-1].isoformat(),
-                             note=sync_note))
+            evaluated = ctx.fe.group_verdict(spec["conditions"], tf)
+            if evaluated is None and planned.missing_facts:
+                unavailable = ("facts unavailable: "
+                               + ", ".join(planned.missing_facts))
+                rows.append(_row(
+                    sym,
+                    last_close=float(bars["close"].iloc[-1]),
+                    bar_time=bars.index[-1].isoformat(),
+                    note=(f"{sync_note}; {unavailable}"
+                          if sync_note else unavailable),
+                ))
+                skipped += 1
+                continue
+            matched = False if evaluated is None else evaluated
+            rows.append(_row(
+                sym,
+                matched=matched,
+                last_close=float(bars["close"].iloc[-1]),
+                bar_time=bars.index[-1].isoformat(),
+                note=sync_note,
+            ))
         except Exception as e:  # partial failure: other symbols still screen
             errors.append(f"{sym}: {e}")
             note = f"error: {e}"
