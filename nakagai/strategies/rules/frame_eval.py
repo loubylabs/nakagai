@@ -26,46 +26,13 @@ import pandas as pd
 
 from nakagai.data.schema import DEFAULT_TIMEFRAMES, TimeframeSet, _is_session_frame
 from nakagai.engine.context import visible_counts
+from nakagai.strategies.rules.arithmetic import apply_math
 from nakagai.strategies.rules.primitives import end_anchored_series
 from nakagai.strategies.rules.spec import is_group_node
 from nakagai.strategies.rules.vocabulary import (
     Vocabulary, is_condition_rule, resolve_vocabulary,
 )
 from nakagai.strategies.rules.windows import aggregate_window
-
-
-def _as_series(v, like):
-    if isinstance(v, pd.Series):
-        return v
-    idx = like.index if isinstance(like, pd.Series) else None
-    return pd.Series(v, index=idx)
-
-
-def _math(op: str, args: list):
-    """The RuleSpec math ops over scalars and series, mixed freely.
-
-    Division maps a zero denominator to NaN rather than raising or producing an
-    infinity: a condition over NaN reads False, which is the honest answer for
-    a ratio that does not exist on that bar.
-    """
-    if op == "abs":
-        return args[0].abs() if isinstance(args[0], pd.Series) else abs(args[0])
-    out = args[0]
-    for a in args[1:]:
-        if op == "+":
-            out = out + a
-        elif op == "-":
-            out = out - a
-        elif op == "*":
-            out = out * a
-        elif op == "/":
-            denom = a.replace(0.0, float("nan")) if isinstance(a, pd.Series) else \
-                (float("nan") if a == 0 else a)
-            out = out / denom
-        elif op in ("min", "max"):
-            both = pd.concat([_as_series(out, a), _as_series(a, out)], axis=1)
-            out = both.min(axis=1) if op == "min" else both.max(axis=1)
-    return out
 
 
 def _cross_prev(node, v: pd.Series, vocabulary: Vocabulary) -> pd.Series:
@@ -309,7 +276,7 @@ class FrameEval:
             children = [self._series_result(a, pair) for a in node["args"]]
             for _, child_mask in children:
                 mask |= child_mask
-            out = _math(node["op"], [value for value, _ in children])
+            out = apply_math(node["op"], [value for value, _ in children])
             return self._masked(out, mask), mask
         if "ind" in node:
             name = node["ind"]

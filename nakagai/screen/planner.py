@@ -4,14 +4,8 @@ import math
 from collections.abc import Mapping
 from dataclasses import dataclass
 
+from nakagai.strategies.rules.arithmetic import apply_math
 from nakagai.strategies.rules.spec import is_group_node
-
-
-class _Indeterminate:
-    pass
-
-
-_INDETERMINATE = _Indeterminate()
 
 
 @dataclass(frozen=True)
@@ -23,7 +17,7 @@ class PlannedSymbol:
 
 @dataclass(frozen=True)
 class _ExprPlan:
-    value: float | None | _Indeterminate
+    value: float | None
     needs_technical: bool
     missing_facts: frozenset[str]
 
@@ -69,29 +63,6 @@ def _fact_value(name: str, facts: Mapping[str, float | int | None]) -> _ExprPlan
     return _ExprPlan(number, False, frozenset())
 
 
-def _apply_math(op: str, values: list[float]) -> float | _Indeterminate:
-    try:
-        if op == "abs":
-            result = abs(values[0])
-        elif op == "+":
-            result = sum(values)
-        elif op == "-":
-            result = values[0] - values[1]
-        elif op == "*":
-            result = math.prod(values)
-        elif op == "/":
-            result = float("nan") if values[1] == 0 else values[0] / values[1]
-        elif op == "min":
-            result = min(values)
-        elif op == "max":
-            result = max(values)
-        else:
-            return _INDETERMINATE
-    except (ArithmeticError, OverflowError, ValueError):
-        return _INDETERMINATE
-    return float(result) if math.isfinite(float(result)) else _INDETERMINATE
-
-
 def _plan_expr(node, facts: Mapping[str, float | int | None]) -> _ExprPlan:
     plans: dict[int, _ExprPlan] = {}
     stack = [(node, False)]
@@ -102,11 +73,7 @@ def _plan_expr(node, facts: Mapping[str, float | int | None]) -> _ExprPlan:
             plans[key] = _ExprPlan(None, False, frozenset())
         elif isinstance(current, (int, float)):
             value = float(current)
-            plans[key] = _ExprPlan(
-                value if math.isfinite(value) else _INDETERMINATE,
-                False,
-                frozenset(),
-            )
+            plans[key] = _ExprPlan(value, False, frozenset())
         elif not isinstance(current, dict):
             plans[key] = _ExprPlan(None, False, frozenset())
         elif "fact" in current:
@@ -121,15 +88,25 @@ def _plan_expr(node, facts: Mapping[str, float | int | None]) -> _ExprPlan:
                 *(child.missing_facts for child in children))
             technical = any(child.needs_technical for child in children)
             if any(child.value is None for child in children):
-                plans[key] = _ExprPlan(None, technical, missing)
-            elif any(child.value is _INDETERMINATE for child in children):
-                plans[key] = _ExprPlan(_INDETERMINATE, technical, missing)
-            else:
-                value = _apply_math(
-                    current["op"],
-                    [float(child.value) for child in children],
+                if technical or current["op"] not in ("min", "max"):
+                    plans[key] = _ExprPlan(None, technical, missing)
+                    continue
+                values = [
+                    float("nan") if child.value is None else child.value
+                    for child in children
+                ]
+                value = float(apply_math(current["op"], values))
+                plans[key] = (
+                    _ExprPlan(None, False, missing)
+                    if math.isnan(value)
+                    else _ExprPlan(value, False, frozenset())
                 )
-                plans[key] = _ExprPlan(value, technical, missing)
+            else:
+                value = apply_math(
+                    current["op"],
+                    [child.value for child in children],
+                )
+                plans[key] = _ExprPlan(float(value), technical, missing)
         else:
             plans[key] = _ExprPlan(None, True, frozenset())
     return plans[id(node)]
@@ -141,8 +118,6 @@ def _plan_condition(cond: dict,
     rhs = _plan_expr(cond["rhs"], facts)
     technical = lhs.needs_technical or rhs.needs_technical
     missing = lhs.missing_facts | rhs.missing_facts
-    if lhs.value is _INDETERMINATE or rhs.value is _INDETERMINATE:
-        return _GroupPlan(False, False, frozenset())
     if lhs.value is None or rhs.value is None or cond["op"].startswith("crosses_"):
         return _GroupPlan(None, technical, missing)
     verdict = {
