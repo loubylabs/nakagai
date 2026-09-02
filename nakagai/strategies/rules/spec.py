@@ -9,6 +9,7 @@ readback; canon.py owns identity hashing.
 """
 
 import re
+from collections.abc import Collection
 
 from nakagai.data.schema import DEFAULT_TIMEFRAMES
 from nakagai.strategies.rules.vocabulary import (
@@ -122,7 +123,8 @@ class _Budget:
 
 def _check_args(name: str, given: dict, term, path: str, errs: list[str],
                 budget: _Budget, vocabulary: Vocabulary, depth: int,
-                skip: tuple[str, ...] = ()) -> None:
+                skip: tuple[str, ...] = (),
+                allowed_facts: Collection[str] = ()) -> None:
     schema = term.args
     term_defaults = term.defaults
     # A condition-typed arg may not declare a default (N3-D13), so its
@@ -169,7 +171,7 @@ def _check_args(name: str, given: dict, term, path: str, errs: list[str],
         # the range branch's `lo, hi = rule` raises ValueError unpacking it.
         if is_condition_rule(rule):
             _check_condition_arg(name, arg, v, given, path, errs, budget,
-                                 vocabulary, depth)
+                                 vocabulary, depth, allowed_facts)
         elif is_choice_rule(rule):
             if v not in rule:
                 errs.append(f"{path}: {name}.{arg} must be one of {rule}, got {v!r}")
@@ -182,7 +184,8 @@ def _check_args(name: str, given: dict, term, path: str, errs: list[str],
 
 def _check_condition_arg(name: str, arg: str, cond, given: dict, path: str,
                          errs: list[str], budget: _Budget,
-                         vocabulary: Vocabulary, depth: int) -> None:
+                         vocabulary: Vocabulary, depth: int,
+                         allowed_facts: Collection[str] = ()) -> None:
     """The four guards N3-D5 requires on every condition-typed arg, generic
     over the term and the arg name rather than written once per bars_since.
 
@@ -213,7 +216,7 @@ def _check_condition_arg(name: str, arg: str, cond, given: dict, path: str,
         errs.append(f"{path}: {name}.{arg} conditions use comparison ops only")
     else:
         _check_condition(cond, f"{path}.{arg}", errs, budget, vocabulary,
-                         depth + 1)
+                         depth + 1, allowed_facts)
     end_anchored = {n for n, t in vocabulary.primitives.items() if t.end_anchored}
     for bad in sorted(_prims_in(cond, end_anchored)):
         errs.append(f"{path}: {bad} is anchored to the end of the frame and "
@@ -439,7 +442,8 @@ def _check_sym(node: dict, path: str, errs: list[str]) -> None:
 
 def _check_expr(node, path: str, errs: list[str], budget: _Budget,
                 vocabulary: Vocabulary, depth: int = 0,
-                series_required: bool = False) -> None:
+                series_required: bool = False,
+                allowed_facts: Collection[str] = ()) -> None:
     if depth > MAX_DEPTH:
         errs.append(f"{path}: expression depth exceeds {MAX_DEPTH}")
         return
@@ -454,6 +458,19 @@ def _check_expr(node, path: str, errs: list[str], budget: _Budget,
         return
     if not isinstance(node, dict):
         errs.append(f"{path}: operand must be a number or an expression object")
+        return
+    if "fact" in node and allowed_facts:
+        fact = node["fact"]
+        if not names(fact, allowed_facts):
+            errs.append(
+                f"{path}: unknown fact {fact!r} (valid: {tuple(allowed_facts)})")
+        unknown = set(node) - {"fact"}
+        if unknown:
+            errs.append(f"{path}: fact nodes take only fact; unknown keys "
+                        f"{sorted(unknown)}")
+        if series_required:
+            errs.append(f"{path}: the left side of a cross must be a series; "
+                        f"{fact} is a current fact level")
         return
     if "src" in node:
         if not names(node["src"], SOURCES):
@@ -475,7 +492,7 @@ def _check_expr(node, path: str, errs: list[str], budget: _Budget,
             return
         for i, a in enumerate(args):
             _check_expr(a, f"{path}.args[{i}]", errs, budget, vocabulary,
-                        depth + 1)
+                        depth + 1, allowed_facts=allowed_facts)
         if "window" in node:
             errs.append(f"{path}: window is only valid on an aggregate indicator")
         if set(node) - {"op", "args", "window"}:
@@ -504,10 +521,12 @@ def _check_expr(node, path: str, errs: list[str], budget: _Budget,
                 errs.append(f"{path}: {name} works on full bars and takes no `of`")
             else:
                 _check_expr(node["of"], f"{path}.of", errs, budget,
-                            vocabulary, depth + 1)
+                            vocabulary, depth + 1,
+                            allowed_facts=allowed_facts)
         _check_args(name, node, term, path, errs, budget, vocabulary,
                     depth, skip=("ind", "of", "tf", "window", "sym",
-                                 *(('n',) if has_window else ())))
+                                 *(('n',) if has_window else ())),
+                    allowed_facts=allowed_facts)
         _check_tf(node, path, errs)
         _check_sym(node, path, errs)
         return
@@ -531,7 +550,8 @@ def _check_expr(node, path: str, errs: list[str], budget: _Budget,
             errs.append(f"{path}: the left side of a cross must be a series; "
                         f"{name} is a level read from the end of the frame")
         _check_args(name, node, term, path, errs, budget, vocabulary,
-                    depth, skip=("prim", "tf", "window", "sym"))
+                    depth, skip=("prim", "tf", "window", "sym"),
+                    allowed_facts=allowed_facts)
         if "tf" in node and term.session_scoped:
             errs.append(f"{path}: {name} is session-scoped and takes no tf")
         _check_tf(node, path, errs)
@@ -541,7 +561,8 @@ def _check_expr(node, path: str, errs: list[str], budget: _Budget,
 
 
 def _check_condition(cond, path: str, errs: list[str], budget: _Budget,
-                     vocabulary: Vocabulary, depth: int = 0) -> None:
+                     vocabulary: Vocabulary, depth: int = 0,
+                     allowed_facts: Collection[str] = ()) -> None:
     budget.conditions += 1
     if budget.conditions > MAX_CONDITIONS:
         errs.append(f"{path}: more than {MAX_CONDITIONS} conditions")
@@ -553,8 +574,10 @@ def _check_condition(cond, path: str, errs: list[str], budget: _Budget,
     if not names(op, OPS):
         errs.append(f"{path}: unknown op {op!r} (valid: {OPS})")
     _check_expr(cond["lhs"], f"{path}.lhs", errs, budget, vocabulary, depth,
-                series_required=op in CROSS_OPS)
-    _check_expr(cond["rhs"], f"{path}.rhs", errs, budget, vocabulary, depth)
+                series_required=op in CROSS_OPS,
+                allowed_facts=allowed_facts)
+    _check_expr(cond["rhs"], f"{path}.rhs", errs, budget, vocabulary, depth,
+                allowed_facts=allowed_facts)
     if op in CROSS_OPS:
         # series_required only ever inspects the operand's TOP node, so it saw
         # {"prim": "fvg_nearest"} and not {"op": "*", "args": [that, 1.0]}. The
@@ -594,7 +617,8 @@ def _check_condition(cond, path: str, errs: list[str], budget: _Budget,
 
 
 def _check_group(group, path: str, errs: list[str], budget: _Budget,
-                 vocabulary: Vocabulary, depth: int = 0) -> None:
+                 vocabulary: Vocabulary, depth: int = 0,
+                 allowed_facts: Collection[str] = ()) -> None:
     if depth > MAX_DEPTH:
         errs.append(f"{path}: group depth exceeds {MAX_DEPTH}")
         return
@@ -618,7 +642,8 @@ def _check_group(group, path: str, errs: list[str], budget: _Budget,
                         "{\"any\": [...]}, or {\"not\": {...}}), not a bare "
                         "condition")
             return
-        _check_group(val, f"{path}.not", errs, budget, vocabulary, depth + 1)
+        _check_group(val, f"{path}.not", errs, budget, vocabulary, depth + 1,
+                     allowed_facts)
         return
     if not isinstance(val, list) or not val:
         errs.append(f"{path}.{key}: must be a non-empty list")
@@ -626,9 +651,11 @@ def _check_group(group, path: str, errs: list[str], budget: _Budget,
     for i, item in enumerate(val):
         p = f"{path}.{key}[{i}]"
         if is_group_node(item):
-            _check_group(item, p, errs, budget, vocabulary, depth + 1)
+            _check_group(item, p, errs, budget, vocabulary, depth + 1,
+                         allowed_facts)
             continue
-        _check_condition(item, p, errs, budget, vocabulary)
+        _check_condition(item, p, errs, budget, vocabulary,
+                         allowed_facts=allowed_facts)
 
 
 def _not_num(v, lo, hi) -> bool:
@@ -775,7 +802,8 @@ def validate_spec(spec, vocabulary: Vocabulary | None = None) -> list[str]:
 
 def validate_condition_group(group, path: str = "conditions",
                              tf: str = "1h", *,
-                             vocabulary: Vocabulary | None = None) -> list[str]:
+                             vocabulary: Vocabulary | None = None,
+                             allowed_facts: Collection[str] = ()) -> list[str]:
     """Standalone validation of one all/any/not condition group with a fresh
     budget. The screener's whole schema is one such group; validate_spec's
     per-side entry groups go through the same walker. `tf` is the timeframe the
@@ -793,27 +821,35 @@ def validate_condition_group(group, path: str = "conditions",
     call site."""
     vocabulary = resolve_vocabulary(vocabulary)
     errs: list[str] = []
-    _check_group(group, path, errs, _Budget(), vocabulary)
+    _check_group(group, path, errs, _Budget(), vocabulary,
+                 allowed_facts=allowed_facts)
     _check_session_aligned_refs(group, tf, path, errs, vocabulary)
     return errs
 
 
-def group_text(group: dict, vocabulary: Vocabulary | None = None) -> str:
+def group_text(group: dict, vocabulary: Vocabulary | None = None, *,
+               allowed_facts: Collection[str] = ()) -> str:
     """Public name for the group renderer; the screener readback reuses it."""
-    return _group_text(group, resolve_vocabulary(vocabulary))
+    return _group_text(group, resolve_vocabulary(vocabulary),
+                       allowed_facts=allowed_facts)
 
 
-def _expr_text(node, vocabulary: Vocabulary) -> str:
+def _expr_text(node, vocabulary: Vocabulary,
+               allowed_facts: Collection[str] = ()) -> str:
     if isinstance(node, (int, float)):
         return _num_text(node)
     if "src" in node:
         text = node["src"] if "tf" not in node else f"{node['src']}[{node['tf']}]"
         return f"{node['sym']}:{text}" if "sym" in node else text
+    if "fact" in node:
+        fact = node["fact"]
+        return fact.replace("_", " ") if names(fact, allowed_facts) else repr(fact)
     if "op" in node:
         op, args = node["op"], node["args"]
         if op == "abs":
-            return f"abs({_expr_text(args[0], vocabulary)})"
-        return "(" + f" {op} ".join(_expr_text(a, vocabulary) for a in args) + ")"
+            return f"abs({_expr_text(args[0], vocabulary, allowed_facts)})"
+        return "(" + f" {op} ".join(
+            _expr_text(a, vocabulary, allowed_facts) for a in args) + ")"
     if "ind" in node:
         name = node["ind"]
         # A describer renders whatever it is handed. An unknown or non-string
@@ -837,7 +873,7 @@ def _expr_text(node, vocabulary: Vocabulary) -> str:
             of = node.get("of", {"src": "close"})
             if (of != {"src": "close"}
                     or ("of" in node and term.render_explicit_source)):
-                parts.append(f"of={_expr_text(of, vocabulary)}")
+                parts.append(f"of={_expr_text(of, vocabulary, allowed_facts)}")
         inner = ", ".join(parts)
         text = f"{name}({inner})" if inner else name
         if window_mode:
@@ -866,7 +902,7 @@ def _expr_text(node, vocabulary: Vocabulary) -> str:
     # generic f"{v}" path just above: that would stringify the condition dict
     # with Python's default repr, which is what a user approves before saving
     # or backtesting an imported or NL-built strategy.
-    parts += [_condition_text(node[a], vocabulary)
+    parts += [_condition_text(node[a], vocabulary, allowed_facts)
               for a in sorted(condition_args) if a in node]
     inner = ", ".join(parts)
     text = f"{name}({inner})" if inner else name
@@ -880,17 +916,19 @@ _OP_TEXT = {">": "is above", "<": "is below", ">=": "is at or above",
             "crosses_below": "crosses below"}
 
 
-def _condition_text(cond: dict, vocabulary: Vocabulary) -> str:
+def _condition_text(cond: dict, vocabulary: Vocabulary,
+                    allowed_facts: Collection[str] = ()) -> str:
     # `_OP_TEXT[op]` is the last lookup in this file that took a caller value
     # straight to a subscript. An op the grammar does not define renders as
     # itself, which is what a reader needs to see anyway.
     op = cond.get("op")
     text = _OP_TEXT[op] if names(op, _OP_TEXT) else repr(op)
-    return (f"{_expr_text(cond.get('lhs'), vocabulary)} {text} "
-            f"{_expr_text(cond.get('rhs'), vocabulary)}")
+    return (f"{_expr_text(cond.get('lhs'), vocabulary, allowed_facts)} {text} "
+            f"{_expr_text(cond.get('rhs'), vocabulary, allowed_facts)}")
 
 
-def _group_text(group, vocabulary: Vocabulary, depth: int = 0) -> str:
+def _group_text(group, vocabulary: Vocabulary, depth: int = 0,
+                allowed_facts: Collection[str] = ()) -> str:
     """One group's readback, every line indented by its OWN depth already.
 
     Recursion passes `depth + 1` and nothing else, so a nested block's lines
@@ -909,16 +947,17 @@ def _group_text(group, vocabulary: Vocabulary, depth: int = 0) -> str:
         # own. Everything under it (its list items, or a nested NOT's own
         # prefix) keeps the depth it would have had without the negation, so
         # the scope of the negation is visible from indentation alone.
-        inner = _group_text(val, vocabulary, depth)
+        inner = _group_text(val, vocabulary, depth, allowed_facts)
         head, _, tail = inner.partition("\n")
         return f"{indent}NOT {head[len(indent):]}" + (f"\n{tail}" if tail else "")
     joiner = "ALL of:" if key == "all" else "ANY of:"
     lines = [f"{indent}{joiner}"]
     for item in val:
         if is_group_node(item):
-            lines.append(_group_text(item, vocabulary, depth + 1))
+            lines.append(_group_text(item, vocabulary, depth + 1,
+                                     allowed_facts))
         else:
-            lines.append(f"{indent}  - {_condition_text(item, vocabulary)}")
+            lines.append(f"{indent}  - {_condition_text(item, vocabulary, allowed_facts)}")
     return "\n".join(lines)
 
 

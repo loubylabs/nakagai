@@ -116,6 +116,16 @@ from nakagai.screen.spec import (
 
 GOOD = {"version": 1, "tf": "1d", "conditions": {"all": [RSI_LT_30]}}
 
+DISCOVERY_FACT_NAMES = (
+    "float_shares",
+    "shares_outstanding",
+    "market_cap",
+    "price",
+    "change_pct",
+    "gap_pct",
+    "session_volume",
+)
+
 RELATIVE_SCOPE_SCREEN = {
     "version": 1,
     "tf": "15m",
@@ -145,6 +155,44 @@ RELATIVE_SCOPE_SCREEN = {
 
 def test_validate_screen_spec_accepts_a_good_spec():
     assert validate_screen_spec(GOOD) == []
+
+
+@pytest.mark.parametrize("fact", DISCOVERY_FACT_NAMES)
+def test_screen_accepts_the_closed_discovery_fact_vocabulary(fact):
+    spec = {"version": 1, "tf": "1d", "conditions": {"all": [
+        {"lhs": {"fact": fact}, "op": "<", "rhs": 20_000_000},
+    ]}}
+    assert validate_screen_spec(spec) == []
+    assert fact.replace("_", " ") in describe_screen(spec)
+
+
+@pytest.mark.parametrize("extra", [
+    {"tf": "1h"},
+    {"sym": "SPY"},
+    {"window": "prior_day"},
+    {"provider": "somewhere"},
+])
+def test_fact_nodes_accept_no_scope_or_provider_keys(extra):
+    spec = {"version": 1, "tf": "1d", "conditions": {"all": [
+        {"lhs": {"fact": "price", **extra}, "op": ">", "rhs": 10},
+    ]}}
+    assert validate_screen_spec(spec)
+
+
+def test_fact_nodes_refuse_cross_semantics():
+    spec = {"version": 1, "tf": "1d", "conditions": {"all": [
+        {"lhs": {"fact": "price"}, "op": "crosses_above", "rhs": 10},
+    ]}}
+    errors = validate_screen_spec(spec)
+    assert any("level" in error for error in errors)
+
+
+def test_screen_refuses_a_fact_outside_the_closed_vocabulary():
+    spec = {"version": 1, "tf": "1d", "conditions": {"all": [
+        {"lhs": {"fact": "beta"}, "op": ">", "rhs": 1},
+    ]}}
+    errors = validate_screen_spec(spec)
+    assert any("unknown fact" in error for error in errors)
 
 
 def test_validate_screen_spec_defaults_tf_to_1d():

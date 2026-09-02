@@ -133,7 +133,8 @@ class FrameEval:
     def __init__(self, driving_symbol: str,
                  frames: Mapping[tuple[str, str], pd.DataFrame],
                  tfs: TimeframeSet = DEFAULT_TIMEFRAMES, *,
-                 vocabulary: Vocabulary | None = None):
+                 vocabulary: Vocabulary | None = None,
+                 facts: Mapping[str, float | int | None] | None = None):
         bad = [key for key in frames
                if not (isinstance(key, tuple) and len(key) == 2
                        and all(isinstance(part, str) for part in key))]
@@ -145,6 +146,7 @@ class FrameEval:
         self._frames = frames
         self.tfs = tfs
         self.vocabulary = resolve_vocabulary(vocabulary)
+        self.facts = facts or {}
         self._cache: dict = {}
         self._maps: dict = {}
         self._spans: dict = {}
@@ -293,6 +295,14 @@ class FrameEval:
     def _eval(self, node: dict, pair: tuple[str, str]):
         frame = self._frames[pair]
         mask = self._own_missing(pair).copy()
+        if "fact" in node:
+            value = self.facts.get(node["fact"])
+            if (isinstance(value, bool)
+                    or not isinstance(value, (int, float))
+                    or not np.isfinite(value)):
+                value = np.nan
+            out = pd.Series(value, index=frame.index, dtype="float64")
+            return out, pd.Series(False, index=frame.index, dtype=bool)
         if "src" in node:
             return self._masked(frame[node["src"]], mask), mask
         if "op" in node:

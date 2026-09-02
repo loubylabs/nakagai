@@ -48,6 +48,24 @@ def _frames(n=400):
     }
 
 
+def test_fact_expression_is_a_float64_constant_series():
+    frames = _frames()
+    fe = FrameEval("SPY", frames, TFS, facts={"float_shares": 5_000_000})
+    got = fe.series({"fact": "float_shares"}, "15m")
+    assert got.dtype == "float64"
+    assert got.index.equals(frames[("SPY", "15m")].index)
+    assert got.eq(5_000_000.0).all()
+
+
+@pytest.mark.parametrize("value", [None, float("nan"), float("inf")])
+def test_unavailable_fact_expression_is_all_nan(value):
+    frames = _frames()
+    fe = FrameEval("SPY", frames, TFS, facts={"float_shares": value})
+    got = fe.series({"fact": "float_shares"}, "15m")
+    assert got.dtype == "float64"
+    assert got.isna().all()
+
+
 @pytest.mark.parametrize("node", NODES, ids=lambda n: str(n))
 def test_whole_frame_row_equals_prefix_last_row(node):
     frames = _frames()

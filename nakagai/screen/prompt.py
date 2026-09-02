@@ -3,8 +3,23 @@ own vocabulary so it can never drift from the validator that will judge the
 reply."""
 
 from nakagai.strategies.rules import spec as g
+from nakagai.screen.facts import DISCOVERY_FACTS, FACT_LABELS
 from nakagai.strategies.rules.vocabulary import (
     Vocabulary, is_condition_rule, resolve_vocabulary)
+
+_BASE_UNIVERSE = "All eligible US common stocks"
+_FACT_GROUPS = {
+    "fundamentals": (
+        "float_shares", "shares_outstanding", "market_cap",
+    ),
+    "market_activity": (
+        "price", "change_pct", "gap_pct", "session_volume",
+    ),
+}
+_CAPABILITY_EXAMPLES = (
+    "Float under 20 million with price under $10",
+    "RSI under 30 with volume above twice its 20-day average.",
+)
 
 _EXAMPLES = """\
 Description: "oversold names: rsi 14 under 30 on the daily"
@@ -19,9 +34,25 @@ Description: "price above the 200 day average on at least double average volume"
 ]}},
 "clarifications": ["read 'average volume' as its 20 bar simple average"]}
 
-Description: "stocks with strong earnings surprises"
-{"not_expressible": "the grammar has no fundamentals or earnings data, only price/volume series, indicators, and primitives"}\
+Description: "Any low float bangers?"
+{"spec": {"version": 1, "tf": "1d",
+"conditions": {"all": [{"lhs": {"fact": "float_shares"}, "op": "<", "rhs": 20000000}]}},
+"clarifications": ["read 'low float' as fewer than 20 million float shares; bangers adds no financial condition"]}\
 """
+
+
+def screen_capabilities() -> dict:
+    """JSON-ready capability projection shared with product surfaces."""
+    return {
+        "base_universe": _BASE_UNIVERSE,
+        "fact_groups": {
+            group: list(names) for group, names in _FACT_GROUPS.items()
+        },
+        "fact_labels": dict(FACT_LABELS),
+        "technical_scope": "daily",
+        "logic": ["all", "any", "not"],
+        "examples": list(_CAPABILITY_EXAMPLES),
+    }
 
 
 def _bounds(schema: dict) -> str:
@@ -45,6 +76,8 @@ def render_screen_prompt(vocabulary: Vocabulary | None = None) -> str:
         for name, term in sorted(vocabulary.indicators.items()))
     prim_lines = "\n".join(f"- {name}({_bounds(term.args)})"
                            for name, term in sorted(vocabulary.primitives.items()))
+    fact_lines = "\n".join(
+        f"- {name}: {FACT_LABELS[name]}" for name in DISCOVERY_FACTS)
     window_lines = g.window_prompt_text(vocabulary)
     return f"""You compile plain-English market screens into nakagai ScreenSpec v1
 JSON. A screen is a filter: it answers "which symbols match this condition
@@ -68,12 +101,17 @@ number. Cross ops fire on the latest completed bar transition.
 
 Expressions are numbers or objects:
 SYMBOL is an uppercase market symbol matching [A-Z][A-Z0-9.-]{{0,9}}.
+- current fact: {{"fact": <name>}} using one name listed below. A fact takes
+  no sym, tf, window, or provider key and cannot be the lhs of a cross.
 - series leaf: {{"src": one of {g.SOURCES}, "sym"?: <SYMBOL>,
   "tf"?: one of {g.TIMEFRAMES}}}
 - indicator: {{"ind": <name>, <args>, "of"?: <expr>, "tf"?: <tf>,
   "window"?: <registered window>, "sym"?: <SYMBOL>}}
 - math: {{"op": one of {sorted(g.MATH_OPS)}, "args": [<expr>, ...]}}
 - primitive: {{"prim": <name>, <args>, "sym"?: <SYMBOL>}}
+
+# Current discovery facts
+{fact_lines}
 
 # Indicators (name(arg=bounds or choices))
 {ind_lines}

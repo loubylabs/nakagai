@@ -18,7 +18,7 @@ after the source timeframe lands.
 import pandas as pd
 
 from nakagai.data.base import DataProvider
-from nakagai.data.alpaca import AlpacaBarBatchResult, _frame_from_rows
+from nakagai.data.alpaca import AlpacaBarBatchResult, frame_from_rows
 from nakagai.data.cache import BarCache
 from nakagai.data.resample import DERIVED, resample_bars
 
@@ -170,7 +170,7 @@ def _commit_batch(cache: BarCache, timeframe: str, requested: list[str],
             detail = f"symbols {omitted!r}"
         raise ValueError(f"provider omitted requested {detail}")
     for member in result.members:
-        frame = _frame_from_rows(list(member.rows))
+        frame = frame_from_rows(list(member.rows))
         if not frame.empty:
             written[member.symbol] = cache.upsert(
                 member.symbol, timeframe, frame)
