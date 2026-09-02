@@ -440,6 +440,28 @@ def _check_sym(node: dict, path: str, errs: list[str]) -> None:
         )
 
 
+def _expr_contains_series(node, vocabulary: Vocabulary) -> bool:
+    """Whether an expression tree contains a historical technical series."""
+    stack = [node]
+    while stack:
+        current = stack.pop()
+        if not isinstance(current, dict):
+            continue
+        if "src" in current or "ind" in current:
+            return True
+        if "prim" in current:
+            name = current.get("prim")
+            if not isinstance(name, str):
+                continue
+            term = vocabulary.primitives.get(name)
+            if term is None or not term.end_anchored:
+                return True
+            continue
+        if "op" in current and isinstance(current.get("args"), list):
+            stack.extend(current["args"])
+    return False
+
+
 def _check_expr(node, path: str, errs: list[str], budget: _Budget,
                 vocabulary: Vocabulary, depth: int = 0,
                 series_required: bool = False,
@@ -490,6 +512,9 @@ def _check_expr(node, path: str, errs: list[str], budget: _Budget,
         if not isinstance(args, list) or not lo <= len(args) <= hi:
             errs.append(f"{path}: {op!r} takes {lo}-{hi} args")
             return
+        if series_required and not _expr_contains_series(node, vocabulary):
+            errs.append(f"{path}: the left side of a cross must contain a "
+                        "technical series; this expression is a level")
         for i, a in enumerate(args):
             _check_expr(a, f"{path}.args[{i}]", errs, budget, vocabulary,
                         depth + 1, allowed_facts=allowed_facts)

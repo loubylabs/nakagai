@@ -467,6 +467,11 @@ class FrameEval:
         return self._group_reduce_na(
             group, self.driving_symbol, tf).fillna(False).astype(bool)
 
+    def group_verdict(self, group: dict, tf: str) -> bool | None:
+        """Latest group value, preserving unknown as a Python `None`."""
+        value = self._group_reduce_na(group, self.driving_symbol, tf).iloc[-1]
+        return None if pd.isna(value) else bool(value)
+
     def driving_group(self, group: dict, tf: str) -> pd.Series:
         """`group` as a boolean series on the DRIVING index, computed once.
 

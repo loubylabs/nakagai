@@ -187,6 +187,40 @@ def test_fact_nodes_refuse_cross_semantics():
     assert any("level" in error for error in errors)
 
 
+@pytest.mark.parametrize("lhs", [
+    {"op": "+", "args": [{"fact": "price"}, 1]},
+    {"op": "abs", "args": [{"fact": "price"}]},
+    {"op": "+", "args": [1, 2]},
+], ids=["fact-plus-number", "fact-absolute", "numbers-only"])
+def test_cross_left_math_without_a_series_is_a_level(lhs):
+    spec = {"version": 1, "tf": "1d", "conditions": {"all": [
+        {"lhs": lhs, "op": "crosses_above", "rhs": 10},
+    ]}}
+    errors = validate_screen_spec(spec)
+    assert any("level" in error for error in errors)
+
+
+def test_cross_left_math_with_a_technical_series_is_accepted():
+    spec = {"version": 1, "tf": "1d", "conditions": {"all": [
+        {"lhs": {"op": "+", "args": [
+            {"src": "close"}, {"fact": "price"},
+        ]}, "op": "crosses_above", "rhs": 10},
+    ]}}
+    assert validate_screen_spec(spec) == []
+
+
+def test_cross_left_math_with_a_series_is_not_misclassified_as_a_level():
+    spec = {"version": 1, "tf": "1d", "conditions": {"all": [
+        {"lhs": {"op": "+", "args": [
+            {"src": "close"},
+            {"prim": "fvg_nearest", "direction": "long", "field": "top"},
+        ]}, "op": "crosses_above", "rhs": 10},
+    ]}}
+    errors = validate_screen_spec(spec)
+    assert any("anchored to the end" in error for error in errors)
+    assert not any("must contain a technical series" in error for error in errors)
+
+
 def test_screen_refuses_a_fact_outside_the_closed_vocabulary():
     spec = {"version": 1, "tf": "1d", "conditions": {"all": [
         {"lhs": {"fact": "beta"}, "op": ">", "rhs": 1},

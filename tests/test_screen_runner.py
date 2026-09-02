@@ -69,6 +69,14 @@ LOW_FLOAT_ABOVE_SMA20 = {
 }
 
 
+def _above_sma20():
+    return {
+        "lhs": {"src": "close"},
+        "op": ">",
+        "rhs": {"ind": "sma", "n": 20},
+    }
+
+
 class _ExplodingCache:
     def load(self, symbol, timeframe):
         raise AssertionError(f"bar cache loaded for {symbol} {timeframe}")
@@ -150,6 +158,25 @@ def test_fact_only_unknown_records_the_missing_fact_without_loading_bars():
         "bar_time": "",
         "note": "facts unavailable: float_shares",
     }]
+
+
+@pytest.mark.parametrize("conditions,symbol", [
+    ({"all": [LOW_FLOAT["conditions"]["all"][0], _above_sma20()]}, "UP"),
+    ({"any": [LOW_FLOAT["conditions"]["all"][0], _above_sma20()]}, "DOWN"),
+    ({"not": {"all": [
+        LOW_FLOAT["conditions"]["all"][0], _above_sma20(),
+    ]}}, "UP"),
+], ids=["all", "any", "not"])
+def test_mixed_unknown_records_the_missing_fact_after_technical_evaluation(
+        cache, conditions, symbol):
+    spec = {"version": 1, "tf": "1d", "conditions": conditions}
+    result = run_screen(spec, [symbol], cache, facts={})
+    row = result["rows"][0]
+    assert row["matched"] is None
+    assert row["note"] == "facts unavailable: float_shares"
+    assert row["last_close"] is not None
+    assert row["bar_time"]
+    assert result["universe"] == {"screened": 1, "skipped": 1}
 
 
 def test_run_screen_matches_and_sorts_matched_first(cache):

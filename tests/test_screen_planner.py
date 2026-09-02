@@ -68,6 +68,27 @@ def test_fact_math_is_resolved_in_the_cheap_pass():
     assert planned == PlannedSymbol(True, False, ())
 
 
+def test_fact_division_by_zero_is_a_settled_non_match():
+    group = {"all": [{
+        "lhs": {"op": "/", "args": [
+            {"fact": "market_cap"}, 0,
+        ]},
+        "op": ">",
+        "rhs": 1,
+    }]}
+    planned = plan_symbol(group, {"market_cap": 90_000_000})
+    assert planned == PlannedSymbol(False, False, ())
+
+
+def test_non_finite_literal_is_a_settled_non_match():
+    group = {"all": [{
+        "lhs": float("inf"),
+        "op": ">",
+        "rhs": 1,
+    }]}
+    assert plan_symbol(group, {}) == PlannedSymbol(False, False, ())
+
+
 def test_missing_fact_names_are_sorted_and_unique():
     group = {"all": [
         _low_float(),

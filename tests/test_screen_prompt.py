@@ -3,6 +3,31 @@
 from nakagai.screen.facts import DISCOVERY_FACTS, FACT_LABELS
 from nakagai.screen.prompt import render_screen_prompt, screen_capabilities
 
+EXPECTED_FACTS = (
+    "float_shares",
+    "shares_outstanding",
+    "market_cap",
+    "price",
+    "change_pct",
+    "gap_pct",
+    "session_volume",
+)
+
+
+def test_discovery_fact_names_and_label_keys_are_exact():
+    assert DISCOVERY_FACTS == EXPECTED_FACTS
+    assert tuple(FACT_LABELS) == EXPECTED_FACTS
+
+
+def test_capability_fact_groups_partition_the_exact_vocabulary():
+    grouped = [
+        fact
+        for names in screen_capabilities()["fact_groups"].values()
+        for fact in names
+    ]
+    assert len(grouped) == len(set(grouped))
+    assert set(grouped) == set(EXPECTED_FACTS)
+
 
 def test_screen_capabilities_publish_the_full_market_contract():
     capabilities = screen_capabilities()

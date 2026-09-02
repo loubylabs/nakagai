@@ -129,11 +129,27 @@ def run_screen(spec: dict, symbols: list[str], cache, now=None,
             # at now"; the driving index never enters it, and must not, because a
             # symbol screened on an intraday timeframe may have no intraday bars
             # to carry a cursor.
-            matched = bool(ctx.fe.group_series(spec["conditions"], tf).iloc[-1])
-            rows.append(_row(sym, matched=matched,
-                             last_close=float(bars["close"].iloc[-1]),
-                             bar_time=bars.index[-1].isoformat(),
-                             note=sync_note))
+            evaluated = ctx.fe.group_verdict(spec["conditions"], tf)
+            if evaluated is None and planned.missing_facts:
+                unavailable = ("facts unavailable: "
+                               + ", ".join(planned.missing_facts))
+                rows.append(_row(
+                    sym,
+                    last_close=float(bars["close"].iloc[-1]),
+                    bar_time=bars.index[-1].isoformat(),
+                    note=(f"{sync_note}; {unavailable}"
+                          if sync_note else unavailable),
+                ))
+                skipped += 1
+                continue
+            matched = False if evaluated is None else evaluated
+            rows.append(_row(
+                sym,
+                matched=matched,
+                last_close=float(bars["close"].iloc[-1]),
+                bar_time=bars.index[-1].isoformat(),
+                note=sync_note,
+            ))
         except Exception as e:  # partial failure: other symbols still screen
             errors.append(f"{sym}: {e}")
             note = f"error: {e}"

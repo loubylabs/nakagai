@@ -7,6 +7,13 @@ from dataclasses import dataclass
 from nakagai.strategies.rules.spec import is_group_node
 
 
+class _Indeterminate:
+    pass
+
+
+_INDETERMINATE = _Indeterminate()
+
+
 @dataclass(frozen=True)
 class PlannedSymbol:
     verdict: bool | None
@@ -16,7 +23,7 @@ class PlannedSymbol:
 
 @dataclass(frozen=True)
 class _ExprPlan:
-    value: float | None
+    value: float | None | _Indeterminate
     needs_technical: bool
     missing_facts: frozenset[str]
 
@@ -62,7 +69,7 @@ def _fact_value(name: str, facts: Mapping[str, float | int | None]) -> _ExprPlan
     return _ExprPlan(number, False, frozenset())
 
 
-def _apply_math(op: str, values: list[float]) -> float | None:
+def _apply_math(op: str, values: list[float]) -> float | _Indeterminate:
     try:
         if op == "abs":
             result = abs(values[0])
@@ -79,10 +86,10 @@ def _apply_math(op: str, values: list[float]) -> float | None:
         elif op == "max":
             result = max(values)
         else:
-            return None
+            return _INDETERMINATE
     except (ArithmeticError, OverflowError, ValueError):
-        return None
-    return float(result) if math.isfinite(float(result)) else None
+        return _INDETERMINATE
+    return float(result) if math.isfinite(float(result)) else _INDETERMINATE
 
 
 def _plan_expr(node, facts: Mapping[str, float | int | None]) -> _ExprPlan:
@@ -96,7 +103,7 @@ def _plan_expr(node, facts: Mapping[str, float | int | None]) -> _ExprPlan:
         elif isinstance(current, (int, float)):
             value = float(current)
             plans[key] = _ExprPlan(
-                value if math.isfinite(value) else None,
+                value if math.isfinite(value) else _INDETERMINATE,
                 False,
                 frozenset(),
             )
@@ -115,10 +122,12 @@ def _plan_expr(node, facts: Mapping[str, float | int | None]) -> _ExprPlan:
             technical = any(child.needs_technical for child in children)
             if any(child.value is None for child in children):
                 plans[key] = _ExprPlan(None, technical, missing)
+            elif any(child.value is _INDETERMINATE for child in children):
+                plans[key] = _ExprPlan(_INDETERMINATE, technical, missing)
             else:
                 value = _apply_math(
                     current["op"],
-                    [child.value for child in children if child.value is not None],
+                    [float(child.value) for child in children],
                 )
                 plans[key] = _ExprPlan(value, technical, missing)
         else:
@@ -132,6 +141,8 @@ def _plan_condition(cond: dict,
     rhs = _plan_expr(cond["rhs"], facts)
     technical = lhs.needs_technical or rhs.needs_technical
     missing = lhs.missing_facts | rhs.missing_facts
+    if lhs.value is _INDETERMINATE or rhs.value is _INDETERMINATE:
+        return _GroupPlan(False, False, frozenset())
     if lhs.value is None or rhs.value is None or cond["op"].startswith("crosses_"):
         return _GroupPlan(None, technical, missing)
     verdict = {
