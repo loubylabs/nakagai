@@ -48,8 +48,8 @@ CHART = {"15m": ("15 * 60", "15-minute")}
 # five, whatever the spec says, because none of them is a property of the spec:
 # they are what two data vendors and two broker simulators do differently.
 FIDELITY = (
-    "TradingView and Alpaca can differ in session coverage, adjustments, "
-    "volume, missing bars, and aggregate boundaries.",
+    "TradingView and Nakagai's market-data feed can differ in session "
+    "coverage, adjustments, volume, missing bars, and aggregate boundaries.",
     "Nakagai resolves an ambiguous bar pessimistically with stop first. "
     "TradingView infers an intrabar path or uses Bar Magnifier data.",
     "Nakagai uses one basis point of slippage with a one-cent floor. Pine's "
