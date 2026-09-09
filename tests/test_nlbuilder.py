@@ -904,7 +904,7 @@ def test_no_client_means_openrouter_on_the_pinned_endpoint(monkeypatch):
     assert compile_strategy("buy rsi dips").spec == GOOD_SPEC
     assert built == [{"model": "z-ai/glm-5.3-flash",
                       "provider": {"require_parameters": True,
-                                   "order": ["friendli"],
+                                   "order": ["fireworks"],
                                    "allow_fallbacks": False}}]
     assert (MODEL, PROVIDER) == (built[0]["model"], built[0]["provider"])
 
