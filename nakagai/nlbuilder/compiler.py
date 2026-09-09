@@ -18,7 +18,7 @@ from nakagai.strategies.composite import (
 from nakagai.strategies.rules import describe_spec, validate_spec
 from nakagai.strategies.rules.vocabulary import Vocabulary, resolve_vocabulary
 
-MODEL = "deepseek/deepseek-v4-flash-0731"
+MODEL = "z-ai/glm-5.3-flash"
 MAX_TOKENS = 8000
 
 # A model id is not a machine. The same id is served by many providers at
@@ -26,7 +26,7 @@ MAX_TOKENS = 8000
 # broken here before, so the endpoint is pinned: this provider, no silent
 # fallback to another, and it must honour the parameters we send rather than
 # dropping the ones it does not implement.
-PROVIDER = {"require_parameters": True, "order": ["alibaba"],
+PROVIDER = {"require_parameters": True, "order": ["friendli"],
             "allow_fallbacks": False}
 
 CandidateNormalizer: TypeAlias = Callable[[str, dict], dict]
