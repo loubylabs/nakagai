@@ -589,7 +589,7 @@ def test_usage_is_summed_across_retries_with_cache_split():
     assert res.attempts == 2
     assert res.usage == {"input_tokens": 200, "output_tokens": 100,
                          "cache_read_tokens": 20, "cache_write_tokens": 10}
-    assert res.model == "deepseek/deepseek-v4-flash-0731"
+    assert res.model == "z-ai/glm-5.3-flash"
 
 
 def test_normalized_cache_subsets_are_summed_across_arrived_retries():
@@ -902,9 +902,9 @@ def test_no_client_means_openrouter_on_the_pinned_endpoint(monkeypatch):
     monkeypatch.setattr(compiler, "openrouter_complete", fake_openrouter_complete)
 
     assert compile_strategy("buy rsi dips").spec == GOOD_SPEC
-    assert built == [{"model": "deepseek/deepseek-v4-flash-0731",
+    assert built == [{"model": "z-ai/glm-5.3-flash",
                       "provider": {"require_parameters": True,
-                                   "order": ["alibaba"],
+                                   "order": ["friendli"],
                                    "allow_fallbacks": False}}]
     assert (MODEL, PROVIDER) == (built[0]["model"], built[0]["provider"])
 

@@ -13,7 +13,7 @@ from nakagai.screen.prompt import render_screen_prompt
 from nakagai.screen.spec import describe_screen, validate_screen_spec
 from nakagai.strategies.rules.vocabulary import Vocabulary, resolve_vocabulary
 
-MODEL = "deepseek/deepseek-v4-flash-0731"
+MODEL = "z-ai/glm-5.3-flash"
 MAX_TOKENS = 4000
 
 
