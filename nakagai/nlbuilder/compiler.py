@@ -26,7 +26,7 @@ MAX_TOKENS = 8000
 # broken here before, so the endpoint is pinned: this provider, no silent
 # fallback to another, and it must honour the parameters we send rather than
 # dropping the ones it does not implement.
-PROVIDER = {"require_parameters": True, "order": ["friendli"],
+PROVIDER = {"require_parameters": True, "order": ["fireworks"],
             "allow_fallbacks": False}
 
 CandidateNormalizer: TypeAlias = Callable[[str, dict], dict]
