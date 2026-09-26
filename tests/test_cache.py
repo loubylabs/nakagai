@@ -256,6 +256,12 @@ def test_concurrent_upserts_do_not_lose_bars(tmp_path):
         "while time.time() < deadline:\n"
         "    time.sleep(0.002)\n"
         "BarCache(root).upsert('SPY', '15m', df)\n"
+        # Skip interpreter teardown. Arrow's thread pool can abort there
+        # ("terminate called without an active exception", exit -6) after
+        # the write is already on disk, apache/arrow#34314 (#1027 on the
+        # platform tracker). A failed upsert still raises above and exits 1.
+        "sys.stdout.flush()\n"
+        "import os; os._exit(0)\n"
     )
     stamps = [f"2026-06-01T13:{m:02d}:00Z" for m in (30, 45, 0, 15)]
     deadline = time.time() + 5.0        # generous: covers interpreter + pandas import
