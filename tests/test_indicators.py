@@ -216,3 +216,106 @@ def test_obv_accumulates_signed_volume():
     bars["volume"] = 10.0
     o = obv(bars)
     assert o.iloc[-1] == 10.0 - 10.0 + 0.0 + 10.0
+
+
+def _walk(n=120, seed=7):
+    rng = np.random.default_rng(seed)
+    c = 100 + np.cumsum(rng.normal(0, 1, n))
+    idx = pd.date_range("2026-01-05 14:30", periods=n, freq="15min", tz="UTC")
+    s = pd.Series(c, index=idx)
+    return pd.DataFrame({"open": s, "high": s + rng.uniform(0.1, 1, n),
+                         "low": s - rng.uniform(0.1, 1, n), "close": s,
+                         "volume": rng.uniform(100, 1000, n)}, index=idx)
+
+
+def test_wma_weights():
+    assert ind.wma(pd.Series([1.0, 2.0, 3.0]), 3).iloc[-1] == pytest.approx(14 / 6)
+
+
+def test_hma_straight_line_is_the_line():
+    s = pd.Series(np.arange(50, dtype="float64"))
+    h = ind.hma(s, 9)
+    assert h.iloc[:8].isna().all()
+    assert (h.iloc[10:] - s.iloc[10:]).abs().max() < 1e-9
+
+
+def test_vwma():
+    b = _bars(np.arange(1.0, 41.0))
+    assert ind.vwma(b, 5).dropna().tolist() == pytest.approx(ind.sma(b["close"], 5).dropna().tolist())
+    two = _bars([10.0, 20.0])
+    two["volume"] = [1.0, 3.0]
+    assert ind.vwma(two, 2).iloc[-1] == pytest.approx(17.5)
+
+
+def test_dmi_columns_and_adx_unchanged():
+    b = _walk()
+    d = ind.dmi(b)
+    assert list(d.columns) == ["plus_di", "minus_di", "adx"]
+    n = 14
+    up = b["high"].diff()
+    down = -b["low"].diff()
+    plus_dm = up.where((up > down) & (up > 0), 0.0)
+    minus_dm = down.where((down > up) & (down > 0), 0.0)
+    a = ind.atr(b, n).replace(0.0, np.nan)
+    pdi = 100 * plus_dm.ewm(alpha=1 / n, adjust=False, min_periods=n).mean() / a
+    mdi = 100 * minus_dm.ewm(alpha=1 / n, adjust=False, min_periods=n).mean() / a
+    dx = 100 * (pdi - mdi).abs() / (pdi + mdi).replace(0.0, np.nan)
+    old = dx.ewm(alpha=1 / n, adjust=False, min_periods=n).mean()
+    pd.testing.assert_series_equal(ind.adx(b), old, check_names=False)
+    pd.testing.assert_series_equal(d["adx"], old, check_names=False)
+
+
+def test_awesome_constant_is_zero():
+    b = _bars(np.full(40, 10.0))
+    assert ind.awesome(b).iloc[-1] == pytest.approx(0.0)
+    assert np.isnan(ind.awesome(b).iloc[32])
+
+
+def test_momentum():
+    s = _walk()["close"]
+    pd.testing.assert_series_equal(ind.momentum(s, 3), s - s.shift(3))
+
+
+def test_stoch_rsi_bounds():
+    r = ind.stoch_rsi(_walk()["close"])
+    assert list(r.columns) == ["k", "d"]
+    for col in r:
+        v = r[col].dropna()
+        assert len(v) > 0 and v.between(0, 100).all()
+
+
+def test_bull_bear_power_constant_zero():
+    c = pd.Series(np.full(30, 5.0))
+    b = pd.DataFrame({"high": c, "low": c, "close": c})
+    assert ind.bull_bear_power(b).iloc[-1] == pytest.approx(0.0)
+
+
+def test_ultimate_bounds_and_all_up():
+    v = ind.ultimate(_walk()).dropna()
+    assert len(v) > 0 and v.between(0, 100).all()
+    c = pd.Series(np.arange(1.0, 60.0))
+    up = pd.DataFrame({"high": c, "low": c - 1, "close": c})
+    assert ind.ultimate(up).iloc[-1] == pytest.approx(100.0)
+
+
+def test_new_indicators_have_no_lookahead():
+    b = _walk()
+    k = 60
+    cases = {
+        "wma": lambda x: ind.wma(x["close"], 9),
+        "hma": lambda x: ind.hma(x["close"], 9),
+        "vwma": ind.vwma,
+        "dmi": ind.dmi,
+        "awesome": ind.awesome,
+        "momentum": lambda x: ind.momentum(x["close"], 10),
+        "stoch_rsi": lambda x: ind.stoch_rsi(x["close"]),
+        "bull_bear_power": ind.bull_bear_power,
+        "ultimate": ind.ultimate,
+    }
+    for name, f in cases.items():
+        full = f(b).iloc[:k]
+        part = f(b.iloc[:k])
+        pd.testing.assert_frame_equal(
+            part.to_frame() if isinstance(part, pd.Series) else part,
+            full.to_frame() if isinstance(full, pd.Series) else full,
+            check_names=False, obj=name)
