@@ -19,6 +19,26 @@ def ema(close: pd.Series, n: int) -> pd.Series:
     return close.ewm(span=int(n), adjust=False, min_periods=int(n)).mean()
 
 
+def wma(close: pd.Series, n: int) -> pd.Series:
+    """Linearly weighted moving average, weights 1..n (newest heaviest)."""
+    n = int(n)
+    w = np.arange(1, n + 1, dtype=float)
+    return close.rolling(n).apply(lambda x: float(np.dot(x, w) / w.sum()), raw=True)
+
+
+def hma(close: pd.Series, n: int = 9) -> pd.Series:
+    """Hull moving average: WMA(2*WMA(n/2) - WMA(n), sqrt(n))."""
+    n = int(n)
+    return wma(2 * wma(close, max(1, n // 2)) - wma(close, n), max(1, int(round(np.sqrt(n)))))
+
+
+def vwma(bars: pd.DataFrame, n: int = 20) -> pd.Series:
+    """Volume-weighted moving average of the close."""
+    n = int(n)
+    v = bars["volume"]
+    return (bars["close"] * v).rolling(n).sum() / v.rolling(n).sum().replace(0.0, np.nan)
+
+
 def rsi(close: pd.Series, n: int = 14) -> pd.Series:
     """Wilder's RSI (smoothed with alpha=1/n)."""
     delta = close.diff()
@@ -207,8 +227,8 @@ def stoch(bars: pd.DataFrame, n: int = 14, d: int = 3) -> pd.DataFrame:
     return pd.DataFrame({"k": k, "d": k.rolling(d).mean()})
 
 
-def adx(bars: pd.DataFrame, n: int = 14) -> pd.Series:
-    """Wilder's average directional index."""
+def dmi(bars: pd.DataFrame, n: int = 14) -> pd.DataFrame:
+    """Wilder's directional movement: +DI, -DI and ADX."""
     n = int(n)
     up = bars["high"].diff()
     down = -bars["low"].diff()
@@ -218,7 +238,55 @@ def adx(bars: pd.DataFrame, n: int = 14) -> pd.Series:
     plus_di = 100 * plus_dm.ewm(alpha=1 / n, adjust=False, min_periods=n).mean() / a
     minus_di = 100 * minus_dm.ewm(alpha=1 / n, adjust=False, min_periods=n).mean() / a
     dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0.0, np.nan)
-    return dx.ewm(alpha=1 / n, adjust=False, min_periods=n).mean()
+    return pd.DataFrame({"plus_di": plus_di, "minus_di": minus_di,
+                         "adx": dx.ewm(alpha=1 / n, adjust=False, min_periods=n).mean()})
+
+
+def adx(bars: pd.DataFrame, n: int = 14) -> pd.Series:
+    """Wilder's average directional index."""
+    return dmi(bars, n)["adx"].rename(None)
+
+
+def awesome(bars: pd.DataFrame, fast: int = 5, slow: int = 34) -> pd.Series:
+    """Bill Williams' awesome oscillator over the bar midpoint."""
+    mid = (bars["high"] + bars["low"]) / 2
+    return sma(mid, fast) - sma(mid, slow)
+
+
+def momentum(close: pd.Series, n: int = 10) -> pd.Series:
+    """Price change over n bars, in price units (roc is the percent form)."""
+    return close - close.shift(int(n))
+
+
+def stoch_rsi(close: pd.Series, k: int = 3, d: int = 3, rsi_n: int = 14,
+              stoch_n: int = 14) -> pd.DataFrame:
+    """Stochastic of RSI: %K is the k-bar SMA of the raw value, %D its d-bar SMA."""
+    r = rsi(close, rsi_n)
+    lo = r.rolling(int(stoch_n)).min()
+    hi = r.rolling(int(stoch_n)).max()
+    raw = 100 * (r - lo) / (hi - lo).replace(0.0, np.nan)
+    kk = raw.rolling(int(k)).mean()
+    return pd.DataFrame({"k": kk, "d": kk.rolling(int(d)).mean()})
+
+
+def bull_bear_power(bars: pd.DataFrame, n: int = 13) -> pd.Series:
+    """Elder's bull power plus bear power against an n-bar EMA."""
+    e = ema(bars["close"], n)
+    return (bars["high"] - e) + (bars["low"] - e)
+
+
+def ultimate(bars: pd.DataFrame, s: int = 7, m: int = 14, l: int = 28) -> pd.Series:
+    """Williams' ultimate oscillator, 0..100."""
+    prev = bars["close"].shift(1)
+    low = pd.concat([bars["low"], prev], axis=1).min(axis=1)
+    high = pd.concat([bars["high"], prev], axis=1).max(axis=1)
+    bp = bars["close"] - low
+    tr = high - low
+
+    def avg(p: int) -> pd.Series:
+        return bp.rolling(int(p)).sum() / tr.rolling(int(p)).sum().replace(0.0, np.nan)
+
+    return 100 * (4 * avg(s) + 2 * avg(m) + avg(l)) / 7
 
 
 def obv(bars: pd.DataFrame) -> pd.Series:
