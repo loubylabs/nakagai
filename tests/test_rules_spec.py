@@ -12,7 +12,8 @@ from nakagai.strategies.rules import (
 from nakagai.strategies.rules.canon import canonical_expr
 from nakagai.strategies.rules import spec as rules_spec
 from nakagai.strategies.rules.spec import (
-    MAX_DEPTH, TIMEFRAMES, _expr_text, group_text, validate_condition_group)
+    MAX_DEPTH, MAX_EXPR_NODES, TIMEFRAMES, _expr_text, group_text,
+    validate_condition_group)
 from nakagai.strategies.rules.strategy import (
     expression_reference_pairs, spec_reference_pairs,
 )
@@ -1091,3 +1092,125 @@ def test_double_negation_canonicalizes_structurally_not_simplified():
     spec_plain = {"version": 2, "name": "x", "timeframe": "1h",
                   "long": {"all": [LEAF_A]}, "risk": NOT_RISK}
     assert spec_hash(spec_dbl) != spec_hash(spec_plain)
+
+
+# chrvsd/nakagai#860: a spec is bounded in size. Every operand node counts
+# against MAX_EXPR_NODES and a condition carries exactly lhs, op, rhs.
+
+def _conditions_with_nodes(total: int) -> list[dict]:
+    """Conditions holding exactly `total` operand nodes, at most ten each:
+    lhs is one src node, rhs is a number, abs(number) or `+` of numbers."""
+    sizes = [10] * (total // 10)
+    rem = total % 10
+    if rem == 1:
+        sizes[-1] = 9
+        sizes.append(2)
+    elif rem:
+        sizes.append(rem)
+    conds = []
+    for size in sizes:
+        r = size - 1
+        if r == 1:
+            rhs = 1.0
+        elif r == 2:
+            rhs = {"op": "abs", "args": [1.0]}
+        else:
+            rhs = {"op": "+", "args": [1.0] * (r - 1)}
+        conds.append({"lhs": {"src": "close"}, "op": ">", "rhs": rhs})
+    return conds
+
+
+def _spec_with_nodes(total: int) -> dict:
+    return {"version": 2, "name": "n", "timeframe": "1h",
+            "long": {"all": _conditions_with_nodes(total)},
+            "risk": ORB["risk"]}
+
+
+def _wide_tree(depth: int):
+    """The #860 probe: an 8-ary `+` tree, about 8**depth nodes."""
+    node = 1.0
+    for _ in range(depth):
+        node = {"op": "+", "args": [node] * 8}
+    return node
+
+
+OVER_BUDGET = (f"more than {MAX_EXPR_NODES} expression nodes (numbers, "
+               "sources, facts, math, indicators and primitives all count); "
+               "simplify or split the screen")
+
+
+def test_a_spec_at_the_expression_node_budget_passes():
+    assert validate_spec(_spec_with_nodes(MAX_EXPR_NODES)) == []
+
+
+def test_one_node_over_the_expression_node_budget_is_refused():
+    errs = validate_spec(_spec_with_nodes(MAX_EXPR_NODES + 1))
+    assert [e for e in errs if OVER_BUDGET in e] and len(errs) == 1, errs
+
+
+def test_the_wide_math_tree_probe_is_refused_once():
+    spec = {"version": 2, "name": "w", "timeframe": "1h",
+            "long": {"all": [{"lhs": {"src": "close"}, "op": ">",
+                              "rhs": _wide_tree(6)}]},
+            "risk": ORB["risk"]}
+    errs = validate_spec(spec)
+    assert len([e for e in errs if OVER_BUDGET in e]) == 1, errs
+
+
+def test_refusing_a_huge_tree_stops_at_the_budget(monkeypatch):
+    """The walk must cost O(budget), not O(tree), to refuse a 5.8 MB spec."""
+    import time
+    calls = 0
+    real = rules_spec._check_expr
+
+    def counting(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return real(*args, **kwargs)
+
+    group = {"all": [{"lhs": {"src": "close"}, "op": ">",
+                      "rhs": _wide_tree(7)}]}
+    monkeypatch.setattr(rules_spec, "_check_expr", counting)
+    started = time.perf_counter()
+    errs = validate_condition_group(group)
+    elapsed = time.perf_counter() - started
+    assert any(OVER_BUDGET in e for e in errs), errs
+    assert calls <= MAX_EXPR_NODES + 2, calls
+    assert elapsed < 0.25, elapsed
+
+
+def test_a_condition_with_an_extra_key_is_refused():
+    """The other #860 probe: a free-text key rode along unchecked."""
+    spec = _rule_with(1.0)
+    spec["long"]["all"][0]["comment"] = "x" * 1000
+    errs = validate_spec(spec)
+    assert errs == ["long.all[0]: condition takes only lhs, op, rhs; "
+                    "unknown keys ['comment']"], errs
+
+
+def test_an_extra_key_inside_a_condition_arg_is_refused():
+    cond = {"lhs": {"src": "close"}, "op": ">", "rhs": 1, "note": "x"}
+    errs = validate_spec(_bars_since_spec({"cond": cond}))
+    assert ("long.all[0].lhs.cond: condition takes only lhs, op, rhs; "
+            "unknown keys ['note']") in errs, errs
+
+
+def test_condition_arg_operands_count_against_the_budget():
+    conds = _conditions_with_nodes(MAX_EXPR_NODES - 3)
+    # bars_since (1) + its cond's lhs and rhs (2) + the outer rhs (1) = 4
+    conds.append({"lhs": {"prim": "bars_since",
+                          "cond": {"lhs": {"src": "close"}, "op": ">",
+                                   "rhs": 1}},
+                  "op": "<", "rhs": 5})
+    errs = validate_condition_group({"all": conds})
+    assert any(OVER_BUDGET in e for e in errs), errs
+
+
+@pytest.mark.parametrize("render", ["screen", "nlbuilder"])
+def test_prompts_advertise_the_expression_node_budget(render):
+    if render == "screen":
+        from nakagai.screen.prompt import render_screen_prompt as fn
+    else:
+        from nakagai.nlbuilder.prompt import render_system_prompt as fn
+    text = " ".join(fn().split())
+    assert f"max {MAX_EXPR_NODES} expression nodes" in text

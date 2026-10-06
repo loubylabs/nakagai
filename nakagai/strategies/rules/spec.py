@@ -49,6 +49,13 @@ MAX_DEPTH = 8
 GROUP_KEYS = ("all", "any", "not")
 MAX_CONDITIONS = 30
 MAX_NODES = 40           # indicator + primitive nodes per spec
+# MAX_NODES bounds compute cost and counts only what is expensive to evaluate,
+# so math, src, fact and number nodes used to be free: with 8-ary `+` and
+# MAX_DEPTH 8 a 5.8 MB screen validated (chrvsd/nakagai#860). This bounds size
+# instead, counting every operand node. The largest real spec has 14 non-scalar
+# nodes; 200 is over ten times that and about 6.7 per condition at the cap.
+MAX_EXPR_NODES = 200
+CONDITION_KEYS = frozenset({"lhs", "op", "rhs"})
 # The risk and exit blocks are the one part of the grammar whose bounds and
 # defaults do not come from a Term, so both are named here rather than written
 # inline in the checks below. Three readers share every pair: the validator,
@@ -119,6 +126,11 @@ class _Budget:
     def __init__(self):
         self.conditions = 0
         self.nodes = 0
+        self.expr_nodes = 0
+
+    @property
+    def expr_over(self) -> bool:
+        return self.expr_nodes > MAX_EXPR_NODES
 
 
 def _check_args(name: str, given: dict, term, path: str, errs: list[str],
@@ -208,7 +220,7 @@ def _check_condition_arg(name: str, arg: str, cond, given: dict, path: str,
     # other branch, and could not tell them apart, so deleting this
     # errs.append left the whole suite green. It is also the more useful
     # message, since a spec that DID supply the arg is not told it needs one.
-    if not isinstance(cond, dict) or not {"lhs", "op", "rhs"} <= set(cond):
+    if not isinstance(cond, dict) or not CONDITION_KEYS <= set(cond):
         errs.append(f"{path}: {name}.{arg} must be a condition "
                     f"{{lhs, op, rhs}}, got {cond!r}")
         return
@@ -217,6 +229,9 @@ def _check_condition_arg(name: str, arg: str, cond, given: dict, path: str,
     else:
         _check_condition(cond, f"{path}.{arg}", errs, budget, vocabulary,
                          depth + 1, allowed_facts)
+    if budget.expr_over:
+        # The walks below are O(tree); an over-budget spec is already refused.
+        return
     end_anchored = {n for n, t in vocabulary.primitives.items() if t.end_anchored}
     for bad in sorted(_prims_in(cond, end_anchored)):
         errs.append(f"{path}: {bad} is anchored to the end of the frame and "
@@ -466,6 +481,17 @@ def _check_expr(node, path: str, errs: list[str], budget: _Budget,
                 vocabulary: Vocabulary, depth: int = 0,
                 series_required: bool = False,
                 allowed_facts: Collection[str] = ()) -> None:
+    # Counted before anything else so that every node, valid or not, costs one,
+    # and checked on entry so that once the spec is over budget no further
+    # node is visited: refusing a huge tree must cost O(budget), not O(tree).
+    if budget.expr_over:
+        return
+    budget.expr_nodes += 1
+    if budget.expr_over:
+        errs.append(f"{path}: more than {MAX_EXPR_NODES} expression nodes "
+                    "(numbers, sources, facts, math, indicators and "
+                    "primitives all count); simplify or split the screen")
+        return
     if depth > MAX_DEPTH:
         errs.append(f"{path}: expression depth exceeds {MAX_DEPTH}")
         return
@@ -512,12 +538,17 @@ def _check_expr(node, path: str, errs: list[str], budget: _Budget,
         if not isinstance(args, list) or not lo <= len(args) <= hi:
             errs.append(f"{path}: {op!r} takes {lo}-{hi} args")
             return
-        if series_required and not _expr_contains_series(node, vocabulary):
-            errs.append(f"{path}: the left side of a cross must contain a "
-                        "technical series; this expression is a level")
         for i, a in enumerate(args):
+            if budget.expr_over:
+                break
             _check_expr(a, f"{path}.args[{i}]", errs, budget, vocabulary,
                         depth + 1, allowed_facts=allowed_facts)
+        # After the args, not before: _expr_contains_series walks the whole
+        # subtree, which only the budget walk above has shown to be bounded.
+        if (series_required and not budget.expr_over
+                and not _expr_contains_series(node, vocabulary)):
+            errs.append(f"{path}: the left side of a cross must contain a "
+                        "technical series; this expression is a level")
         if "window" in node:
             errs.append(f"{path}: window is only valid on an aggregate indicator")
         if set(node) - {"op", "args", "window"}:
@@ -592,9 +623,15 @@ def _check_condition(cond, path: str, errs: list[str], budget: _Budget,
     if budget.conditions > MAX_CONDITIONS:
         errs.append(f"{path}: more than {MAX_CONDITIONS} conditions")
         return
-    if not isinstance(cond, dict) or not {"lhs", "op", "rhs"} <= set(cond):
+    if not isinstance(cond, dict) or not CONDITION_KEYS <= set(cond):
         errs.append(f"{path}: condition needs lhs, op, rhs")
         return
+    # Closed, like every other node in the grammar: an ignored key let a
+    # megabyte of free text ride along on a valid condition (#860).
+    unknown = set(cond) - CONDITION_KEYS
+    if unknown:
+        errs.append(f"{path}: condition takes only lhs, op, rhs; unknown keys "
+                    f"{sorted(unknown)}")
     op = cond["op"]
     if not names(op, OPS):
         errs.append(f"{path}: unknown op {op!r} (valid: {OPS})")
@@ -603,6 +640,10 @@ def _check_condition(cond, path: str, errs: list[str], budget: _Budget,
                 allowed_facts=allowed_facts)
     _check_expr(cond["rhs"], f"{path}.rhs", errs, budget, vocabulary, depth,
                 allowed_facts=allowed_facts)
+    if budget.expr_over:
+        # The cross check below walks both operands whole; an over-budget
+        # spec is already refused, so do not pay O(tree) to say more.
+        return
     if op in CROSS_OPS:
         # series_required only ever inspects the operand's TOP node, so it saw
         # {"prim": "fvg_nearest"} and not {"op": "*", "args": [that, 1.0]}. The
@@ -813,12 +854,16 @@ def validate_spec(spec, vocabulary: Vocabulary | None = None) -> list[str]:
     # never trips over a non-string.
     tf = spec.get("timeframe", "1h")
     tf = tf if tf in TIMEFRAMES else "1h"
+    # The session-aligned walks are O(tree), so they run only on a spec the
+    # budget walk has shown to be bounded; an over-budget one is refused anyway.
     for side in sides:
         _check_group(spec[side], side, errs, budget, vocabulary)
-        _check_session_aligned_refs(spec[side], tf, side, errs, vocabulary)
+        if not budget.expr_over:
+            _check_session_aligned_refs(spec[side], tf, side, errs, vocabulary)
     if "exits" in spec:
         _check_exits(spec["exits"], errs, budget, vocabulary)
-        if isinstance(spec["exits"], dict) and "exit" in spec["exits"]:
+        if (not budget.expr_over and isinstance(spec["exits"], dict)
+                and "exit" in spec["exits"]):
             _check_session_aligned_refs(spec["exits"]["exit"], tf,
                                         "exits.exit", errs, vocabulary)
     errs.extend(validate_risk(spec.get("risk", {})))
@@ -846,9 +891,12 @@ def validate_condition_group(group, path: str = "conditions",
     call site."""
     vocabulary = resolve_vocabulary(vocabulary)
     errs: list[str] = []
-    _check_group(group, path, errs, _Budget(), vocabulary,
+    budget = _Budget()
+    _check_group(group, path, errs, budget, vocabulary,
                  allowed_facts=allowed_facts)
-    _check_session_aligned_refs(group, tf, path, errs, vocabulary)
+    # O(tree), so only on a group the budget walk has shown to be bounded.
+    if not budget.expr_over:
+        _check_session_aligned_refs(group, tf, path, errs, vocabulary)
     return errs
 
 

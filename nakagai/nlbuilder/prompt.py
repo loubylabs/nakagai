@@ -256,7 +256,8 @@ Default when unspecified: {json.dumps(g.DEFAULT_RISK)}.
 
 # Limits
 Max expression depth {g.MAX_DEPTH}; max {g.MAX_CONDITIONS} conditions; max
-{g.MAX_NODES} indicator+primitive nodes.
+{g.MAX_NODES} indicator+primitive nodes; max {g.MAX_EXPR_NODES} expression nodes
+(every number, source, fact, math op, indicator and primitive counts).
 
 # Rules of engagement
 - If the user leaves something unspecified, choose a sensible default and add

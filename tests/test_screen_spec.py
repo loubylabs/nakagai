@@ -486,3 +486,25 @@ def test_screen_prompt_documents_not_in_the_grammar_paragraph():
     schema = _section(render_screen_prompt(), "# Schema")
     assert '{"not":' in schema
     assert '{"not": {"all":' in schema
+
+
+def test_a_screen_condition_with_an_extra_key_is_refused():
+    """chrvsd/nakagai#860's first probe, at the screen boundary."""
+    spec = {"version": 1, "tf": "1d",
+            "conditions": {"all": [{**RSI_LT_30, "comment": "x" * 1000}]}}
+    assert validate_screen_spec(spec) == [
+        "conditions.all[0]: condition takes only lhs, op, rhs; "
+        "unknown keys ['comment']"]
+
+
+def test_a_screen_over_the_expression_node_budget_is_refused():
+    """chrvsd/nakagai#860's second probe: an 8-ary `+` tree six deep."""
+    from nakagai.strategies.rules.spec import MAX_EXPR_NODES
+    node = 1.0
+    for _ in range(6):
+        node = {"op": "+", "args": [node] * 8}
+    spec = {"version": 1, "tf": "1d", "conditions": {"all": [
+        {"lhs": {"src": "close"}, "op": ">", "rhs": node}]}}
+    errs = validate_screen_spec(spec)
+    assert len(errs) == 1 and f"more than {MAX_EXPR_NODES} expression nodes" \
+        in errs[0], errs

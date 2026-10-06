@@ -125,7 +125,8 @@ condition and takes comparison ops only, never a cross)
 
 # Limits
 Max expression depth {g.MAX_DEPTH}; max {g.MAX_CONDITIONS} conditions; max
-{g.MAX_NODES} indicator+primitive nodes.
+{g.MAX_NODES} indicator+primitive nodes; max {g.MAX_EXPR_NODES} expression nodes
+(every number, source, fact, math op, indicator and primitive counts).
 
 # Rules of engagement
 - Prefer tf "1d" unless the user clearly means intraday.
