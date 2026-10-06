@@ -124,6 +124,9 @@ DISCOVERY_FACT_NAMES = (
     "change_pct",
     "gap_pct",
     "session_volume",
+    "shelf_filings_365d",
+    "offering_filings_365d",
+    "atm_offerings_365d",
 )
 
 RELATIVE_SCOPE_SCREEN = {
