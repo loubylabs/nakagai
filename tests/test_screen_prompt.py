@@ -11,6 +11,9 @@ EXPECTED_FACTS = (
     "change_pct",
     "gap_pct",
     "session_volume",
+    "shelf_filings_365d",
+    "offering_filings_365d",
+    "atm_offerings_365d",
 )
 
 
@@ -38,6 +41,10 @@ def test_screen_capabilities_publish_the_full_market_contract():
         ],
         "market_activity": [
             "price", "change_pct", "gap_pct", "session_volume",
+        ],
+        "dilution": [
+            "shelf_filings_365d", "offering_filings_365d",
+            "atm_offerings_365d",
         ],
     }
     assert capabilities["fact_labels"] == dict(FACT_LABELS)

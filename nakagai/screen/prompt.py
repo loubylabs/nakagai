@@ -15,6 +15,9 @@ _FACT_GROUPS = {
     "market_activity": (
         "price", "change_pct", "gap_pct", "session_volume",
     ),
+    "dilution": (
+        "shelf_filings_365d", "offering_filings_365d", "atm_offerings_365d",
+    ),
 }
 _CAPABILITY_EXAMPLES = (
     "Float under 20 million with price under $10",
