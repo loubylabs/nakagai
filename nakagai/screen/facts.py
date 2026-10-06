@@ -24,7 +24,7 @@ FACT_LABELS: Mapping[str, str] = MappingProxyType({
     "change_pct": "change percent",
     "gap_pct": "gap percent",
     "session_volume": "session volume",
-    "shelf_filings_365d": "shelf registrations, 365 days",
+    "shelf_filings_365d": "share registrations, 365 days",
     "offering_filings_365d": "offering prospectuses, 365 days",
     "atm_offerings_365d": "at-the-market offerings, 365 days",
 })
