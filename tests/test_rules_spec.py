@@ -1136,7 +1136,7 @@ def _wide_tree(depth: int):
 
 OVER_BUDGET = (f"more than {MAX_EXPR_NODES} expression nodes (numbers, "
                "sources, facts, math, indicators and primitives all count); "
-               "simplify or split the screen")
+               "simplify or split the conditions")
 
 
 def test_a_spec_at_the_expression_node_budget_passes():
@@ -1204,6 +1204,12 @@ def test_condition_arg_operands_count_against_the_budget():
                   "op": "<", "rhs": 5})
     errs = validate_condition_group({"all": conds})
     assert any(OVER_BUDGET in e for e in errs), errs
+
+
+def test_a_long_condition_list_is_refused_once_without_walking_it():
+    cond = {"lhs": {"src": "close"}, "op": ">", "rhs": 1}
+    errs = validate_condition_group({"all": [cond] * 100_000})
+    assert errs == ["conditions.all[30]: more than 30 conditions"], errs[:3]
 
 
 @pytest.mark.parametrize("render", ["screen", "nlbuilder"])

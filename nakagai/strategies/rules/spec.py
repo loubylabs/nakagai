@@ -490,7 +490,7 @@ def _check_expr(node, path: str, errs: list[str], budget: _Budget,
     if budget.expr_over:
         errs.append(f"{path}: more than {MAX_EXPR_NODES} expression nodes "
                     "(numbers, sources, facts, math, indicators and "
-                    "primitives all count); simplify or split the screen")
+                    "primitives all count); simplify or split the conditions")
         return
     if depth > MAX_DEPTH:
         errs.append(f"{path}: expression depth exceeds {MAX_DEPTH}")
@@ -715,6 +715,10 @@ def _check_group(group, path: str, errs: list[str], budget: _Budget,
         errs.append(f"{path}.{key}: must be a non-empty list")
         return
     for i, item in enumerate(val):
+        # Either budget, once spent, has already said so once; a list of a
+        # million conditions must not cost a million walks and errors (#860).
+        if budget.conditions > MAX_CONDITIONS or budget.expr_over:
+            break
         p = f"{path}.{key}[{i}]"
         if is_group_node(item):
             _check_group(item, p, errs, budget, vocabulary, depth + 1,
