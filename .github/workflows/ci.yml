@@ -52,9 +52,11 @@ jobs:
           import nakagai.screen.compiler
           import nakagai.strategies.rules
           from nakagai.engine import (
+              DEFAULT_TIMEFRAMES,
               PortfolioBars,
               ReplaySchedule,
               StrategyRegistry,
+              build_context,
               run_portfolio,
           )
 
@@ -90,7 +92,8 @@ jobs:
                     "wheel must not be published.")
 
           print("ok:", run_portfolio.__name__, PortfolioBars.__name__,
-                StrategyRegistry.__name__, ReplaySchedule.__name__)
+                StrategyRegistry.__name__, ReplaySchedule.__name__,
+                build_context.__name__, DEFAULT_TIMEFRAMES.driving)
           PY
 
   publish:

@@ -86,10 +86,12 @@ from nakagai.engine.portfolio_types import (
 # The replay half: every module below reaches `nakagai.strategies`, so it can
 # only be imported once this package has finished initializing.
 _DEFERRED = {
+    "DEFAULT_TIMEFRAMES": "nakagai.engine.context",
     "FrozenStrategyRegistry": "nakagai.engine.registry",
     "StrategyDefinition": "nakagai.engine.registry",
     "StrategyDependencies": "nakagai.engine.registry",
     "StrategyRegistry": "nakagai.engine.registry",
+    "build_context": "nakagai.engine.context",
     "composite_definition": "nakagai.engine.registry",
     "rules_definition": "nakagai.engine.registry",
     "run_portfolio": "nakagai.engine.replay",
@@ -101,6 +103,7 @@ __all__ = [
     "AccountPolicy",
     "BenchmarkResult",
     "BenchmarkSpec",
+    "DEFAULT_TIMEFRAMES",
     "EntryIntent",
     "EquityPoint",
     "ExchangeScheduleIdentity",
@@ -135,6 +138,7 @@ __all__ = [
     "StrategyRegistry",
     "StrategyRuntimeError",
     "TradeStats",
+    "build_context",
     "canonical_replay_bytes",
     "composite_definition",
     "decode_replay_request",
