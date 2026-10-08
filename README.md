@@ -301,12 +301,16 @@ def factory():
     return _vocabulary
 
 
-# `spec` is the RuleSpec dict; `one_hour` is a bars frame indexed by UTC `ts`.
+# `spec` is the RuleSpec dict; `fifteen` and `one_hour` are bars frames
+# indexed by UTC `ts`. The cache must hold the driving timeframe (15m by
+# default); a missing frame loads empty and yields no signals. 4h is derived
+# from 1h, and 1d is optional unless the spec reads it.
 definition = rules_definition(
     "my-play", spec_base_digest(spec, factory),
     spec=spec, vocabulary_factory=factory,
 )
 bars = MemoryBars({
+    ("AAPL", "15m"): fifteen,
     ("AAPL", "1h"): one_hour,
     ("AAPL", "4h"): resample_bars(one_hour, "4h"),
 })
