@@ -170,6 +170,8 @@ APPROVED_EXPORTS = {
     "FrozenStrategyRegistry", "StrategyDefinition", "StrategyDependencies",
     "StrategyRegistry", "composite_definition", "rules_definition",
     "spec_base_digest",
+    # the point-in-time context a caller builds to replay one bar
+    "DEFAULT_TIMEFRAMES", "build_context",
     # the strategy boundary
     "EntryIntent", "ManagementDecision", "PositionView", "Signal",
     # results
@@ -286,3 +288,13 @@ def test_no_tracked_file_describes_a_run_as_its_own_account():
         for phrase in phrases if phrase in searchable_text(path).lower()
     ]
     assert offenders == []
+
+
+def test_build_context_is_public():
+    """A caller replaying one bar builds its point-in-time context from here."""
+    assert "build_context" in engine.__all__
+    assert "DEFAULT_TIMEFRAMES" in engine.__all__
+    from nakagai.engine import DEFAULT_TIMEFRAMES, build_context
+    from nakagai.engine.context import build_context as inner
+    assert build_context is inner
+    assert DEFAULT_TIMEFRAMES.driving == "15m"

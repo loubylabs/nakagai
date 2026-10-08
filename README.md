@@ -273,6 +273,56 @@ until the next occurrence opens. A row with `confidence="low_iex"` keeps the
 same arithmetic and adds the sparse US-equity extended-hours IEX disclosure to
 spec readback, prompts, and generated Pine source.
 
+### Replaying a play's signals
+
+A play's RuleSpec is replayable from the installed package. Hold the bars in
+`MemoryBars`, build the point-in-time context at a bar close with
+`build_context`, and ask the definition for its signals.
+
+```python
+from datetime import time
+
+from nakagai.data.cache import MemoryBars
+from nakagai.data.resample import resample_bars
+from nakagai.engine import build_context, rules_definition, spec_base_digest
+from nakagai.strategies.rules import WindowSpec, core_vocabulary
+
+_vocabulary = None
+
+
+def factory():
+    """One cached vocabulary, so every call sees the same rows."""
+    global _vocabulary
+    if _vocabulary is None:
+        _vocabulary = core_vocabulary().with_windows(WindowSpec(
+            name="london", tz="Europe/London", start=time(8), end=time(16, 30),
+            recurrence="weekday", confidence="low_iex",
+        ))
+    return _vocabulary
+
+
+# `spec` is the RuleSpec dict; `fifteen` and `one_hour` are bars frames
+# indexed by UTC `ts`. The cache must hold the driving timeframe (15m by
+# default); a missing frame loads empty and yields no signals. 4h is derived
+# from 1h, and 1d is optional unless the spec reads it.
+definition = rules_definition(
+    "my-play", spec_base_digest(spec, factory),
+    spec=spec, vocabulary_factory=factory,
+)
+bars = MemoryBars({
+    ("AAPL", "15m"): fifteen,
+    ("AAPL", "1h"): one_hour,
+    ("AAPL", "4h"): resample_bars(one_hour, "4h"),
+})
+ctx = build_context(bars, "AAPL", close, reference_pairs=(), vocabulary=factory())
+signals = definition.factory({}).on_bar(ctx)
+```
+
+`build_context(cache, symbol, now, tfs=DEFAULT_TIMEFRAMES, *, reference_pairs,
+vocabulary=None, facts=None)` and `DEFAULT_TIMEFRAMES` are exported from
+`nakagai.engine`. Only bars that closed at or before `now` are visible in the
+context, so the same call at the same instant gives the same signals.
+
 ## What is NOT here
 
 This repo does not include the curated Playbook content (the hand-authored
@@ -281,6 +331,19 @@ the hosted platform: API, web UI, and the mandate and approvals judgment layer.
 The hosted product at nakag.ai is built on top of this core.
 
 ## Release notes
+
+### 0.11.0 (2026-10-08)
+
+- `nakagai.engine` exports `build_context` and `DEFAULT_TIMEFRAMES`, so an
+  installed package can replay a play's signals (see "Replaying a play's
+  signals").
+- New indicators: `wma`, `hma`, `vwma`, `dmi`, `awesome`, `momentum`,
+  `stoch_rsi`, `bull_bear_power`, `ultimate` (#61).
+- Condition specs are bounded: every node counts toward a cap, and condition
+  keys are closed (#62).
+- Screens gain discovery facts and three SEC dilution counts, and shelf filings
+  are labeled as share registrations (#55, #63, #64).
+- The compilers route to different providers and models (#57, #58).
 
 ### 0.8.2 (2026-08-26)
 
