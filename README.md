@@ -304,7 +304,7 @@ def factory():
 # `spec` is the RuleSpec dict; `fifteen` and `one_hour` are bars frames
 # indexed by UTC `ts`. The cache must hold the driving timeframe (15m by
 # default); a missing frame loads empty and yields no signals. 4h is derived
-# from 1h, and 1d is optional unless the spec reads it.
+# from 1h and 1w from 1d; 1d and 1w are optional unless the spec reads them.
 definition = rules_definition(
     "my-play", spec_base_digest(spec, factory),
     spec=spec, vocabulary_factory=factory,
@@ -331,6 +331,27 @@ the hosted platform: API, web UI, and the mandate and approvals judgment layer.
 The hosted product at nakag.ai is built on top of this core.
 
 ## Release notes
+
+### 0.12.0 (2026-10-13)
+
+- A weekly timeframe, `1w`, derived from cached `1d` bars
+  (`DERIVED["1w"] == "1d"`). A weekly bar is the Monday-to-Friday New York
+  week, labeled with its first session's date at New York midnight, the key
+  `BarCache` gives a daily bar. A week is published once the source holds its
+  Friday bar, a bar from a later week, or the caller's clock is in a later
+  week: `resample_bars` and `derive_incremental` take a keyword-only `now`.
+  `BarCache.upsert` keeps one row per week, so a week relabeled by a late
+  first session replaces its old row.
+- `1w` is session-aligned. A weekly bar is visible once New York reaches the
+  next week (`schema.session_cutoff`), and `ctx.fresh["1w"]` opens on the
+  first bar of the next week's first session (`strategies.util.first_bar_of_week`).
+  `DEFAULT_TIMEFRAMES.all` and `rules.spec.TIMEFRAMES` gain `1w`, so a caller
+  iterating `ctx.fresh` sees one more key.
+- Live only. `build_context` and `StrategyDependencies` accept `1w`
+  (`engine.bars.LIVE_TIMEFRAMES`); the portfolio replay does not, and a replay
+  closure naming it is refused with `invalid_value`. Pine export refuses a
+  weekly frame with `pine_unsupported`.
+- The screener syncs seven days of daily bars per weekly bar.
 
 ### 0.11.0 (2026-10-08)
 
