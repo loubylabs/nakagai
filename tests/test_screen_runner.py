@@ -293,8 +293,19 @@ def test_run_screen_widens_the_1d_sync_window_for_a_long_lookback(cache):
     assert starts and (NOW - starts[0]) >= pd.Timedelta(days=399)
 
 
-def test_run_screen_syncs_seven_days_of_daily_bars_per_weekly_bar(cache):
+def test_run_screen_syncs_seven_days_of_daily_bars_per_weekly_bar(
+        cache, monkeypatch):
+    import nakagai.screen.runner as runner_mod
+
     calls = []
+    derive_kwargs = []
+    real_derive = runner_mod.derive_incremental
+
+    def recording_derive(cache_, symbol, timeframe, **kwargs):
+        derive_kwargs.append(kwargs)
+        return real_derive(cache_, symbol, timeframe, **kwargs)
+
+    monkeypatch.setattr(runner_mod, "derive_incremental", recording_derive)
 
     class _RecordingProvider:
         def fetch_bars(self, symbol, timeframe, start, end):
@@ -307,6 +318,7 @@ def test_run_screen_syncs_seven_days_of_daily_bars_per_weekly_bar(cache):
                providers={"1d": _RecordingProvider()})
     assert calls and calls[0][0] == "1d"
     assert NOW - calls[0][1] >= pd.Timedelta(days=30 * 7 * 2 - 1)
+    assert derive_kwargs and all(k["now"] == NOW for k in derive_kwargs)
 
 
 def test_run_screen_evaluates_cached_bars_when_sync_fails(cache):
