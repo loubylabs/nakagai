@@ -34,9 +34,10 @@ import pandas as pd
 
 from nakagai.data.schema import DEFAULT_TIMEFRAMES, TimeframeSet
 from nakagai.engine.bars import (
-    BAR_TIMEFRAMES,
     BASE_TIMEFRAME,
+    LIVE_TIMEFRAMES,
     ReplayDependencies,
+    _normalize_reference_pairs,
     _require_timeframe,
 )
 from nakagai.engine.canonical import _digest, definition_digest
@@ -49,7 +50,6 @@ from nakagai.engine.portfolio_types import (
     _require_items,
     _require_name,
     _require_params,
-    _require_symbol,
     _set,
 )
 from nakagai.strategies.base import Strategy, strategy_operation
@@ -96,14 +96,16 @@ class StrategyDependencies:
     declare it whatever a spec names, because `on_bar` decides on the driving
     frame however the conditions were evaluated.
 
-    Timeframes deduplicate into the fixed order `15m`, `1h`, `4h`, `1d`.
+    Timeframes deduplicate into the fixed order `15m`, `1h`, `4h`, `1d`, `1w`.
     Reference pairs uppercase symbols, validate both members, deduplicate, and
     sort lexically, so two declarations of one data closure are one value. A
     blank or unsupported entry is refused before a manifest could publish it.
 
-    Normalization runs through the same `_require_timeframe`, `_require_symbol`
-    and `BAR_TIMEFRAMES` the bar boundary uses. Two independent spellings of
-    one rule drift; one spelling cannot.
+    Normalization runs through the same `_require_timeframe`,
+    `_normalize_reference_pairs` and `_require_symbol` the bar boundary uses,
+    over LIVE_TIMEFRAMES rather than the replay's BAR_TIMEFRAMES: a definition
+    may read `1w` live, and `dependencies_for` hands the union to
+    ReplayDependencies, which refuses it there.
     """
 
     timeframes: tuple[str, ...]
@@ -115,7 +117,8 @@ class StrategyDependencies:
             raise _fail("invalid_type", "value must be a tuple", field="timeframes")
         if not isinstance(self.reference_pairs, tuple):
             raise _fail("invalid_type", "value must be a tuple", field="reference_pairs")
-        declared = {_require_timeframe(value, "timeframes") for value in self.timeframes}
+        declared = {_require_timeframe(value, "timeframes", LIVE_TIMEFRAMES)
+                    for value in self.timeframes}
         if not declared:
             # A definition that declares no frame at all reads nothing, so
             # nothing would be hydrated for it and it could only ever emit
@@ -125,21 +128,10 @@ class StrategyDependencies:
                 "invalid_value", "a definition declares at least one timeframe",
                 field="timeframes",
             )
-        pairs: set[ReferencePair] = set()
-        for pair in self.reference_pairs:
-            if not isinstance(pair, tuple) or len(pair) != 2:
-                raise _fail(
-                    "invalid_type", "each value must be a (symbol, timeframe) tuple",
-                    field="reference_pairs",
-                )
-            symbol, timeframe = pair
-            pairs.add((
-                _require_symbol(symbol, "reference_pairs"),
-                _require_timeframe(timeframe, "reference_pairs"),
-            ))
         _set(self, "timeframes",
-             tuple(value for value in BAR_TIMEFRAMES if value in declared))
-        _set(self, "reference_pairs", tuple(sorted(pairs)))
+             tuple(value for value in LIVE_TIMEFRAMES if value in declared))
+        _set(self, "reference_pairs",
+             _normalize_reference_pairs(self.reference_pairs, LIVE_TIMEFRAMES))
         _set(self, "vocabulary_digest",
              _require_digest(self.vocabulary_digest, "vocabulary_digest"))
 

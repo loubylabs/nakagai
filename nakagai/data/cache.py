@@ -8,7 +8,9 @@ import pandas as pd
 # empty_bars is re-exported here because this module has always been its import
 # site; it now lives in schema.py, beside BAR_COLUMNS, so the providers can share
 # the one implementation instead of each hardcoding the column list.
-from nakagai.data.schema import EXCHANGE_TZ, empty_bars, validate_bars
+from nakagai.data.schema import (
+    EXCHANGE_TZ, WEEK_ALIGNED, empty_bars, validate_bars,
+)
 from nakagai.filelock import file_lock
 
 __all__ = ["BarCache", "MemoryBars", "empty_bars"]
@@ -23,6 +25,20 @@ def _canonical_cache_frame(timeframe: str, df: pd.DataFrame) -> pd.DataFrame:
     canonical.index = session_dates.tz_localize(EXCHANGE_TZ).tz_convert("UTC")
     canonical.index.name = "ts"
     return canonical
+
+
+def _period_keys(timeframe: str, index: pd.DatetimeIndex) -> pd.Index:
+    """What makes two rows the same bar: the label, except for a week.
+
+    A weekly label is the week's first SESSION, which moves when a missing
+    Monday bar lands and a full derive relabels the week from Tuesday to
+    Monday. Keyed on the label, the cache would keep both rows; keyed on the
+    week, the newest copy wins, the same rule a re-derived bar already obeys.
+    """
+    if timeframe not in WEEK_ALIGNED:
+        return index
+    days = index.tz_convert("UTC").tz_localize(None).normalize()
+    return days - pd.to_timedelta(days.weekday, unit="D")
 
 
 class MemoryBars:
@@ -50,6 +66,8 @@ class BarCache:
 
     def upsert(self, symbol: str, timeframe: str, df: pd.DataFrame) -> int:
         """Merge `df` into the cached pair, newest copy of a duplicate ts winning.
+        For 1w the duplicate is the same WEEK, not the same label
+        (_period_keys), so a week relabeled Tuesday to Monday stays one row.
 
         Locked and atomic for the reason nakagai/filelock.py exists: this is a
         read-concat-write, and an unlocked one silently keeps only whichever
@@ -66,7 +84,9 @@ class BarCache:
         with file_lock(path):
             existing = _canonical_cache_frame(timeframe, self.load(symbol, timeframe))
             merged = pd.concat([existing, df])
-            merged = merged[~merged.index.duplicated(keep="last")].sort_index()
+            merged = merged[
+                ~_period_keys(timeframe, merged.index).duplicated(keep="last")
+            ].sort_index()
             tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
             try:
                 merged.to_parquet(tmp)

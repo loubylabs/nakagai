@@ -21,6 +21,7 @@ from nakagai.data.base import DataProvider
 from nakagai.data.alpaca import AlpacaBarBatchResult, frame_from_rows
 from nakagai.data.cache import BarCache
 from nakagai.data.resample import DERIVED, resample_bars
+from nakagai.data.schema import WEEK_ALIGNED
 
 
 def fetch_incremental(cache: BarCache, provider: DataProvider, symbol: str,
@@ -42,8 +43,19 @@ def fetch_incremental(cache: BarCache, provider: DataProvider, symbol: str,
     return cache.upsert(symbol, timeframe, provider.fetch_bars(symbol, timeframe, fetch_start, end))
 
 
+def _resume_from(timeframe: str, label: pd.Timestamp) -> pd.Timestamp:
+    """Where to restart a derive: the last derived label, or for a week the
+    Monday of its week, so a Monday bar that landed late rejoins its week."""
+    if timeframe not in WEEK_ALIGNED:
+        return label
+    day = label.tz_convert("UTC").tz_localize(None).normalize()
+    monday = day - pd.Timedelta(days=day.weekday())
+    return monday.tz_localize("UTC")
+
+
 def derive_incremental(cache: BarCache, symbol: str, timeframe: str = "4h",
-                       full: bool = False) -> int:
+                       full: bool = False, *,
+                       now: pd.Timestamp | None = None) -> int:
     """Materialize a derived timeframe into the cache from its source bars.
 
     The fetch functions above spend provider requests; this one spends nothing
@@ -54,7 +66,9 @@ def derive_incremental(cache: BarCache, symbol: str, timeframe: str = "4h",
     exactly one implementation behind both the live path and a replay.
 
     Only a bounded trailing window is re-derived, and the resume point is the
-    last derived bar's own LABEL. That label is a bucket boundary by
+    last derived bar's own LABEL (a week's label may be its Tuesday when the
+    Monday bar had not landed, so a week resumes from that week's Monday and is
+    re-derived whole). That label is a bucket boundary by
     construction, which is the property the window turns on: starting anywhere
     else would hand resample_bars a truncated first bucket and write a partial
     bar over a complete one. Re-deriving the boundary bucket itself is
@@ -69,6 +83,11 @@ def derive_incremental(cache: BarCache, symbol: str, timeframe: str = "4h",
     backfilled history would never be aggregated and the derived frame would
     keep a hole no later cycle could fill.
 
+    `now` is the caller's clock, handed to resample_bars as evidence that a
+    week is over (see its docstring). A live caller passes the bar close it is
+    working on; a caller with no clock passes nothing, and a week then waits
+    for its Friday bar or a later week's bar.
+
     Returns the number of rows upserted.
     """
     source_tf = DERIVED.get(timeframe)
@@ -81,8 +100,8 @@ def derive_incremental(cache: BarCache, symbol: str, timeframe: str = "4h",
     if not full:
         span = cache.coverage(symbol, timeframe)
         if span is not None and src.index[0] >= span[0]:
-            src = src.loc[src.index >= span[1]]
-    derived = resample_bars(src, timeframe)
+            src = src.loc[src.index >= _resume_from(timeframe, span[1])]
+    derived = resample_bars(src, timeframe, now=now)
     if derived.empty:
         return 0
     return cache.upsert(symbol, timeframe, derived)

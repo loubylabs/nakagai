@@ -6,9 +6,12 @@ from nakagai.data.schema import (
     DEFAULT_TIMEFRAMES,
     EXCHANGE_TZ,
     TIMEFRAMES,
+    WEEK_ALIGNED,
     TimeframeSet,
     _is_session_frame,
     rth_mask,
+    session_cutoff,
+    session_cutoffs,
     session_open,
     session_opens,
     validate_bars,
@@ -39,16 +42,21 @@ def test_validate_rejects_missing_columns(make_bars):
 
 
 def test_constants():
-    assert TIMEFRAMES == ("15m", "1h", "4h", "1d")
+    assert TIMEFRAMES == ("15m", "1h", "4h", "1d", "1w")
 
 
 def test_default_timeframes_match_legacy_axis():
-    assert DEFAULT_TIMEFRAMES.all == ("15m", "1h", "4h", "1d")
+    assert DEFAULT_TIMEFRAMES.all == ("15m", "1h", "4h", "1d", "1w")
     assert DEFAULT_TIMEFRAMES.step == pd.Timedelta(minutes=15)
     assert DEFAULT_TIMEFRAMES.deltas["1h"] == pd.Timedelta(hours=1)
     assert DEFAULT_TIMEFRAMES.deltas["4h"] == pd.Timedelta(hours=4)
-    assert DEFAULT_TIMEFRAMES.session_aligned == frozenset({"1d"})
+    assert DEFAULT_TIMEFRAMES.session_aligned == frozenset({"1d", "1w"})
     assert TIMEFRAMES == DEFAULT_TIMEFRAMES.all
+
+
+def test_the_week_is_session_aligned_and_carries_no_delta():
+    assert WEEK_ALIGNED <= DEFAULT_TIMEFRAMES.session_aligned
+    assert "1w" not in DEFAULT_TIMEFRAMES.deltas
 
 
 def test_four_hour_is_not_session_aligned():
@@ -213,3 +221,33 @@ def test_a_frame_is_read_as_daily_only_when_it_holds_one_bar_per_session():
         ["2026-01-05 14:30", "2026-01-06 15:30"], tz="UTC"))
     # Too short to carry evidence of its own cadence.
     assert not _is_session_frame(daily[:1])
+
+
+CUTOFFS = [
+    ("2026-06-05 20:00", "1d", "2026-06-05"),
+    ("2026-06-05 20:00", "1w", "2026-06-01"),   # Friday after the bell
+    ("2026-06-08 03:30", "1w", "2026-06-01"),   # Sunday 23:30 in New York
+    ("2026-06-08 04:00", "1w", "2026-06-08"),   # Monday 00:00 in New York
+    ("2026-03-09 13:30", "1w", "2026-03-09"),   # first Monday after spring-forward
+    ("2026-11-02 04:30", "1w", "2026-10-26"),   # Sunday 23:30 EST, after fall-back
+    ("2026-11-02 05:00", "1w", "2026-11-02"),   # Monday 00:00 EST
+]
+
+
+@pytest.mark.parametrize("now, timeframe, cutoff", CUTOFFS)
+def test_session_cutoff_is_the_new_york_day_or_week_now_falls_in(
+        now, timeframe, cutoff):
+    assert session_cutoff(pd.Timestamp(now, tz="UTC"), timeframe) == (
+        pd.Timestamp(cutoff, tz="UTC"))
+
+
+@pytest.mark.parametrize("timeframe", ["1d", "1w"])
+def test_session_cutoffs_is_session_cutoff_for_every_instant(timeframe):
+    instants = pd.DatetimeIndex(
+        [now for now, _, _ in CUTOFFS]).tz_localize("UTC")
+    assert list(session_cutoffs(instants, timeframe)) == [
+        session_cutoff(now, timeframe) for now in instants]
+
+
+def test_only_the_week_is_week_aligned():
+    assert WEEK_ALIGNED == frozenset({"1w"})

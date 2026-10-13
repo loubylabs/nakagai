@@ -293,6 +293,34 @@ def test_run_screen_widens_the_1d_sync_window_for_a_long_lookback(cache):
     assert starts and (NOW - starts[0]) >= pd.Timedelta(days=399)
 
 
+def test_run_screen_syncs_seven_days_of_daily_bars_per_weekly_bar(
+        cache, monkeypatch):
+    import nakagai.screen.runner as runner_mod
+
+    calls = []
+    derive_kwargs = []
+    real_derive = runner_mod.derive_incremental
+
+    def recording_derive(cache_, symbol, timeframe, **kwargs):
+        derive_kwargs.append(kwargs)
+        return real_derive(cache_, symbol, timeframe, **kwargs)
+
+    monkeypatch.setattr(runner_mod, "derive_incremental", recording_derive)
+
+    class _RecordingProvider:
+        def fetch_bars(self, symbol, timeframe, start, end):
+            calls.append((timeframe, start))
+            return _daily_bars([1.0])
+
+    weekly = {"version": 1, "tf": "1w", "conditions": {"all": [
+        {"lhs": {"src": "close"}, "op": ">", "rhs": {"ind": "sma", "n": 30}}]}}
+    run_screen(weekly, ["UP"], cache, now=NOW,
+               providers={"1d": _RecordingProvider()})
+    assert calls and calls[0][0] == "1d"
+    assert NOW - calls[0][1] >= pd.Timedelta(days=30 * 7 * 2 - 1)
+    assert derive_kwargs and all(k["now"] == NOW for k in derive_kwargs)
+
+
 def test_run_screen_evaluates_cached_bars_when_sync_fails(cache):
     class _FlakyProvider:
         def fetch_bars(self, symbol, timeframe, start, end):
@@ -382,11 +410,11 @@ def test_run_screen_isolates_a_derived_failure_by_symbol(tmp_path, monkeypatch):
     real_derive = runner_mod.derive_incremental
     calls = []
 
-    def selective_derive(cache_, symbol, timeframe):
+    def selective_derive(cache_, symbol, timeframe, **kwargs):
         calls.append(symbol)
         if symbol == "BAD":
             raise RuntimeError("derive failed")
-        return real_derive(cache_, symbol, timeframe)
+        return real_derive(cache_, symbol, timeframe, **kwargs)
 
     monkeypatch.setattr(runner_mod, "derive_incremental", selective_derive)
     result = run_screen(FOUR_HOUR_ABOVE_SMA20, ["BAD", "GOOD"], cache, now=NOW)

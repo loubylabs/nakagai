@@ -31,7 +31,7 @@ from types import MappingProxyType
 import numpy as np
 import pandas as pd
 
-from nakagai.data.schema import BAR_COLUMNS
+from nakagai.data.schema import BAR_COLUMNS, DEFAULT_TIMEFRAMES
 from nakagai.engine.portfolio_types import (
     CONTEXT_TIMEFRAMES,
     PortfolioReplayRequest,
@@ -45,6 +45,13 @@ from nakagai.engine.schedule import ValidatedSchedule
 
 BASE_TIMEFRAME = "15m"
 BAR_TIMEFRAMES = (BASE_TIMEFRAME, *CONTEXT_TIMEFRAMES)
+# Every timeframe the engine reads anywhere: the live door (build_context) and
+# a definition's declared dependencies. The replay reads BAR_TIMEFRAMES, a
+# strict subset. 1w is live-only: the replay schedule has no weekly label
+# contract (engine/schedule.py), so a replay closure naming it is refused at
+# ReplayDependencies with `invalid_value` rather than replayed under a guessed
+# rule. Weekly plays carry no backtest by design.
+LIVE_TIMEFRAMES: tuple[str, ...] = DEFAULT_TIMEFRAMES.all
 
 _MISSING_BAR = "missing_required_bar"
 
@@ -53,14 +60,36 @@ def _refuse(message: str, field: str, **details) -> ReplayInputError:
     return ReplayInputError(_MISSING_BAR, message, {"field": field, **details})
 
 
-def _require_timeframe(value: object, field: str) -> str:
+def _require_timeframe(value: object, field: str,
+                       allowed: tuple[str, ...] = BAR_TIMEFRAMES) -> str:
     text = _require_str(value, field).lower()
-    if text not in BAR_TIMEFRAMES:
+    if text not in allowed:
         raise _fail(
             "invalid_value", "value is not a supported timeframe",
-            field=field, allowed=BAR_TIMEFRAMES,
+            field=field, allowed=allowed,
         )
     return text
+
+
+def _normalize_reference_pairs(
+    pairs: tuple, allowed: tuple[str, ...],
+) -> tuple[tuple[str, str], ...]:
+    """Exact (symbol, timeframe) pairs: validated, uppercased, deduplicated,
+    sorted. One spelling for the replay closure, a definition's declared
+    dependencies and the live context, which differ only in `allowed`."""
+    normalized: set[tuple[str, str]] = set()
+    for pair in pairs:
+        if not isinstance(pair, tuple) or len(pair) != 2:
+            raise _fail(
+                "invalid_type", "each value must be a (symbol, timeframe) tuple",
+                field="reference_pairs",
+            )
+        symbol, timeframe = pair
+        normalized.add((
+            _require_symbol(symbol, "reference_pairs"),
+            _require_timeframe(timeframe, "reference_pairs", allowed),
+        ))
+    return tuple(sorted(normalized))
 
 
 def _bar_key(key: object) -> tuple[str, str]:
@@ -152,21 +181,11 @@ class ReplayDependencies:
                 "invalid_value", "every replay depends on the base timeframe",
                 field="timeframes", required=BASE_TIMEFRAME,
             )
-        pairs: set[tuple[str, str]] = set()
-        for pair in self.reference_pairs:
-            if not isinstance(pair, tuple) or len(pair) != 2:
-                raise _fail(
-                    "invalid_type", "each value must be a (symbol, timeframe) tuple",
-                    field="reference_pairs",
-                )
-            symbol, timeframe = pair
-            pairs.add((
-                _require_symbol(symbol, "reference_pairs"),
-                _require_timeframe(timeframe, "reference_pairs"),
-            ))
         object.__setattr__(self, "timeframes", tuple(
             value for value in BAR_TIMEFRAMES if value in declared))
-        object.__setattr__(self, "reference_pairs", tuple(sorted(pairs)))
+        object.__setattr__(self, "reference_pairs",
+                           _normalize_reference_pairs(self.reference_pairs,
+                                                      BAR_TIMEFRAMES))
 
 
 class _ValidatedPortfolioBars:

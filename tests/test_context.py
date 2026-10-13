@@ -14,7 +14,7 @@ import pytest
 
 from nakagai.data.cache import BarCache, MemoryBars
 from nakagai.data.schema import DEFAULT_TIMEFRAMES, TimeframeSet
-from nakagai.engine.context import build_context
+from nakagai.engine.context import build_context, closed_before, visible_counts
 from nakagai.engine.portfolio_types import ReplayInputError
 from nakagai.strategies.rules import RuleStrategy
 
@@ -94,10 +94,10 @@ def test_a_context_declares_which_higher_timeframes_may_be_decided_on(
     for stamp, ctx in contexts.items():
         assert len(ctx.bars["4h"]), f"{stamp} has no four-hour bar to judge"
     gates = {stamp: ctx.fresh for stamp, ctx in contexts.items()}
-    assert gates["2026-06-01 13:45"] == {"1h": False, "4h": False, "1d": True}
-    assert gates["2026-06-01 15:00"] == {"1h": True, "4h": False, "1d": False}
-    assert gates["2026-06-01 15:15"] == {"1h": False, "4h": False, "1d": False}
-    assert gates["2026-06-01 16:00"] == {"1h": True, "4h": True, "1d": False}
+    assert gates["2026-06-01 13:45"] == {"1h": False, "4h": False, "1d": True, "1w": True}
+    assert gates["2026-06-01 15:00"] == {"1h": True, "4h": False, "1d": False, "1w": False}
+    assert gates["2026-06-01 15:15"] == {"1h": False, "4h": False, "1d": False, "1w": False}
+    assert gates["2026-06-01 16:00"] == {"1h": True, "4h": True, "1d": False, "1w": False}
 
 
 def test_an_hourly_play_decides_only_where_the_context_says_it_may(
@@ -292,3 +292,79 @@ def test_point_in_time_context_drops_valid_external_rows_before_driving_labels()
     aligned = context.fe.on("QQQ", "15m")
     pd.testing.assert_index_equal(aligned.index, driving_index)
     assert aligned["close"].tolist() == [200.0, 201.0, 202.0, 203.0]
+
+
+# ------------------------------------------------------------ the week
+
+def _weekly_frame(*first_sessions):
+    idx = (pd.DatetimeIndex(list(first_sessions)).tz_localize("America/New_York")
+           .tz_convert("UTC").rename("ts"))
+    close = 100.0 + np.arange(len(idx), dtype="float64")
+    return pd.DataFrame({"open": close - 0.5, "high": close + 1.0,
+                         "low": close - 1.0, "close": close, "volume": 1000.0},
+                        index=idx)
+
+
+# 2026-05-26 is the Tuesday after Memorial Day: that week's first session.
+WEEKS = _weekly_frame("2026-05-18", "2026-05-26", "2026-06-01", "2026-06-08")
+
+
+@pytest.mark.parametrize("now, last", [
+    ("2026-06-05 20:00", "2026-05-26"),   # Friday after the bell: week still open
+    ("2026-06-08 03:30", "2026-05-26"),   # Sunday 23:30 in New York
+    ("2026-06-08 04:00", "2026-06-01"),   # Monday 00:00 in New York
+    ("2026-06-08 13:45", "2026-06-01"),
+    ("2026-06-15 13:45", "2026-06-08"),
+])
+def test_a_weekly_bar_is_visible_once_new_york_reaches_the_next_week(now, last):
+    cut = closed_before(WEEKS, "1w", pd.Timestamp(now, tz="UTC"))
+    assert cut.index[-1] == pd.Timestamp(last, tz="America/New_York")
+
+
+def test_a_weekly_bar_is_visible_on_the_monday_after_spring_forward():
+    weeks = _weekly_frame("2026-03-02", "2026-03-09")
+    cut = closed_before(weeks, "1w", pd.Timestamp("2026-03-09 13:30", tz="UTC"))
+    assert list(cut.index) == [pd.Timestamp("2026-03-02", tz="America/New_York")]
+
+
+def test_visible_counts_agrees_with_closed_before_for_weekly_bars():
+    closes = pd.date_range("2026-05-29 13:45", "2026-06-16 20:00",
+                           freq="5h", tz="UTC")
+    counts = visible_counts(WEEKS.index, closes, "1w")
+    assert list(counts) == [len(closed_before(WEEKS, "1w", t)) for t in closes]
+
+
+def _sessions(*days):
+    ranges = [pd.date_range(f"{day} 13:30", f"{day} 19:45", freq="15min", tz="UTC")
+              for day in days]
+    idx = ranges[0].append(ranges[1:]).rename("ts")
+    close = pd.Series(100.0, index=idx)
+    return pd.DataFrame({"open": close, "high": close + 1.0, "low": close - 1.0,
+                         "close": close, "volume": 1000.0}, index=idx)
+
+
+def test_the_weekly_gate_opens_once_on_the_first_session_of_a_week(tmp_path):
+    cache = BarCache(tmp_path)
+    driving = _sessions("2026-06-04", "2026-06-05", "2026-06-08", "2026-06-09")
+    cache.upsert("SPY", "15m", driving)
+    cache.upsert("SPY", "1w", WEEKS)
+    closes = driving.index + pd.Timedelta(minutes=15)
+    contexts = {now: build_context(cache, "SPY", now, reference_pairs=())
+                for now in closes}
+    fired = [now for now, ctx in contexts.items() if ctx.fresh["1w"]]
+    # The first bar of a history fires, as first_bar_of_session does; after
+    # that, only the Monday open.
+    assert fired == [closes[0], pd.Timestamp("2026-06-08 13:45", tz="UTC")]
+    friday = contexts[pd.Timestamp("2026-06-05 20:00", tz="UTC")]
+    monday = contexts[pd.Timestamp("2026-06-08 13:45", tz="UTC")]
+    assert friday.bars["1w"].index[-1] == WEEKS.index[1]
+    assert monday.bars["1w"].index[-1] == WEEKS.index[2]
+
+
+def test_a_live_context_accepts_a_weekly_reference_pair(tmp_path, make_bars):
+    cache = BarCache(tmp_path)
+    cache.upsert("SPY", "15m", make_bars(4, "15m", start="2026-06-08 13:30"))
+    cache.upsert("QQQ", "1w", WEEKS)
+    ctx = build_context(cache, "SPY", pd.Timestamp("2026-06-08 14:30", tz="UTC"),
+                        reference_pairs=(("qqq", "1w"),))
+    assert "1w" in ctx.fresh

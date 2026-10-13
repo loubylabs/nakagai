@@ -2,7 +2,7 @@
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, timedelta
 from functools import lru_cache
 
 import pandas as pd
@@ -28,6 +28,47 @@ SESSION_OPEN = (9, 30)
 # A bar labeled 16:00 is the first post-market print rather than the closing
 # one, for the same reason the 08:00 print is not the open.
 SESSION_CLOSE = (16, 0)
+
+# Session-aligned timeframes whose bar is the exchange WEEK rather than one
+# session. Same label convention as 1d, a session date at New York midnight,
+# but a different period: a weekly bar is labeled with its week's FIRST
+# session and closes when New York reaches the next week (Monday to Sunday).
+# Everything that asks "which period is this instant in" for a session-aligned
+# frame reads this set rather than spelling "1w".
+WEEK_ALIGNED: frozenset[str] = frozenset({"1w"})
+
+
+def session_cutoff(now: pd.Timestamp, timeframe: str) -> pd.Timestamp:
+    """The first session-aligned label of `timeframe` NOT yet closed at `now`.
+
+    A daily bar is closed once its session date is behind New York's date; a
+    weekly bar once its week is behind New York's week. Returned as UTC
+    midnight of that New York date, because a session label's UTC calendar
+    date IS its session date under both conventions the cache meets (00:00Z
+    legacy, New York midnight canonical), so `label < cutoff` is the whole
+    visibility rule (engine/context.closed_before).
+    """
+    day = now.tz_convert(EXCHANGE_TZ).date()
+    if timeframe in WEEK_ALIGNED:
+        day -= timedelta(days=day.weekday())
+    return pd.Timestamp(day, tz="UTC")
+
+
+def session_cutoffs(instants: pd.DatetimeIndex,
+                    timeframe: str) -> pd.DatetimeIndex:
+    """`session_cutoff` for every instant, in one vectorized pass.
+
+    engine/context.visible_counts runs this once per (timeframe, replay) over
+    every destination close, so a per-row Timestamp construction here is
+    millions of constructions on a sweep. Convert to New York wall time,
+    floor to that day's midnight (still New York aware, so correct across DST),
+    step back to Monday for a week, drop the zone and relabel the naive
+    midnight as UTC. Do not re-simplify this into a per-row comprehension.
+    """
+    days = instants.tz_convert(EXCHANGE_TZ).normalize().tz_localize(None)
+    if timeframe in WEEK_ALIGNED:
+        days = days - pd.to_timedelta(days.weekday, unit="D")
+    return days.tz_localize("UTC")
 
 
 def empty_bars() -> pd.DataFrame:
@@ -208,13 +249,19 @@ class TimeframeSet:
 # session-aligned. An ET-anchored bucket labeled 12:00 closes at 16:00, four
 # hours later, so plain label + delta is the exact visibility rule and
 # engine/context.closed_before needs no special case for it. Only the daily
-# bar, whose label carries a date rather than a close time, does.
+# and weekly bars, whose labels carry a date rather than a close time, do.
+#
+# 1w is DERIVED from the cached 1d bars and session-aligned like 1d: its label
+# is the week's first session date at New York midnight, so it has no delta,
+# and closed_before decides it by which New York WEEK an instant falls in
+# (session_cutoff). It is a LIVE timeframe only: the replay schedule carries
+# no weekly label contract (engine/bars.LIVE_TIMEFRAMES).
 DEFAULT_TIMEFRAMES = TimeframeSet(
     driving="15m",
-    higher=("1h", "4h", "1d"),
+    higher=("1h", "4h", "1d", "1w"),
     deltas={"15m": pd.Timedelta(minutes=15), "1h": pd.Timedelta(hours=1),
             "4h": pd.Timedelta(hours=4)},
-    session_aligned=frozenset({"1d"}),
+    session_aligned=frozenset({"1d", "1w"}),
 )
 TIMEFRAMES = DEFAULT_TIMEFRAMES.all
 

@@ -81,9 +81,13 @@ def run_screen(spec: dict, symbols: list[str], cache, now=None,
                 if provider is None:
                     continue
                 # A run-time sync only has sync_days of headroom by default,
-                # which a long lookback (e.g. sma200 on 1d) can't fit in.
-                # Intraday timeframes have no such lookback pressure here.
-                fetch_days = max(sync_days, lookback * 2) if sync_tf == "1d" else sync_days
+                # which a long lookback (e.g. sma200 on 1d) can't fit in. A
+                # weekly bar is a week of its daily source, so it needs seven
+                # calendar days of 1d per bar. Intraday timeframes have no such
+                # lookback pressure here.
+                days_per_bar = {"1d": 1, "1w": 7}.get(timeframe)
+                fetch_days = (max(sync_days, lookback * 2 * days_per_bar)
+                              if days_per_bar else sync_days)
                 try:
                     fetch_incremental(cache, provider, pair_symbol, sync_tf,
                                       now - pd.Timedelta(days=fetch_days), now)
@@ -98,7 +102,7 @@ def run_screen(spec: dict, symbols: list[str], cache, now=None,
             pair for pair in pairs if pair[1] in DERIVED
         ):
             try:
-                derive_incremental(cache, pair_symbol, derived_tf)
+                derive_incremental(cache, pair_symbol, derived_tf, now=now)
             except Exception as e:
                 note = f"sync failed: {e}"
                 errors.append(f"{pair_symbol}: {note}")

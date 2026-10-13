@@ -22,16 +22,24 @@ import numpy as np
 import pandas as pd
 
 from nakagai.data.cache import BarCache
-from nakagai.data.schema import DEFAULT_TIMEFRAMES, EXCHANGE_TZ, TimeframeSet
+from nakagai.data.schema import (
+    DEFAULT_TIMEFRAMES,
+    TimeframeSet,
+    session_cutoff,
+    session_cutoffs,
+)
 from nakagai.engine.bars import (
     BASE_TIMEFRAME,
+    LIVE_TIMEFRAMES,
     ReplayDependencies,
     _ValidatedPortfolioBars,
+    _normalize_reference_pairs,
     _normalized_frame,
     _require_prepared_closure,
 )
 from nakagai.engine.portfolio_types import (
     ReplayInputError,
+    _fail,
     _require_instance,
     _require_symbol,
     _require_timestamp,
@@ -51,18 +59,17 @@ def closed_before(df: pd.DataFrame, timeframe: str, now: pd.Timestamp,
         return df
     if timeframe in tfs.session_aligned:
         # Session bars carry a label whose UTC CALENDAR DATE is the session
-        # date. That is what this depends on, and both producers satisfy it:
-        # Legacy providers may label daily rows at 00:00Z. BarCache.upsert
-        # canonicalizes cached daily rows to midnight America/New_York, expressed
-        # as 04:00Z or 05:00Z. All of those labels carry the same UTC calendar
-        # date as the session because Eastern never runs ahead of UTC. Under that
-        # convention the bar's own UTC calendar date IS the session date, so a
-        # bar is visible
-        # only strictly before its session date arrives in NY: ts.date() < NY
-        # date, which for these labels is exactly ts < that date's UTC
-        # midnight. Comparing NY-converted timestamps instead would shift a
-        # midnight-UTC bar back a day and leak a bar into its own session.
-        cutoff = pd.Timestamp(now.tz_convert(EXCHANGE_TZ).date(), tz="UTC")
+        # date (a daily bar) or the week's first session date (a weekly bar).
+        # Both producers satisfy it: legacy providers may label daily rows at
+        # 00:00Z, and BarCache.upsert canonicalizes cached daily rows (and
+        # resample writes weekly rows) at New York midnight, 04:00Z or 05:00Z.
+        # Eastern never runs ahead of UTC, so the label's own UTC date is the
+        # session date. A bar is visible only once its period is behind New
+        # York's: strictly before today's date for a day, strictly before this
+        # week's Monday for a week. Comparing New York-converted timestamps
+        # instead would shift a midnight-UTC bar back a day and leak a bar into
+        # its own session.
+        cutoff = session_cutoff(now, timeframe)
         return df.iloc[:df.index.searchsorted(cutoff, side="left")]
     delta = tfs.deltas[timeframe]
     return df.iloc[:df.index.searchsorted(now - delta, side="right")]
@@ -83,17 +90,8 @@ def visible_counts(src_index: pd.DatetimeIndex, dst_close_times: pd.DatetimeInde
     if not len(src_index):
         return np.zeros(len(dst_close_times), dtype=np.int64)
     if timeframe in tfs.session_aligned:
-        # A sweep replays this map thousands of times (specs x symbols x
-        # windows), so a Python-level loop building one pd.Timestamp per
-        # destination row here is not a stylistic nicety, it is millions of
-        # constructions per pair. tz_convert + normalize + relocalize computes
-        # the same "NY calendar date, as midnight UTC" cutoff for every row in
-        # one vectorized pass: convert to NY wall time, floor to that day's
-        # midnight (still NY-tz-aware, so it is correct across DST changes),
-        # drop the tz, then relabel the naive midnight as UTC. Do not
-        # re-simplify this back into a per-row comprehension.
-        cutoffs = (dst_close_times.tz_convert(EXCHANGE_TZ).normalize()
-                   .tz_localize(None).tz_localize("UTC"))
+        # data/schema.session_cutoffs carries why this is vectorized.
+        cutoffs = session_cutoffs(dst_close_times, timeframe)
         return src_index.searchsorted(cutoffs, side="left").astype(np.int64)
     delta = tfs.deltas[timeframe]
     return src_index.searchsorted(dst_close_times - delta, side="right").astype(np.int64)
@@ -114,9 +112,11 @@ def build_context(cache: BarCache, symbol: str, now: pd.Timestamp,
     invariant to defend.
     """
     from nakagai.strategies.rules.frame_eval import FrameEval
-    references = ReplayDependencies(
-        timeframes=tuple(tfs.all), reference_pairs=reference_pairs,
-    ).reference_pairs
+    # Validated against every LIVE timeframe, not the replay's subset: this
+    # door serves the scanner and the screener, which read 1w.
+    if not isinstance(reference_pairs, tuple):
+        raise _fail("invalid_type", "value must be a tuple", field="reference_pairs")
+    references = _normalize_reference_pairs(reference_pairs, LIVE_TIMEFRAMES)
     driving_frames = {
         (symbol, tf): cache.load(symbol, tf) for tf in tfs.all
     }

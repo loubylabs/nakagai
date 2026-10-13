@@ -11,6 +11,7 @@ import dataclasses
 
 import pytest
 
+from nakagai.engine.bars import ReplayDependencies
 from nakagai.engine.portfolio_types import ReplayInputError
 from nakagai.engine.registry import (
     REGISTRY_CONTRACT_VERSION,
@@ -499,3 +500,36 @@ def test_a_definition_refuses_a_member_that_is_not_a_definition():
             ic_factor=None, members=("sma_cross",),
         )
     assert caught.value.code == "invalid_type"
+
+
+WEEKLY_SPEC = {
+    "version": 2, "name": "weekly", "timeframe": "1w",
+    "long": {"all": [{"lhs": {"src": "close"}, "op": ">", "rhs": 0}]},
+    "risk": {"stop": {"kind": "percent", "pct": 2.0},
+             "target": {"kind": "rr", "rr": 2.0}},
+}
+
+
+def test_declared_timeframes_order_the_week_last():
+    declared = StrategyDependencies(
+        timeframes=("1w", "1d", "15m"), reference_pairs=(("qqq", "1w"),),
+        vocabulary_digest=CORE_DIGEST)
+    assert declared.timeframes == ("15m", "1d", "1w")
+    assert declared.reference_pairs == (("QQQ", "1w"),)
+
+
+def test_a_weekly_definition_declares_its_frame_for_the_live_door():
+    declared = rules_definition("weekly", "8a" * 32, spec=WEEKLY_SPEC).dependencies({})
+    assert declared.timeframes == ("15m", "1w")
+
+
+def test_the_replay_refuses_a_weekly_closure():
+    """1w is live-only: the replay schedule has no weekly label contract, so a
+    replay that would need one is refused at its closure, before any bar or
+    schedule is read."""
+    with pytest.raises(ReplayInputError) as caught:
+        ReplayDependencies(timeframes=("15m", "1w"), reference_pairs=())
+    assert caught.value.code == "invalid_value"
+    with pytest.raises(ReplayInputError) as caught:
+        ReplayDependencies(timeframes=("15m",), reference_pairs=(("QQQ", "1w"),))
+    assert caught.value.code == "invalid_value"
