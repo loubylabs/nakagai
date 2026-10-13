@@ -1,9 +1,13 @@
 import pandas as pd
 
+from nakagai.data.schema import TimeframeSet
 from nakagai.strategies.base import (
     Direction, MarketContext, validate_signal_sequence,
 )
-from nakagai.strategies.util import first_bar_of_session, fresh_bar, rr_signal
+from nakagai.strategies.util import (
+    first_bar_of_session, first_bar_of_week, fresh_bar, label_freshness,
+    rr_signal,
+)
 
 
 def _ctx(now, bars_15m=None, bars_1h=None):
@@ -98,3 +102,57 @@ def test_rr_signal_refuses_a_target_that_walks_through_zero():
     survivor = rr_signal(ctx, Direction.SHORT, stop=105.0, rr=15.0, tags=("t",),
                          rationale="x")
     assert survivor is not None and survivor.target == 25.0
+
+
+# 2026-06-05 is a Friday, 2026-06-08 a Monday; 13:30 UTC is 09:30 New York in
+# June, 19:45 UTC is 15:45.
+FRI_CLOSE = pd.Timestamp("2026-06-05 19:45", tz="UTC")
+MON_OPEN = pd.Timestamp("2026-06-08 13:30", tz="UTC")
+
+
+def test_first_bar_of_week_fires_on_the_monday_open():
+    b = _bars([FRI_CLOSE, MON_OPEN])
+    assert first_bar_of_week(_ctx(b.index[-1], bars_15m=b))
+
+
+def test_first_bar_of_week_fires_once_a_week():
+    b = _bars([FRI_CLOSE, MON_OPEN, MON_OPEN + pd.Timedelta(minutes=15),
+               pd.Timestamp("2026-06-09 13:30", tz="UTC")])
+    fired = [first_bar_of_week(_ctx(b.index[i], bars_15m=b.iloc[:i + 1]))
+             for i in range(len(b))]
+    assert fired[1:] == [True, False, False]
+
+
+def test_first_bar_of_week_ignores_monday_premarket_bars():
+    b = _bars([FRI_CLOSE, pd.Timestamp("2026-06-08 12:00", tz="UTC"), MON_OPEN])
+    assert not first_bar_of_week(_ctx(b.index[-2], bars_15m=b.iloc[:-1]))
+    assert first_bar_of_week(_ctx(b.index[-1], bars_15m=b))
+
+
+def test_first_bar_of_week_moves_to_tuesday_after_a_holiday_monday():
+    # Labor Day, 2026-09-07.
+    b = _bars([pd.Timestamp("2026-09-04 19:45", tz="UTC"),
+               pd.Timestamp("2026-09-08 13:30", tz="UTC"),
+               pd.Timestamp("2026-09-09 13:30", tz="UTC")])
+    assert first_bar_of_week(_ctx(b.index[1], bars_15m=b.iloc[:2]))
+    assert not first_bar_of_week(_ctx(b.index[2], bars_15m=b))
+
+
+def test_first_bar_of_week_with_no_earlier_bars_fires_like_the_session_gate():
+    b = _bars([MON_OPEN])
+    assert first_bar_of_week(_ctx(MON_OPEN, bars_15m=b))
+
+
+def test_label_freshness_gates_a_week_on_the_week_and_a_day_on_the_day():
+    tfs = TimeframeSet(driving="15m", higher=("1d", "1w"),
+                       deltas={"15m": pd.Timedelta(minutes=15)},
+                       session_aligned=frozenset({"1d", "1w"}))
+    empty = _bars([]).iloc[0:0]
+    tue = pd.Timestamp("2026-06-09 13:30", tz="UTC")
+    for last, want in ((MON_OPEN, {"1d": True, "1w": True}),
+                       (tue, {"1d": True, "1w": False})):
+        b = _bars([FRI_CLOSE, MON_OPEN, tue])
+        b = b.loc[b.index <= last]
+        ctx = MarketContext(symbol="SPY", now=last, tfs=tfs,
+                            bars={"15m": b, "1d": empty, "1w": empty})
+        assert label_freshness(ctx) == want

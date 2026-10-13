@@ -54,6 +54,23 @@ def session_cutoff(now: pd.Timestamp, timeframe: str) -> pd.Timestamp:
     return pd.Timestamp(day, tz="UTC")
 
 
+def session_cutoffs(instants: pd.DatetimeIndex,
+                    timeframe: str) -> pd.DatetimeIndex:
+    """`session_cutoff` for every instant, in one vectorized pass.
+
+    engine/context.visible_counts runs this once per (timeframe, replay) over
+    every destination close, so a per-row Timestamp construction here is
+    millions of constructions on a sweep. Convert to New York wall time,
+    floor to that day's midnight (still New York aware, so correct across DST),
+    step back to Monday for a week, drop the zone and relabel the naive
+    midnight as UTC. Do not re-simplify this into a per-row comprehension.
+    """
+    days = instants.tz_convert(EXCHANGE_TZ).normalize().tz_localize(None)
+    if timeframe in WEEK_ALIGNED:
+        days = days - pd.to_timedelta(days.weekday, unit="D")
+    return days.tz_localize("UTC")
+
+
 def empty_bars() -> pd.DataFrame:
     """The canonical "no bars" frame: right columns, right dtypes, UTC index.
 

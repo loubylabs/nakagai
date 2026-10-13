@@ -161,6 +161,35 @@ def test_derived_declares_where_4h_comes_from():
     assert "1h" not in DERIVED and "15m" not in DERIVED and "1d" not in DERIVED
 
 
+def test_incremental_week_rederives_whole_week_when_monday_bar_arrives_late(
+        tmp_path):
+    def _day(date, o):
+        return pd.DataFrame(
+            {"open": o, "high": o + 2, "low": o - 2, "close": o + 1,
+             "volume": 10.0},
+            index=pd.DatetimeIndex(
+                [pd.Timestamp(date, tz=ET).tz_convert("UTC")], name="ts"))
+
+    cache = BarCache(tmp_path)
+    cache.upsert("SPY", "1d", pd.concat(
+        [_day("2026-05-29", 99.0),
+         _day("2026-06-02", 102.0), _day("2026-06-03", 103.0),
+         _day("2026-06-04", 104.0), _day("2026-06-05", 105.0)]))
+    derive_incremental(cache, "SPY", "1w", now=pd.Timestamp("2026-06-08",
+                                                            tz="UTC"))
+    first = cache.load("SPY", "1w")
+    assert list(first.index.tz_convert(ET).strftime("%Y-%m-%d")) == [
+        "2026-05-29", "2026-06-02"]
+
+    cache.upsert("SPY", "1d", _day("2026-06-01", 101.0))
+    derive_incremental(cache, "SPY", "1w", now=pd.Timestamp("2026-06-08",
+                                                            tz="UTC"))
+    out = cache.load("SPY", "1w")
+    assert list(out.index.tz_convert(ET).strftime("%Y-%m-%d")) == [
+        "2026-05-29", "2026-06-01"]
+    assert out["open"].iloc[-1] == 101.0
+
+
 def test_resampling_a_timeframe_nobody_derives_is_refused():
     with pytest.raises(ValueError, match="2h"):
         resample_bars(_hourly_et("2026-06-02 08:00", 8), "2h")

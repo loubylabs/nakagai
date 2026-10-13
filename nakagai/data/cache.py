@@ -66,6 +66,8 @@ class BarCache:
 
     def upsert(self, symbol: str, timeframe: str, df: pd.DataFrame) -> int:
         """Merge `df` into the cached pair, newest copy of a duplicate ts winning.
+        For 1w the duplicate is the same WEEK, not the same label
+        (_period_keys), so a week relabeled Tuesday to Monday stays one row.
 
         Locked and atomic for the reason nakagai/filelock.py exists: this is a
         read-concat-write, and an unlocked one silently keeps only whichever

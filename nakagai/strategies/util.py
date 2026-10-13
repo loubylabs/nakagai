@@ -18,7 +18,9 @@ import math
 
 import pandas as pd
 
-from nakagai.data.schema import session_open
+from nakagai.data.schema import (
+    EXCHANGE_TZ, WEEK_ALIGNED, session_cutoff, session_open,
+)
 from nakagai.engine.portfolio_types import Signal
 from nakagai.strategies.base import Direction, MarketContext
 
@@ -29,18 +31,24 @@ def label_freshness(ctx: MarketContext) -> dict[str, bool]:
     The unscheduled door's whole answer, in one place, so the two ways a
     timeframe can be gated live beside each other rather than inside a
     strategy. A session-aligned timeframe carries a date rather than a close
-    time, so it is gated on the driving bar that opens the session; every other
-    one is gated on its own label plus its delta.
+    time, so it is gated on the driving bar that opens the session, or for a
+    week the one that opens the week's first session; every other one is gated on its own label plus its delta.
 
     The driving timeframe is absent on purpose. It has no gate: a play decided
     on the frame it is replayed on is fresh on every step of it, and an entry
     here would invite a caller to ask a question with only one answer.
     """
-    return {
-        tf: (first_bar_of_session(ctx) if tf in ctx.tfs.session_aligned
-             else fresh_bar(ctx, tf))
-        for tf in ctx.tfs.higher
-    }
+    return {tf: _label_gate(ctx, tf) for tf in ctx.tfs.higher}
+
+
+def _label_gate(ctx: MarketContext, tf: str) -> bool:
+    """One timeframe's gate. A week before a session: both are session
+    aligned, and the week is the narrower question."""
+    if tf in WEEK_ALIGNED:
+        return first_bar_of_week(ctx)
+    if tf in ctx.tfs.session_aligned:
+        return first_bar_of_session(ctx)
+    return fresh_bar(ctx, tf)
 
 
 def fresh_bar(ctx: MarketContext, timeframe: str) -> bool:
@@ -93,6 +101,36 @@ def first_bar_of_session(ctx: MarketContext) -> bool:
     if not len(idx):
         return False
     return idx.searchsorted(session_open(idx[-1]), side="left") == len(idx) - 1
+
+
+def first_bar_of_week(ctx: MarketContext) -> bool:
+    """True on the driving bar that opens the first regular session of a new
+    exchange week: the once-a-week gate for weekly bars.
+
+    It is first_bar_of_session on the one session whose previous trading day
+    sits in an earlier New York week. Asked of the driving bars rather than of
+    a calendar, which core does not carry: a holiday Monday moves the week's
+    first session to Tuesday, and the bars already show that. The previous
+    trading day is the last driving bar before this bar's New York midnight,
+    not the bar before it, because the caches are not RTH-only and a Monday
+    pre-market print would otherwise read as "the week already started".
+
+    A history with no earlier day fires, as first_bar_of_session does on its
+    first session: the honest answer rather than silence.
+
+    Matches engine/context.closed_before by construction: a week becomes
+    visible at New York midnight on the first day of the next week, and this
+    gate opens on the first session after that, so the bar a weekly play
+    decides on is always the week that just closed.
+    """
+    if not first_bar_of_session(ctx):
+        return False
+    idx = ctx.driving_bars.index
+    today = idx[-1].tz_convert(EXCHANGE_TZ).normalize()
+    before = idx.searchsorted(today, side="left")
+    if before == 0:
+        return True
+    return session_cutoff(idx[before - 1], "1w") < session_cutoff(idx[-1], "1w")
 
 
 def rr_signal(ctx: MarketContext, direction: Direction, stop: float, rr: float,
