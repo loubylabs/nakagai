@@ -2,7 +2,7 @@
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, timedelta
 from functools import lru_cache
 
 import pandas as pd
@@ -28,6 +28,30 @@ SESSION_OPEN = (9, 30)
 # A bar labeled 16:00 is the first post-market print rather than the closing
 # one, for the same reason the 08:00 print is not the open.
 SESSION_CLOSE = (16, 0)
+
+# Session-aligned timeframes whose bar is the exchange WEEK rather than one
+# session. Same label convention as 1d, a session date at New York midnight,
+# but a different period: a weekly bar is labeled with its week's FIRST
+# session and closes when New York reaches the next week (Monday to Sunday).
+# Everything that asks "which period is this instant in" for a session-aligned
+# frame reads this set rather than spelling "1w".
+WEEK_ALIGNED: frozenset[str] = frozenset({"1w"})
+
+
+def session_cutoff(now: pd.Timestamp, timeframe: str) -> pd.Timestamp:
+    """The first session-aligned label of `timeframe` NOT yet closed at `now`.
+
+    A daily bar is closed once its session date is behind New York's date; a
+    weekly bar once its week is behind New York's week. Returned as UTC
+    midnight of that New York date, because a session label's UTC calendar
+    date IS its session date under both conventions the cache meets (00:00Z
+    legacy, New York midnight canonical), so `label < cutoff` is the whole
+    visibility rule (engine/context.closed_before).
+    """
+    day = now.tz_convert(EXCHANGE_TZ).date()
+    if timeframe in WEEK_ALIGNED:
+        day -= timedelta(days=day.weekday())
+    return pd.Timestamp(day, tz="UTC")
 
 
 def empty_bars() -> pd.DataFrame:

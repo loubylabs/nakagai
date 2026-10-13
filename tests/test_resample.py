@@ -157,6 +157,7 @@ def test_derived_declares_where_4h_comes_from():
     """One place says which timeframes are computed rather than fetched, so a
     caller asks instead of hardcoding the pair."""
     assert DERIVED["4h"] == "1h"
+    assert DERIVED["1w"] == "1d"
     assert "1h" not in DERIVED and "15m" not in DERIVED and "1d" not in DERIVED
 
 
@@ -198,9 +199,9 @@ def test_derive_incremental_rederives_only_the_tail(tmp_path, monkeypatch):
     seen: list[int] = []
     real = sync.resample_bars
 
-    def spy(src, timeframe):
+    def spy(src, timeframe, **kwargs):
         seen.append(len(src))
-        return real(src, timeframe)
+        return real(src, timeframe, **kwargs)
 
     monkeypatch.setattr(sync, "resample_bars", spy)
     cache.upsert("SPY", "1h", _hourly_et("2026-05-21 00:00", 3))

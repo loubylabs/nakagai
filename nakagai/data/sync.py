@@ -43,7 +43,8 @@ def fetch_incremental(cache: BarCache, provider: DataProvider, symbol: str,
 
 
 def derive_incremental(cache: BarCache, symbol: str, timeframe: str = "4h",
-                       full: bool = False) -> int:
+                       full: bool = False, *,
+                       now: pd.Timestamp | None = None) -> int:
     """Materialize a derived timeframe into the cache from its source bars.
 
     The fetch functions above spend provider requests; this one spends nothing
@@ -69,6 +70,11 @@ def derive_incremental(cache: BarCache, symbol: str, timeframe: str = "4h",
     backfilled history would never be aggregated and the derived frame would
     keep a hole no later cycle could fill.
 
+    `now` is the caller's clock, handed to resample_bars as evidence that a
+    week is over (see its docstring). A live caller passes the bar close it is
+    working on; a caller with no clock passes nothing, and a week then waits
+    for its Friday bar or a later week's bar.
+
     Returns the number of rows upserted.
     """
     source_tf = DERIVED.get(timeframe)
@@ -82,7 +88,7 @@ def derive_incremental(cache: BarCache, symbol: str, timeframe: str = "4h",
         span = cache.coverage(symbol, timeframe)
         if span is not None and src.index[0] >= span[0]:
             src = src.loc[src.index >= span[1]]
-    derived = resample_bars(src, timeframe)
+    derived = resample_bars(src, timeframe, now=now)
     if derived.empty:
         return 0
     return cache.upsert(symbol, timeframe, derived)
