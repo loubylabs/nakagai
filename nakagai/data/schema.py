@@ -249,13 +249,19 @@ class TimeframeSet:
 # session-aligned. An ET-anchored bucket labeled 12:00 closes at 16:00, four
 # hours later, so plain label + delta is the exact visibility rule and
 # engine/context.closed_before needs no special case for it. Only the daily
-# bar, whose label carries a date rather than a close time, does.
+# and weekly bars, whose labels carry a date rather than a close time, do.
+#
+# 1w is DERIVED from the cached 1d bars and session-aligned like 1d: its label
+# is the week's first session date at New York midnight, so it has no delta,
+# and closed_before decides it by which New York WEEK an instant falls in
+# (session_cutoff). It is a LIVE timeframe only: the replay schedule carries
+# no weekly label contract (engine/bars.LIVE_TIMEFRAMES).
 DEFAULT_TIMEFRAMES = TimeframeSet(
     driving="15m",
-    higher=("1h", "4h", "1d"),
+    higher=("1h", "4h", "1d", "1w"),
     deltas={"15m": pd.Timedelta(minutes=15), "1h": pd.Timedelta(hours=1),
             "4h": pd.Timedelta(hours=4)},
-    session_aligned=frozenset({"1d"}),
+    session_aligned=frozenset({"1d", "1w"}),
 )
 TIMEFRAMES = DEFAULT_TIMEFRAMES.all
 

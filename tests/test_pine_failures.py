@@ -394,3 +394,30 @@ def test_not_is_refused_with_a_named_message_on_the_chart_composition_path():
         lower_pine(spec)
     assert exc.value.code == "pine_unsupported"
     assert "`not`" in str(exc.value)
+
+
+_PERCENT_RISK = {"stop": {"kind": "percent", "pct": 2.0},
+                 "target": {"kind": "rr", "rr": 2.0}}
+
+
+def test_a_weekly_play_has_no_pine_export():
+    """The weekly gate is the week's first session, and the session-open
+    helper this compiler emits for 1d would decide every Monday-to-Friday
+    session instead. Refused, rather than exported wrong."""
+    spec = {"version": 2, "name": "weekly", "timeframe": "1w",
+            "long": {"all": [{"lhs": {"src": "close"}, "op": ">", "rhs": 0}]},
+            "risk": _PERCENT_RISK}
+    with pytest.raises(PineCompileError) as exc:
+        lower_pine(spec)
+    assert exc.value.code == "pine_unsupported"
+    assert exc.value.path == "timeframe"
+
+
+def test_an_intraday_play_reading_the_weekly_close_has_no_pine_export():
+    spec = {"version": 2, "name": "reads-weekly", "timeframe": "1h",
+            "long": {"all": [{"lhs": {"src": "close"}, "op": ">",
+                              "rhs": {"src": "close", "tf": "1w"}}]},
+            "risk": _PERCENT_RISK}
+    with pytest.raises(PineCompileError) as exc:
+        lower_pine(spec)
+    assert exc.value.code == "pine_unsupported"

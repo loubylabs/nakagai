@@ -20,7 +20,8 @@ from datetime import time
 
 from nakagai.strategies.rules import PineCompileError, compile_pine, spec_hash
 from nakagai.strategies.rules.pine import render
-from nakagai.strategies.rules.spec import DRIVING, TIMEFRAMES
+from nakagai.strategies.rules.pine.lower import PINE_TIMEFRAMES
+from nakagai.strategies.rules.spec import DRIVING
 from nakagai.strategies.rules.vocabulary import core_vocabulary
 from nakagai.strategies.rules.windows import WindowSpec
 # The golden set is the house-style guard's subject too, read from one place so
@@ -155,7 +156,7 @@ def test_the_runtime_guard_refuses_every_other_chart_timeframe():
             '15-minute chart.")') in source
 
 
-@pytest.mark.parametrize("timeframe", TIMEFRAMES)
+@pytest.mark.parametrize("timeframe", tuple(PINE_TIMEFRAMES))
 def test_the_guard_demands_the_driving_cadence_whatever_the_play_is_on(
         timeframe):
     # The defect this replaces: the guard named the SPEC's timeframe, because

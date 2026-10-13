@@ -42,16 +42,21 @@ def test_validate_rejects_missing_columns(make_bars):
 
 
 def test_constants():
-    assert TIMEFRAMES == ("15m", "1h", "4h", "1d")
+    assert TIMEFRAMES == ("15m", "1h", "4h", "1d", "1w")
 
 
 def test_default_timeframes_match_legacy_axis():
-    assert DEFAULT_TIMEFRAMES.all == ("15m", "1h", "4h", "1d")
+    assert DEFAULT_TIMEFRAMES.all == ("15m", "1h", "4h", "1d", "1w")
     assert DEFAULT_TIMEFRAMES.step == pd.Timedelta(minutes=15)
     assert DEFAULT_TIMEFRAMES.deltas["1h"] == pd.Timedelta(hours=1)
     assert DEFAULT_TIMEFRAMES.deltas["4h"] == pd.Timedelta(hours=4)
-    assert DEFAULT_TIMEFRAMES.session_aligned == frozenset({"1d"})
+    assert DEFAULT_TIMEFRAMES.session_aligned == frozenset({"1d", "1w"})
     assert TIMEFRAMES == DEFAULT_TIMEFRAMES.all
+
+
+def test_the_week_is_session_aligned_and_carries_no_delta():
+    assert WEEK_ALIGNED <= DEFAULT_TIMEFRAMES.session_aligned
+    assert "1w" not in DEFAULT_TIMEFRAMES.deltas
 
 
 def test_four_hour_is_not_session_aligned():

@@ -300,7 +300,7 @@ def test_invalid_injected_numeric_bounds_are_rejected_before_hashing(bounds):
 def test_the_grammar_takes_its_timeframes_from_the_schema():
     """One source of truth: spec.TIMEFRAMES is the engine's axis, not a second
     hardcoded copy that has to be edited alongside it."""
-    assert TIMEFRAMES == DEFAULT_TIMEFRAMES.all == ("15m", "1h", "4h", "1d")
+    assert TIMEFRAMES == DEFAULT_TIMEFRAMES.all == ("15m", "1h", "4h", "1d", "1w")
 
 
 def test_version_required_and_v1_rejected():

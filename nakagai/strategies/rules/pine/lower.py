@@ -569,6 +569,14 @@ class SpecLowerer:
         # CONDITIONS are computed on before they are lifted onto that chart.
         self.chart = DRIVING
         self.frame = str(spec.get("timeframe", "1h"))
+        if self.frame not in PINE_TIMEFRAMES:
+            # 1w is an engine timeframe with no Pine lowering: its gate is the
+            # week's first session, and the session-open helper emitted for a
+            # session-aligned frame would decide on every session instead.
+            raise PineCompileError(
+                "pine_unsupported",
+                f"timeframe: {self.frame!r} has no Pine timeframe string",
+                path="timeframe")
         self.ctx = PineContext()
         self.lifted: set[str] = set()
         self.gates: dict[_Pair, str] = {}

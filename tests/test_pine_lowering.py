@@ -13,7 +13,7 @@ from datetime import time
 
 import pytest
 
-from nakagai.data.schema import DEFAULT_TIMEFRAMES
+from nakagai.data.schema import DEFAULT_TIMEFRAMES, WEEK_ALIGNED
 from nakagai.strategies.rules import (
     PineExits, PineRisk, compile_pine, lower_pine, spec_hash,
 )
@@ -295,9 +295,9 @@ def test_a_program_without_division_carries_no_helper():
     assert _program({"ind": "sma"}).helpers == ()
 
 
-def test_timeframe_strings_cover_every_timeframe_the_engine_admits():
+def test_timeframe_strings_cover_every_timeframe_the_engine_admits_but_the_week():
     assert PINE_TIMEFRAMES == {"15m": "15", "1h": "60", "4h": "240", "1d": "D"}
-    assert set(PINE_TIMEFRAMES) == set(DEFAULT_TIMEFRAMES.all)
+    assert set(PINE_TIMEFRAMES) == set(DEFAULT_TIMEFRAMES.all) - WEEK_ALIGNED
 
 
 def test_a_foreign_timeframe_operand_is_requested_gated_and_latched():
@@ -642,7 +642,7 @@ def test_a_requested_intraday_frame_states_the_premise_it_rests_on():
     assert not premise(_spec({"ind": "sma"}, timeframe="1d"))
 
 
-@pytest.mark.parametrize("timeframe", DEFAULT_TIMEFRAMES.all)
+@pytest.mark.parametrize("timeframe", tuple(PINE_TIMEFRAMES))
 def test_the_chart_is_the_driving_cadence_whatever_the_play_asks_for(timeframe):
     # The defect this replaces: the lowerer charted spec["timeframe"], so a
     # non-15m play decided on bars the engine never decides on, at prices it

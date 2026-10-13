@@ -32,7 +32,8 @@ def label_freshness(ctx: MarketContext) -> dict[str, bool]:
     timeframe can be gated live beside each other rather than inside a
     strategy. A session-aligned timeframe carries a date rather than a close
     time, so it is gated on the driving bar that opens the session, or for a
-    week the one that opens the week's first session; every other one is gated on its own label plus its delta.
+    week the one that opens the week's first session; every other one is
+    gated on its own label plus its delta.
 
     The driving timeframe is absent on purpose. It has no gate: a play decided
     on the frame it is replayed on is fresh on every step of it, and an entry
@@ -42,8 +43,8 @@ def label_freshness(ctx: MarketContext) -> dict[str, bool]:
 
 
 def _label_gate(ctx: MarketContext, tf: str) -> bool:
-    """One timeframe's gate. A week before a session: both are session
-    aligned, and the week is the narrower question."""
+    """One timeframe's gate. Check the week before the session, since a week
+    is also session aligned and is the narrower gate."""
     if tf in WEEK_ALIGNED:
         return first_bar_of_week(ctx)
     if tf in ctx.tfs.session_aligned:
