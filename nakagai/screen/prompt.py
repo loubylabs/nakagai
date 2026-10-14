@@ -18,6 +18,9 @@ _FACT_GROUPS = {
     "dilution": (
         "shelf_filings_365d", "offering_filings_365d", "atm_offerings_365d",
     ),
+    "short_interest": (
+        "short_pct_outstanding", "days_to_cover", "short_interest_change_pct",
+    ),
 }
 _CAPABILITY_EXAMPLES = (
     "Float under 20 million with price under $10",

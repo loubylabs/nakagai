@@ -127,6 +127,9 @@ DISCOVERY_FACT_NAMES = (
     "shelf_filings_365d",
     "offering_filings_365d",
     "atm_offerings_365d",
+    "short_pct_outstanding",
+    "days_to_cover",
+    "short_interest_change_pct",
 )
 
 RELATIVE_SCOPE_SCREEN = {
