@@ -14,6 +14,9 @@ EXPECTED_FACTS = (
     "shelf_filings_365d",
     "offering_filings_365d",
     "atm_offerings_365d",
+    "short_pct_outstanding",
+    "days_to_cover",
+    "short_interest_change_pct",
 )
 
 
@@ -45,6 +48,10 @@ def test_screen_capabilities_publish_the_full_market_contract():
         "dilution": [
             "shelf_filings_365d", "offering_filings_365d",
             "atm_offerings_365d",
+        ],
+        "short_interest": [
+            "short_pct_outstanding", "days_to_cover",
+            "short_interest_change_pct",
         ],
     }
     assert capabilities["fact_labels"] == dict(FACT_LABELS)
