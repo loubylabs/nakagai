@@ -10,7 +10,7 @@ from nakagai.strategies.rules.vocabulary import (
 _BASE_UNIVERSE = "All eligible US common stocks"
 _FACT_GROUPS = {
     "fundamentals": (
-        "float_shares", "shares_outstanding", "market_cap",
+        "shares_outstanding", "market_cap",
     ),
     "market_activity": (
         "price", "change_pct", "gap_pct", "session_volume",
@@ -23,7 +23,7 @@ _FACT_GROUPS = {
     ),
 }
 _CAPABILITY_EXAMPLES = (
-    "Float under 20 million with price under $10",
+    "Market cap under $300 million with price under $10",
     "RSI under 30 with volume above twice its 20-day average.",
 )
 
@@ -41,9 +41,7 @@ Description: "price above the 200 day average on at least double average volume"
 "clarifications": ["read 'average volume' as its 20 bar simple average"]}
 
 Description: "Any low float bangers?"
-{"spec": {"version": 1, "tf": "1d",
-"conditions": {"all": [{"lhs": {"fact": "float_shares"}, "op": "<", "rhs": 20000000}]}},
-"clarifications": ["read 'low float' as fewer than 20 million float shares; bangers adds no financial condition"]}\
+{"not_expressible": "Float is not supported."}\
 """
 
 
@@ -140,6 +138,8 @@ Max expression depth {g.MAX_DEPTH}; max {g.MAX_CONDITIONS} conditions; max
   (rsi 30/70; volume 2x its 20 bar average) and say so in "clarifications".
 - If the request needs anything the grammar cannot express, return
   "not_expressible" with the reason instead of guessing a wrong spec.
+- Float (float shares, low float) is not supported: return
+  "not_expressible" saying so, and never substitute shares outstanding.
 - highest/lowest are unshifted rolling extrema that include the current bar,
   so a breakout cross like "close crosses_above highest(close, n)" can never
   fire; use donchian(n).upper/.lower for breakout crosses instead.

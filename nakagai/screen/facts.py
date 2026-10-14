@@ -4,7 +4,6 @@ from collections.abc import Mapping
 from types import MappingProxyType
 
 DISCOVERY_FACTS: tuple[str, ...] = (
-    "float_shares",
     "shares_outstanding",
     "market_cap",
     "price",
@@ -20,7 +19,6 @@ DISCOVERY_FACTS: tuple[str, ...] = (
 )
 
 FACT_LABELS: Mapping[str, str] = MappingProxyType({
-    "float_shares": "float shares",
     "shares_outstanding": "shares outstanding",
     "market_cap": "market capitalization",
     "price": "price",
