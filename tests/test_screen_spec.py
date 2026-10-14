@@ -117,7 +117,6 @@ from nakagai.screen.spec import (
 GOOD = {"version": 1, "tf": "1d", "conditions": {"all": [RSI_LT_30]}}
 
 DISCOVERY_FACT_NAMES = (
-    "float_shares",
     "shares_outstanding",
     "market_cap",
     "price",
