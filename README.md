@@ -332,6 +332,17 @@ The hosted product at nakag.ai is built on top of this core.
 
 ## Release notes
 
+### 0.15.0 (2026-10-17)
+
+- `rule_sentence(spec, vocabulary=None)` restates a rule spec in plain
+  sentences for a person: "Long on the daily chart when the close crosses
+  above the 20-day simple moving average. Stop 2x the 14-day average true
+  range below entry. Target 2x the risk." Deterministic, never raises.
+  `describe_spec` is unchanged: it is the rule DSL, which agents edit with.
+- `Term` gains a keyword-only `plain` phrase, called as
+  `plain(args, unit, of)`. Every core term carries one; an injected term
+  without one reads through a generic fallback.
+
 ### 0.12.0 (2026-10-13)
 
 - A weekly timeframe, `1w`, derived from cached `1d` bars

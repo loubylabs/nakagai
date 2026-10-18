@@ -91,6 +91,49 @@ def is_range_rule(rule: ArgRule) -> bool:
     return math.isfinite(low) and math.isfinite(high) and low <= high
 
 
+# A term's words for a person, read by rules.plain.rule_sentence. Called as
+# plain(args, unit, of): `args` are the node's arguments over the term's
+# defaults (a condition-typed arg already rendered as text), `unit` is the bar
+# unit a length reads in ("day", "hour", "week" or "bar"), and `of` is "" for
+# the default source or the source's own phrase ("the high", "volume").
+# describe_spec never reads it: that text is the rule DSL, and agents edit
+# rules with it.
+PlainPhrase: TypeAlias = Callable[[Mapping[str, object], str, str], str]
+
+
+def plain_number(value) -> str:
+    """A number as a sentence prints it: 2 not 2.0, 1,000,000 not 1e+06.
+    Never raises."""
+    try:
+        return f"{value:,.10g}"
+    except (OverflowError, TypeError, ValueError):
+        return str(value)
+
+
+def plain_count(n, unit: str) -> str:
+    """`20 days`, `1 bar`."""
+    return f"{plain_number(n)} {unit}" + ("" if n == 1 else "s")
+
+
+def _of(of: str) -> str:
+    return f" of {of}" if of else ""
+
+
+def _pick(names: Mapping[str, str], value) -> str:
+    return names.get(value, str(value)) if isinstance(value, str) else str(value)
+
+
+def _length(noun: str) -> PlainPhrase:
+    """`the 20-day simple moving average`, for a term whose one arg is n."""
+    return lambda a, unit, of: (
+        f"the {plain_number(a['n'])}-{unit} {noun}{_of(of)}")
+
+
+_BANDS = {"upper": "upper", "mid": "middle", "lower": "lower"}
+_SIDES = {"long": "bullish", "short": "bearish"}
+_EDGES = {"top": "top", "bottom": "bottom", "mid": "middle"}
+
+
 @dataclass(frozen=True)
 class Term:
     name: str
@@ -103,6 +146,7 @@ class Term:
     session_scoped: bool = False
     driving_frame_intraday: bool = False
     render_explicit_source: bool = field(default=False, kw_only=True)
+    plain: PlainPhrase | None = field(default=None, kw_only=True)
     pine: PineLowering | None = None
     window_reduce: WindowReducer | None = None
     window_required: bool = False
@@ -124,6 +168,9 @@ class Term:
         if not callable(self.fn):
             raise TypeError(f"term {self.name!r} needs a callable fn, got "
                             f"{type(self.fn).__name__}")
+        if self.plain is not None and not callable(self.plain):
+            raise TypeError(f"term {self.name!r} needs a callable plain "
+                            f"phrase, got {type(self.plain).__name__}")
         # Same reasoning one slot along: a bare emit function passed as `pine=`
         # is callable and would sail through every isinstance-free reader until
         # the compiler asked it for `.emit` and reported an AttributeError from
@@ -253,25 +300,26 @@ class Vocabulary:
 VocabularyFactory: TypeAlias = Callable[[], Vocabulary]
 
 
-def _series(name, args, defaults, fn, pine, *, window_reduce=None,
+def _series(name, args, defaults, fn, pine, *, plain, window_reduce=None,
             window_required=False) -> Term:
-    return Term(name, "series", args, defaults, fn, pine=pine,
+    return Term(name, "series", args, defaults, fn, pine=pine, plain=plain,
                 window_reduce=window_reduce, window_required=window_required)
 
 
-def _frame(name, args, defaults, fn, pine) -> Term:
-    return Term(name, "frame", args, defaults, fn, pine=pine)
+def _frame(name, args, defaults, fn, pine, *, plain) -> Term:
+    return Term(name, "frame", args, defaults, fn, pine=pine, plain=plain)
 
 
-def _bar(name, args, defaults, fn, pine) -> Term:
-    return Term(name, "bar", args, defaults, fn, pine=pine)
+def _bar(name, args, defaults, fn, pine, *, plain) -> Term:
+    return Term(name, "bar", args, defaults, fn, pine=pine, plain=plain)
 
 
-def _primitive(name, args, defaults, fn, pine, *, end_anchored=False,
+def _primitive(name, args, defaults, fn, pine, *, plain, end_anchored=False,
                session_scoped=False, driving_frame_intraday=False) -> Term:
     return Term(name, "primitive", args, defaults, fn, doc=fn.__doc__ or "",
                 end_anchored=end_anchored, session_scoped=session_scoped,
-                driving_frame_intraday=driving_frame_intraday, pine=pine)
+                driving_frame_intraday=driving_frame_intraday, pine=pine,
+                plain=plain)
 
 
 def _window_required(*_args):
@@ -283,70 +331,118 @@ def core_vocabulary() -> Vocabulary:
     indicators = (
         _series("sma", {"n": (2, 500)}, {"n": 20},
                 lambda s, a: ind.sma(s, a["n"]),
-                PineLowering(pine.emit_series_call("ta.sma", "n"))),
+                PineLowering(pine.emit_series_call("ta.sma", "n")),
+                plain=_length("simple moving average")),
         _series("ema", {"n": (2, 500)}, {"n": 20},
                 lambda s, a: ind.ema(s, a["n"]),
-                PineLowering(pine.emit_series_call("ta.ema", "n"))),
+                PineLowering(pine.emit_series_call("ta.ema", "n")),
+                plain=_length("exponential moving average")),
         _series("rsi", {"n": (2, 100)}, {"n": 14},
                 lambda s, a: ind.rsi(s, a["n"]),
-                PineLowering(pine.emit_series_call("ta.rsi", "n"))),
+                PineLowering(pine.emit_series_call("ta.rsi", "n")),
+                plain=_length("RSI")),
         _series("roc", {"n": (1, 500)}, {"n": 20},
                 lambda s, a: ind.roc(s, a["n"]),
-                PineLowering(pine.emit_series_call("ta.roc", "n"))),
+                PineLowering(pine.emit_series_call("ta.roc", "n")),
+                plain=_length("rate of change")),
         _series("zscore", {"n": (2, 500)}, {"n": 20},
                 lambda s, a: ind.zscore(s, a["n"]),
-                PineLowering(pine.emit_zscore, helpers=(pine.DIV,))),
+                PineLowering(pine.emit_zscore, helpers=(pine.DIV,)),
+                plain=_length("z-score")),
         _series("highest", {"n": (2, 500)}, {"n": 20},
                 lambda s, a: ind.highest(s, a["n"]),
                 PineLowering(pine.emit_series_call("ta.highest", "n")),
+                plain=lambda a, unit, of: (
+                    f"the highest value of {of or 'the close'} over the "
+                    f"last {plain_count(a['n'], unit)}"),
                 window_reduce="max"),
         _series("lowest", {"n": (2, 500)}, {"n": 20},
                 lambda s, a: ind.lowest(s, a["n"]),
                 PineLowering(pine.emit_series_call("ta.lowest", "n")),
+                plain=lambda a, unit, of: (
+                    f"the lowest value of {of or 'the close'} over the "
+                    f"last {plain_count(a['n'], unit)}"),
                 window_reduce="min"),
+        # Read only through a window (rules.plain renders window mode itself);
+        # the phrase is what a window-less node, which validation refuses,
+        # reads as.
         _series("first", {}, {}, _window_required, None,
+                plain=lambda a, unit, of: (
+                    f"the first value of {of or 'the close'}"),
                 window_reduce="first", window_required=True),
         _series("last", {}, {}, _window_required, None,
+                plain=lambda a, unit, of: (
+                    f"the last value of {of or 'the close'}"),
                 window_reduce="last", window_required=True),
         _series("stdev", {"n": (2, 500)}, {"n": 20},
                 lambda s, a: ind.stdev(s, a["n"]),
-                PineLowering(pine.emit_series_call("ta.stdev", "n"))),
+                PineLowering(pine.emit_series_call("ta.stdev", "n")),
+                plain=_length("standard deviation")),
         _frame("macd", {"fast": (2, 100), "slow": (3, 200),
                          "signal": (2, 100),
                          "field": ("macd", "signal", "hist")},
                {"fast": 12, "slow": 26, "signal": 9, "field": "macd"},
                lambda s, a: ind.macd(s, a["fast"], a["slow"], a["signal"]),
-               PineLowering(pine.emit_macd)),
+               PineLowering(pine.emit_macd),
+               plain=lambda a, unit, of: (
+                   "the " + _pick({"macd": "MACD line",
+                                   "signal": "MACD signal line",
+                                   "hist": "MACD histogram"}, a["field"])
+                   + f" ({plain_number(a['fast'])}, "
+                     f"{plain_number(a['slow'])}, "
+                     f"{plain_number(a['signal'])}){_of(of)}")),
         _frame("bb", {"n": (2, 200), "k": (0.5, 5.0),
                        "field": ("upper", "mid", "lower")},
                {"n": 20, "k": 2.0, "field": "mid"},
                lambda s, a: ind.bollinger(s, a["n"], a["k"]),
-               PineLowering(pine.emit_bb)),
+               PineLowering(pine.emit_bb),
+               plain=lambda a, unit, of: (
+                   f"the {_pick(_BANDS, a['field'])} Bollinger band "
+                   f"({plain_number(a['n'])}-{unit}, "
+                   f"{plain_number(a['k'])} standard deviations){_of(of)}")),
         _bar("atr", {"n": (2, 100)}, {"n": 14},
              lambda b, a: ind.atr(b, a["n"]),
-             PineLowering(pine.emit_bar_call("ta.atr", "n"))),
+             PineLowering(pine.emit_bar_call("ta.atr", "n")),
+             plain=_length("average true range")),
         _bar("donchian", {"n": (2, 300),
                            "field": ("upper", "lower", "mid")},
              {"n": 20, "field": "upper"},
              lambda b, a: ind.donchian(b, a["n"]),
-             PineLowering(pine.emit_donchian)),
+             PineLowering(pine.emit_donchian),
+             plain=lambda a, unit, of: (
+                 f"the {_pick(_BANDS, a['field'])} line of the "
+                 f"{plain_number(a['n'])}-{unit} Donchian channel")),
         _bar("supertrend", {"n": (2, 100), "mult": (0.5, 10.0),
                              "field": ("line", "direction")},
              {"n": 10, "mult": 3.0, "field": "line"},
              lambda b, a: ind.supertrend(b, a["n"], a["mult"]),
-             PineLowering(pine.emit_supertrend)),
+             PineLowering(pine.emit_supertrend),
+             plain=lambda a, unit, of: (
+                 "the Supertrend "
+                 + _pick({"line": "line",
+                          "direction": "direction (1 up, -1 down)"},
+                         a["field"])
+                 + f" ({plain_number(a['n'])}-{unit}, "
+                   f"{plain_number(a['mult'])}x ATR)")),
         _bar("vwap", {}, {}, lambda b, _a: ind.session_vwap(b),
-             PineLowering(pine.emit_vwap)),
+             PineLowering(pine.emit_vwap),
+             plain=lambda a, unit, of: "the session VWAP"),
         _bar("stoch", {"n": (2, 100), "d": (1, 50),
                         "field": ("k", "d")},
              {"n": 14, "d": 3, "field": "k"},
              lambda b, a: ind.stoch(b, a["n"], a["d"]),
-             PineLowering(pine.emit_stoch)),
+             PineLowering(pine.emit_stoch),
+             plain=lambda a, unit, of: (
+                 f"the {plain_number(a['n'])}-{unit} stochastic "
+                 + ("%K" if a["field"] == "k"
+                    else f"%D ({plain_number(a['d'])}-bar smoothing)"))),
         _bar("adx", {"n": (2, 100)}, {"n": 14},
              lambda b, a: ind.adx(b, a["n"]),
-             PineLowering(pine.emit_adx)),
+             PineLowering(pine.emit_adx),
+             plain=_length("ADX")),
         _bar("obv", {}, {}, lambda b, _a: ind.obv(b),
-             PineLowering(pine.emit_obv)),
+             PineLowering(pine.emit_obv),
+             plain=lambda a, unit, of: "on-balance volume"),
         _bar("ichimoku", {"tenkan_n": (2, 100), "kijun_n": (2, 200),
                            "senkou_n": (2, 300), "disp": (1, 100),
                            "field": ("tenkan", "kijun", "senkou_a", "senkou_b")},
@@ -354,21 +450,35 @@ def core_vocabulary() -> Vocabulary:
               "field": "tenkan"},
              lambda b, a: ind.ichimoku(b, a["tenkan_n"], a["kijun_n"],
                                         a["senkou_n"], a["disp"]),
-             PineLowering(pine.emit_ichimoku)),
+             PineLowering(pine.emit_ichimoku),
+             plain=lambda a, unit, of: (
+                 "the Ichimoku "
+                 + _pick({"tenkan": "conversion line", "kijun": "base line",
+                          "senkou_a": "leading span A",
+                          "senkou_b": "leading span B"}, a["field"])
+                 + " (" + ", ".join(plain_number(a[k]) for k in (
+                     "tenkan_n", "kijun_n", "senkou_n", "disp")) + ")")),
         _bar("keltner", {"n": (2, 200), "mult": (0.5, 10.0),
                           "field": ("upper", "mid", "lower")},
              {"n": 20, "mult": 2.0, "field": "mid"},
              lambda b, a: ind.keltner(b, a["n"], a["mult"]),
-             PineLowering(pine.emit_keltner)),
+             PineLowering(pine.emit_keltner),
+             plain=lambda a, unit, of: (
+                 f"the {_pick(_BANDS, a['field'])} Keltner channel line "
+                 f"({plain_number(a['n'])}-{unit}, "
+                 f"{plain_number(a['mult'])}x ATR)")),
         _bar("cci", {"n": (2, 200)}, {"n": 20},
              lambda b, a: ind.cci(b, a["n"]),
-             PineLowering(pine.emit_bar_call("ta.cci", "n", source="hlc3"))),
+             PineLowering(pine.emit_bar_call("ta.cci", "n", source="hlc3")),
+             plain=_length("CCI")),
         _bar("mfi", {"n": (2, 100)}, {"n": 14},
              lambda b, a: ind.mfi(b, a["n"]),
-             PineLowering(pine.emit_bar_call("ta.mfi", "n", source="hlc3"))),
+             PineLowering(pine.emit_bar_call("ta.mfi", "n", source="hlc3")),
+             plain=_length("money flow index")),
         _bar("wpr", {"n": (2, 100)}, {"n": 14},
              lambda b, a: ind.wpr(b, a["n"]),
-             PineLowering(pine.emit_bar_call("ta.wpr", "n"))),
+             PineLowering(pine.emit_bar_call("ta.wpr", "n")),
+             plain=_length("Williams %R")),
     )
     # session_scoped, on the terms below that carry it: these read the driving
     # frame's own session or calendar structure (elapsed
@@ -397,13 +507,21 @@ def core_vocabulary() -> Vocabulary:
     primitives = (
         _primitive("gap_pct", {}, {}, prim.gap_pct,
                    PineLowering(pine.emit_primitive(pine.GAP_PCT),
-                                helpers=(pine.GAP_PCT,))),
+                                helpers=(pine.GAP_PCT,)),
+                   plain=lambda a, unit, of: (
+                       "the opening gap from the prior close (%)")),
         _primitive("swing_high", {"k": (1, 10)}, {"k": 3}, prim.swing_high,
                    PineLowering(pine.emit_swing(pine.SWING_HIGH),
-                                helpers=(pine.SWING_HIGH,))),
+                                helpers=(pine.SWING_HIGH,)),
+                   plain=lambda a, unit, of: (
+                       f"the latest swing high "
+                       f"({plain_count(a['k'], unit)} each side)")),
         _primitive("swing_low", {"k": (1, 10)}, {"k": 3}, prim.swing_low,
                    PineLowering(pine.emit_swing(pine.SWING_LOW),
-                                helpers=(pine.SWING_LOW,))),
+                                helpers=(pine.SWING_LOW,)),
+                   plain=lambda a, unit, of: (
+                       f"the latest swing low "
+                       f"({plain_count(a['k'], unit)} each side)")),
         # Session-scoped, and deliberately NOT driving_frame_intraday. Reading
         # a weekday off a 1h frame inside a 15m spec is a category error, which
         # is why it takes no tf; reading a weekday off your own daily bars is
@@ -416,10 +534,13 @@ def core_vocabulary() -> Vocabulary:
         _primitive("day_of_week", {}, {}, prim.day_of_week,
                    PineLowering(pine.emit_primitive(pine.DAY_OF_WEEK),
                                 helpers=(pine.DAY_OF_WEEK,)),
+                   plain=lambda a, unit, of: "the day of the week (0 is Monday)",
                    session_scoped=True),
         _primitive("minutes_into_session", {}, {}, prim.minutes_into_session,
                    PineLowering(pine.emit_primitive(pine.MINUTES_INTO_SESSION),
                                 helpers=(pine.MINUTES_INTO_SESSION,)),
+                   plain=lambda a, unit, of: (
+                       "the minutes since the session opened"),
                    session_scoped=True, driving_frame_intraday=True),
         # driving_frame_intraday, and that is a decision rather than an
         # accident of grouping. On daily bars rvol does not go NaN, it
@@ -435,10 +556,16 @@ def core_vocabulary() -> Vocabulary:
         _primitive("rvol", {"sessions": (5, 60)}, {"sessions": 20}, prim.rvol,
                    PineLowering(pine.emit_primitive(pine.RVOL, "sessions"),
                                 helpers=(pine.RVOL,)),
+                   plain=lambda a, unit, of: (
+                       "relative volume against the same time of day over "
+                       f"the last {plain_count(a['sessions'], 'session')}"),
                    session_scoped=True, driving_frame_intraday=True),
         _primitive("bars_since", {"cond": CONDITION_ARG}, {}, prim.bars_since,
                    PineLowering(pine.emit_bars_since,
-                                helpers=(pine.BARS_SINCE,))),
+                                helpers=(pine.BARS_SINCE,)),
+                   plain=lambda a, unit, of: (
+                       f"the {unit}s since \"{a.get('cond', 'its condition')}\" "
+                       "was last true")),
         # end_anchored, here and on order_block: the value is anchored to the
         # END of the frame handed in, one float off the tail rather than a
         # causal series. A whole-frame pass may not broadcast that across
@@ -455,12 +582,22 @@ def core_vocabulary() -> Vocabulary:
                    prim.fvg_nearest,
                    PineLowering(pine.emit_fvg_nearest,
                                 helpers=(pine.FVG_NEAREST,)),
+                   plain=lambda a, unit, of: (
+                       f"the {_pick(_EDGES, a['field'])} of the nearest "
+                       f"{a['state']} {_pick(_SIDES, a['direction'])} fair "
+                       f"value gap (at least {plain_number(a['min_size_atr'])}"
+                       f" ATR, last {plain_count(a['lookback'], unit)})"),
                    end_anchored=True),
         _primitive("leg_retrace", {"direction": ("long", "short"),
                                     "k": (1, 10)},
                    {"direction": "long", "k": 3}, prim.leg_retrace,
                    PineLowering(pine.emit_leg_retrace,
-                                helpers=(pine.LEG_RETRACE,))),
+                                helpers=(pine.LEG_RETRACE,)),
+                   plain=lambda a, unit, of: (
+                       "how far the close has retraced the latest "
+                       + _pick({"long": "up", "short": "down"}, a["direction"])
+                       + f" swing (0 to 1, {plain_count(a['k'], unit)} "
+                         "each side)")),
         _primitive("order_block", {"direction": ("long", "short"),
                                     "field": ("top", "bottom", "mid"),
                                     "body_atr": (0.5, 5.0),
@@ -469,6 +606,11 @@ def core_vocabulary() -> Vocabulary:
                     "lookback": 40}, prim.order_block,
                    PineLowering(pine.emit_order_block,
                                 helpers=(pine.ORDER_BLOCK,)),
+                   plain=lambda a, unit, of: (
+                       f"the {_pick(_EDGES, a['field'])} of the nearest "
+                       f"{_pick(_SIDES, a['direction'])} order block (body at "
+                       f"least {plain_number(a['body_atr'])} ATR, last "
+                       f"{plain_count(a['lookback'], unit)})"),
                    end_anchored=True),
     )
     return Vocabulary({term.name: term for term in indicators},
