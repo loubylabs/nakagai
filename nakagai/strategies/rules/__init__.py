@@ -6,6 +6,7 @@ from nakagai.strategies.rules.pine.model import (
     PineBundle, PineCompileError, PineExits, PineExpr, PineHelper, PineInput,
     PineLowering, PineProgram, PineRisk,
 )
+from nakagai.strategies.rules.plain import rule_sentence
 from nakagai.strategies.rules.spec import (
     DEFAULT_RISK, describe_spec, risk_text, validate_risk, validate_spec,
 )
@@ -20,7 +21,8 @@ __all__ = [
     "compile_pine", "describe_spec", "lower_pine", "PineBundle",
     "PineCompileError", "PineExits", "PineExpr", "PineHelper", "PineInput",
     "PineLowering",
-    "PineProgram", "PineRisk", "risk_text", "spec_hash", "Term",
+    "PineProgram", "PineRisk", "risk_text", "rule_sentence", "spec_hash",
+    "Term",
     "validate_risk", "validate_spec", "Vocabulary", "VocabularyFactory",
     "WindowSpec", "PRIOR_DAY", "core_vocabulary", "resolve_vocabulary",
 ]
