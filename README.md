@@ -325,8 +325,8 @@ context, so the same call at the same instant gives the same signals.
 
 ### Past fires
 
-`past_fires(spec, frames, symbol, *, benchmark, horizon, warmup)` reads a rule
-back over one symbol's history. It returns, per side, the bars the entry group
+`past_fires(spec, frames, symbol, *, benchmark, horizon, warmup,
+vocabulary=None, refused_terms=())` reads a rule back over one symbol's history. It returns, per side, the bars the entry group
 held (long first: a short fire is a bar where long does not hold), each fire's
 `horizon`-bar move minus the benchmark's, and the same move for every
 evaluated bar as a baseline. Short moves are negated. Each bar is decided once

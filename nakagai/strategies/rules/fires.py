@@ -122,10 +122,12 @@ def past_fires(spec: Mapping, frames: Mapping[tuple[str, str], pd.DataFrame],
     c = own["close"].to_numpy(dtype="float64")
     b = frames[(benchmark, tf)]["close"].reindex(own.index).to_numpy(dtype="float64")
     move = np.full(n, np.nan)
-    move[:n - horizon] = ((c[horizon:] / c[:-horizon] - 1)
-                          - (b[horizon:] / b[:-horizon] - 1))
     evaluated = np.arange(n) >= warmup
-    scored = evaluated & ~np.isnan(move)
+    # Non-finite moves drop, not only NaN ones: a zero close divides to inf.
+    with np.errstate(divide="ignore", invalid="ignore"):
+        move[:n - horizon] = ((c[horizon:] / c[:-horizon] - 1)
+                              - (b[horizon:] / b[:-horizon] - 1))
+    scored = evaluated & np.isfinite(move)
 
     held = {side: fe.group_series(spec[side], tf).to_numpy(dtype=bool)
             for side in ("long", "short") if spec.get(side)}

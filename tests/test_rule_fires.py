@@ -61,6 +61,20 @@ def test_a_missing_benchmark_bar_drops_the_move_but_not_the_fire():
     assert len(out.long.baseline_moves) == 60 - 5 - 2
 
 
+def test_a_zero_close_drops_the_move_but_not_the_fire():
+    close = 100.0 + np.arange(60)
+    close[10] = 0.0
+    spec = {"version": 2, "timeframe": "1d", "long": _volume_rule(0.0)}
+    out = past_fires(spec, _frames(close), "AAA", benchmark="SPY", horizon=5,
+                     warmup=0)
+    assert out.long.fire_bars == tuple(range(60))
+    # Row 10's move divides by zero and drops; row 5 ending at zero is a
+    # finite -100% and stays.
+    assert -1.0 in out.long.baseline_moves
+    assert all(np.isfinite(out.long.fire_moves + out.long.baseline_moves))
+    assert len(out.long.fire_moves) == len(out.long.baseline_moves) == 60 - 5 - 1
+
+
 def test_a_short_side_scores_the_negated_move_and_yields_to_long():
     volume = np.full(60, 1_000.0)
     volume[10], volume[20] = 2_000.0, 1_300.0
@@ -74,7 +88,6 @@ def test_a_short_side_scores_the_negated_move_and_yields_to_long():
                                horizon=5, warmup=0)
     assert out.long.fire_bars == (10,)
     assert out.short.fire_bars == (20,)
-    assert 10 not in out.short.fire_bars and 20 in out.short.fire_bars
     assert out.short.fire_moves == (-out_long_only.long.baseline_moves[20],)
     assert out.short.baseline_moves == tuple(
         -m for m in out_long_only.long.baseline_moves)
