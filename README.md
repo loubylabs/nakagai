@@ -323,6 +323,18 @@ vocabulary=None, facts=None)` and `DEFAULT_TIMEFRAMES` are exported from
 `nakagai.engine`. Only bars that closed at or before `now` are visible in the
 context, so the same call at the same instant gives the same signals.
 
+### Past fires
+
+`past_fires(spec, frames, symbol, *, benchmark, horizon, warmup)` reads a rule
+back over one symbol's history. It returns, per side, the bars the entry group
+held (long first: a short fire is a bar where long does not hold), each fire's
+`horizon`-bar move minus the benchmark's, and the same move for every
+evaluated bar as a baseline. Short moves are negated. Each bar is decided once
+on the spec's own frame, which is the bar a live scan acts on. A composite, a
+history shorter than `warmup + horizon + 2` bars, and a rule reading a fact or
+a term named in `refused_terms` raise `PastFiresRefused` with a `code`;
+`unhistoried_reads(spec, refused_terms)` lists those reads.
+
 ## What is NOT here
 
 This repo does not include the curated Playbook content (the hand-authored
@@ -331,6 +343,13 @@ the hosted platform: API, web UI, and the mandate and approvals judgment layer.
 The hosted product at nakag.ai is built on top of this core.
 
 ## Release notes
+
+### 0.16.0 (2026-10-18)
+
+- `past_fires(spec, frames, symbol, *, benchmark, horizon, warmup,
+  vocabulary=None, refused_terms=())` returns a rule's past fires on one
+  symbol and their moves against a benchmark beside a baseline of every bar
+  (see "Past fires"). `unhistoried_reads` and `PastFiresRefused` come with it.
 
 ### 0.15.0 (2026-10-17)
 

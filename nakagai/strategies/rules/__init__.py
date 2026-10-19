@@ -1,6 +1,9 @@
 from nakagai.strategies.rules.canon import (
     canonical_expr, canonical_spec, spec_hash,
 )
+from nakagai.strategies.rules.fires import (
+    PastFiresRefused, SideFires, SymbolFires, past_fires, unhistoried_reads,
+)
 from nakagai.strategies.rules.pine.compiler import compile_pine, lower_pine
 from nakagai.strategies.rules.pine.model import (
     PineBundle, PineCompileError, PineExits, PineExpr, PineHelper, PineInput,
@@ -20,7 +23,8 @@ __all__ = [
     "RuleStrategy", "DEFAULT_RISK", "canonical_expr", "canonical_spec",
     "compile_pine", "describe_spec", "lower_pine", "PineBundle",
     "PineCompileError", "PineExits", "PineExpr", "PineHelper", "PineInput",
-    "PineLowering",
+    "PineLowering", "PastFiresRefused", "SideFires", "SymbolFires",
+    "past_fires", "unhistoried_reads",
     "PineProgram", "PineRisk", "risk_text", "rule_sentence", "spec_hash",
     "Term",
     "validate_risk", "validate_spec", "Vocabulary", "VocabularyFactory",
