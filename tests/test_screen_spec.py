@@ -111,8 +111,8 @@ def test_group_text_renders_a_bare_group():
 
 from nakagai.screen.sectors import SECTOR_NAMES
 from nakagai.screen.spec import (
-    describe_screen, is_intraday, max_lookback, referenced_facts, referenced_timeframes,
-    screen_reference_pairs, universe_admits, universe_of, validate_screen_spec,
+    describe_screen, is_intraday, max_lookback, referenced_facts,
+    referenced_timeframes, screen_reference_pairs, universe_admits, universe_of, validate_screen_spec,
 )
 
 GOOD = {"version": 1, "tf": "1d", "conditions": {"all": [RSI_LT_30]}}
