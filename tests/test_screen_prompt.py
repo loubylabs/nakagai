@@ -85,7 +85,7 @@ def test_prompt_advertises_every_discovery_fact_from_the_closed_vocabulary():
 
 
 def test_prompt_states_each_new_fact_window():
-    prompt = render_screen_prompt()
+    flat = " ".join(render_screen_prompt().split())
     for sentence in (
         "price_to_ncav below 1 means the market values the company under its net current assets",
         "insider facts count open-market purchases (Form 4 code P) traded in the last 30 days",
@@ -93,7 +93,6 @@ def test_prompt_states_each_new_fact_window():
         "fund facts count the named 13F funds we track, from each fund's newest filed quarter",
         "days_to_earnings is whole days from today (US Eastern) to the next scheduled report; 0 is today",
     ):
-        flat = " ".join(prompt.split())
         assert flat.count(sentence) == 1, sentence
 
 

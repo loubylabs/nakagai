@@ -573,9 +573,8 @@ def test_universe_refuses(universe, error):
 def test_universe_readback():
     both = {**BASE, "universe": {"sectors": ["Technology"], "industries": ["3674"]}}
     text = describe_screen(both)
-    assert text.startswith(
-        "Screen on 1d bars, in Technology or SIC 3674, matching symbols where")
-    assert text.endswith("rsi(14) is below 30")
+    assert text == ("Screen on 1d bars, in Technology or SIC 3674, matching symbols"
+                    " where ALL of:\n  - rsi(14) is below 30")
     assert text.replace("in Technology or SIC 3674, ", "") == describe_screen(BASE)
     two = {**BASE, "universe": {"sectors": ["Technology", "Energy"]}}
     assert describe_screen(two).startswith(

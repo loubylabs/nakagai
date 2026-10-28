@@ -2,8 +2,9 @@
 
 A screen is one all/any/not condition group in RuleSpec v2's exact operand
 grammar, plus a base timeframe and an optional universe of sectors and SIC
-industries that narrows which symbols are read. No entries, exits, sides, or risk: a screen
-answers "does this condition hold for this symbol right now," nothing else.
+industries that narrows which symbols are read. No entries, exits, sides, or
+risk: a screen answers "does this condition hold for this symbol right now,"
+nothing else.
 Validation and the readback delegate to the rules grammar so the two IRs can
 never drift, and both take the caller's vocabulary so a screen is validated,
 described, and evaluated against exactly the terms its prompt advertised."""
@@ -106,7 +107,7 @@ def describe_screen(spec: dict, *,
     """Plain-English restatement of a validated screen: the trust step."""
     universe = spec.get("universe")
     scope = ""
-    if universe:
+    if universe is not None:
         parts = list(universe.get("sectors", ()))
         parts += [f"SIC {code}" for code in universe.get("industries", ())]
         scope = f"in {' or '.join(parts)}, "
