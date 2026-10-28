@@ -131,7 +131,9 @@ def universe_admits(universe: tuple[frozenset[str], frozenset[str]],
     if not sic:
         return False
     sectors, industries = universe
-    return sic in industries or sector_for_sic(sic) in sectors
+    # SEC stores some codes unpadded ("100"); industries are four digits.
+    code = sic.zfill(4) if sic.isascii() and sic.isdigit() else sic
+    return code in industries or sector_for_sic(sic) in sectors
 
 
 def referenced_timeframes(spec: dict) -> set[str]:

@@ -135,7 +135,11 @@ slice of the market. Sectors are sorted by SEC industry code into these 11
 names: {sector_names}. Industries are four-digit SEC SIC codes as strings, e.g.
 "3674" for semiconductors. A symbol is in when its sector or its code is
 listed. Use it only when the user names a sector or an industry, never as a
-condition, and omit a list rather than send it empty.
+condition, and omit a list rather than send it empty. SIC cannot separate
+internet and media platforms from Technology (Alphabet and Meta file under
+computer services), so when the user means internet, media or communication
+platforms, list both "Communication Services" and "Technology" and add a
+clarification saying so.
 
 # Indicators (name(arg=bounds or choices))
 {ind_lines}
@@ -163,6 +167,8 @@ Max expression depth {g.MAX_DEPTH}; max {g.MAX_CONDITIONS} conditions; max
   members disclose up to 45 days after the trade.
 - fund facts count the named 13F funds we track, from each fund's newest filed
   quarter; they are not all funds and a filing lags its quarter end.
+  fund_holders_added counts tracked funds with no position in their previous
+  quarter.
 - days_to_earnings is whole days from today (US Eastern) to the next scheduled
   report; 0 is today.
 - Vague thresholds ("oversold", "high volume"): pick the conventional value

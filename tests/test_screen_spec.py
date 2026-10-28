@@ -600,6 +600,13 @@ def test_universe_admits():
     assert universe_admits((frozenset({"Technology"}), frozenset()), "9995") is False
 
 
+def test_universe_admits_pads_unpadded_sic():
+    u = (frozenset(), frozenset({"0100"}))
+    assert universe_admits(u, "100") is True
+    assert universe_admits(u, "0100") is True
+    assert universe_admits(u, "abc") is False
+
+
 def test_empty_condition_group_stays_refused():
     # The platform's quick path depends on this refusal and supplies price > 0.
     assert validate_screen_spec({**BASE, "conditions": {"all": []}}) == [

@@ -96,6 +96,14 @@ def test_prompt_states_each_new_fact_window():
         assert flat.count(sentence) == 1, sentence
 
 
+def test_prompt_teaches_internet_platforms_span_two_sectors():
+    flat = " ".join(render_screen_prompt().split())
+    assert ('list both "Communication Services" and "Technology" '
+            "and add a clarification") in flat
+    assert ("fund_holders_added counts tracked funds with no position "
+            "in their previous quarter") in flat
+
+
 def test_prompt_teaches_the_universe():
     prompt = render_screen_prompt()
     assert "# Universe" in prompt
