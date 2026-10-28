@@ -461,3 +461,21 @@ def test_invalid_cache_subsets_keep_only_independent_lower_bounds(
     assert reply.cost_from_provider is True
     assert reply.rate_table_complete is False
     assert reply.spend_unknown is False
+
+
+# Production break caught (chrvsd/nakagai#1240): a reasoning model spent the
+# whole budget thinking and stopped on `length` with empty or half-written
+# content, which read as malformed JSON instead of a cut-off reply.
+@pytest.mark.parametrize(("finish", "expected"), [
+    ({"finish_reason": "length"}, True),
+    ({"finish_reason": "stop"}, False),
+    ({}, False),
+])
+def test_a_length_stop_marks_the_reply_truncated(finish, expected):
+    reply = model._reply(_Resp(200, {
+        "choices": [{"message": {"content": '{"spec": {"version": 1'},
+                     **finish}],
+        "usage": {"prompt_tokens": 11, "completion_tokens": 4000},
+    }))
+    assert reply.truncated is expected
+    assert reply.error == ""

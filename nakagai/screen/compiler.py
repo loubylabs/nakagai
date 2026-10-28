@@ -14,7 +14,9 @@ from nakagai.screen.spec import describe_screen, validate_screen_spec
 from nakagai.strategies.rules.vocabulary import Vocabulary, resolve_vocabulary
 
 MODEL = "z-ai/glm-5.3-flash"
-MAX_TOKENS = 4000
+# The strategy compiler's figure. The model reasons before it answers, and a
+# long ask spent all of 4000 thinking, leaving no room for the spec (#1240).
+MAX_TOKENS = 8000
 
 
 def compile_screen(description: str, client=None, model: str = MODEL,
@@ -65,6 +67,16 @@ def compile_screen(description: str, client=None, model: str = MODEL,
             result.error = reply.error
             return result
         raw = reply.text
+        if reply.truncated:
+            # A prefix, often empty, is not malformed JSON: asking the model to
+            # fix its JSON sends it to reason the same budget away again.
+            last_errors = ["reply was cut off"]
+            messages = messages + [
+                {"role": "assistant", "content": raw},
+                {"role": "user", "content": "Your reply was cut off before the JSON "
+                                            "object closed. Resend the full JSON "
+                                            "object, compact, with no prose."}]
+            continue
         try:
             doc = _parse(raw)
         except (ValueError, RecursionError):

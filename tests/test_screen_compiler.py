@@ -412,6 +412,54 @@ def test_compile_screen_keeps_earlier_usage_when_a_callable_raises():
     assert r.retries_taken == 1
 
 
+# Production break caught (chrvsd/nakagai#1240): a 27-condition ask made the
+# reasoning model stop on `length` with empty or half-written content three
+# times running, and the user got "reply was not a single JSON object".
+CUT_OFF = ('{"spec": {"version": 1, "tf": "1d", "conditions": {"all": [{"lhs": '
+           '{"src": "close"}, "op": ">", "rhs": 1}, {"lhs": {"fact": "market_cap"}'
+           ', "op": "<", "rhs": 500000000')
+CUT_OFF_ASK = ("Your reply was cut off before the JSON object closed. Resend the "
+               "full JSON object, compact, with no prose.")
+
+
+def _truncated(text):
+    return ModelReply(text, 10, 4000, 0, 0, 0, False, True, False, "",
+                      truncated=True)
+
+
+def test_a_cut_off_reply_retries_with_the_cut_off_ask():
+    client = _MeteredReplies([
+        _truncated(CUT_OFF),
+        ModelReply(json.dumps({"spec": GOOD_SPEC}), 10, 5, 0, 0, 0,
+                   False, True, False, ""),
+    ])
+    calls = []
+
+    def recording(*, system, messages, max_tokens):
+        calls.append(messages)
+        return client(system=system, messages=messages, max_tokens=max_tokens)
+
+    result = compile_screen("a long ask", client=recording)
+    assert result.spec == GOOD_SPEC
+    assert result.attempts == 2
+    assert calls[1][-2] == {"role": "assistant", "content": CUT_OFF}
+    assert calls[1][-1] == {"role": "user", "content": CUT_OFF_ASK}
+    assert result.usage["output_tokens"] == 4005
+
+
+def test_an_empty_cut_off_reply_is_still_a_cut_off_reply():
+    client = _MeteredReplies([_truncated("")] * 3)
+    result = compile_screen("a long ask", client=client)
+    assert result.spec is None
+    assert result.attempts == 3
+    assert result.not_expressible == (
+        "could not produce a valid spec; last errors: reply was cut off")
+
+
+def test_compile_screen_token_ceiling_leaves_room_to_reason():
+    assert MAX_TOKENS == 8000
+
+
 def test_compile_screen_sends_a_plain_string_system_and_the_token_ceiling():
     client = _FakeModel([json.dumps({"spec": GOOD_SPEC})])
     compile_screen("oversold", client=client)

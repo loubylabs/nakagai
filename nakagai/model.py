@@ -47,6 +47,9 @@ class ModelReply(NamedTuple):
     `rate_table_complete` is true only when its validated counters can price
     the complete response from a conservative rate table.
     `spend_unknown` is true when an attempted call may have an unobserved bill.
+    `truncated` is true when the provider stopped at `max_tokens`
+    (`finish_reason == "length"`): the text, possibly empty after a reasoning
+    model spent the budget thinking, is a prefix and not the whole answer.
     """
 
     text: str
@@ -59,6 +62,7 @@ class ModelReply(NamedTuple):
     rate_table_complete: bool
     spend_unknown: bool
     error: str
+    truncated: bool = False
 
 
 class Complete(Protocol):
@@ -235,4 +239,5 @@ def _reply(resp) -> ModelReply:
     if not isinstance(text, str):
         text = json.dumps(text)
     return ModelReply(text, *counts, cost_numerator, cost_from_provider,
-                      rate_table_complete, spend_unknown, "")
+                      rate_table_complete, spend_unknown, "",
+                      choice.get("finish_reason") == "length")
