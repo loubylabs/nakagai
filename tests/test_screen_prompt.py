@@ -27,6 +27,7 @@ EXPECTED_FACTS = (
     "fund_holders",
     "fund_holders_added",
     "days_to_earnings",
+    "news_new_stories",
 )
 
 
@@ -67,6 +68,7 @@ def test_screen_capabilities_publish_the_full_market_contract():
         "congress": ["congress_buyers_30d"],
         "funds": ["fund_holders", "fund_holders_added"],
         "earnings": ["days_to_earnings"],
+        "news": ["news_new_stories"],
     }
     assert capabilities["fact_labels"] == dict(FACT_LABELS)
     assert capabilities["technical_scope"] == "daily"
@@ -92,6 +94,9 @@ def test_prompt_states_each_new_fact_window():
         "congress_buyers_30d counts buy disclosures FILED in the last 30 days",
         "fund facts count the named 13F funds we track, from each fund's newest filed quarter",
         "days_to_earnings is whole days from today (US Eastern) to the next scheduled report; 0 is today",
+        "news_new_stories counts distinct stories about the company over the last 7 days "
+        "(US Eastern dates, today included) that were judged a new development; reprints "
+        "and recaps do not count, and a story not yet judged makes the value unavailable.",
     ):
         assert flat.count(sentence) == 1, sentence
 

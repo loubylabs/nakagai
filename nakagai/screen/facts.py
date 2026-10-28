@@ -23,6 +23,7 @@ DISCOVERY_FACTS: tuple[str, ...] = (
     "fund_holders",
     "fund_holders_added",
     "days_to_earnings",
+    "news_new_stories",
 )
 
 FACT_LABELS: Mapping[str, str] = MappingProxyType({
@@ -45,4 +46,5 @@ FACT_LABELS: Mapping[str, str] = MappingProxyType({
     "fund_holders": "tracked funds holding",
     "fund_holders_added": "tracked funds that opened a position",
     "days_to_earnings": "days to next earnings",
+    "news_new_stories": "new news stories, last 7 days",
 })

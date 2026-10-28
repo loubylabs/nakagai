@@ -111,7 +111,7 @@ def test_group_text_renders_a_bare_group():
 
 from nakagai.screen.sectors import SECTOR_NAMES
 from nakagai.screen.spec import (
-    describe_screen, is_intraday, max_lookback, referenced_timeframes,
+    describe_screen, is_intraday, max_lookback, referenced_facts, referenced_timeframes,
     screen_reference_pairs, universe_admits, universe_of, validate_screen_spec,
 )
 
@@ -137,6 +137,7 @@ DISCOVERY_FACT_NAMES = (
     "fund_holders",
     "fund_holders_added",
     "days_to_earnings",
+    "news_new_stories",
 )
 
 RELATIVE_SCOPE_SCREEN = {
@@ -427,6 +428,31 @@ def test_referenced_timeframes_collects_base_and_node_tfs():
     spec = {"version": 1, "tf": "1h", "conditions": {"all": [
         {"lhs": {"src": "close", "tf": "1d"}, "op": ">", "rhs": {"ind": "sma", "n": 50}}]}}
     assert referenced_timeframes(spec) == {"1h", "1d"}
+
+
+def test_referenced_facts_walks_nested_groups_and_both_sides():
+    spec = {"version": 1, "tf": "1d", "conditions": {"all": [
+        {"lhs": {"fact": "market_cap"}, "op": "<", "rhs": 300_000_000},
+        {"any": [
+            {"not": {"lhs": {"fact": "price"}, "op": ">", "rhs": 10}},
+            {"lhs": {"src": "close"}, "op": ">", "rhs": {"fact": "news_new_stories"}},
+        ]},
+    ]}}
+    assert referenced_facts(spec) == frozenset(
+        {"market_cap", "price", "news_new_stories"})
+
+
+def test_referenced_facts_finds_facts_inside_math_operands():
+    spec = {"version": 1, "conditions": {"all": [
+        {"lhs": {"math": "div", "a": {"fact": "market_cap"},
+                 "b": {"fact": "shares_outstanding"}},
+         "op": ">", "rhs": 1}]}}
+    assert referenced_facts(spec) == frozenset({"market_cap", "shares_outstanding"})
+
+
+def test_referenced_facts_is_empty_without_facts():
+    assert referenced_facts(GOOD) == frozenset()
+    assert referenced_facts({"version": 1}) == frozenset()
 
 
 def test_is_intraday():

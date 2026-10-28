@@ -344,6 +344,16 @@ The hosted product at nakag.ai is built on top of this core.
 
 ## Release notes
 
+### 0.18.0 (2026-10-28)
+
+- Screen fact `news_new_stories` (news): distinct stories about the company in
+  the last 7 days (US Eastern dates, today included) judged a new development.
+  Reprints and recaps do not count; a story not yet judged makes the value
+  unavailable.
+- `referenced_facts(spec)` returns the frozenset of fact names a ScreenSpec's
+  conditions read, on either side and at any depth, so a runner loads only
+  those.
+
 ### 0.17.0 (2026-10-27)
 
 - Seven screen facts: `price_to_ncav` (fundamentals); `insider_buyers_30d`,
