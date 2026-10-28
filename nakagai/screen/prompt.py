@@ -4,13 +4,14 @@ reply."""
 
 from nakagai.strategies.rules import spec as g
 from nakagai.screen.facts import DISCOVERY_FACTS, FACT_LABELS
+from nakagai.screen.sectors import SECTOR_NAMES
 from nakagai.strategies.rules.vocabulary import (
     Vocabulary, is_condition_rule, resolve_vocabulary)
 
 _BASE_UNIVERSE = "All eligible US common stocks"
 _FACT_GROUPS = {
     "fundamentals": (
-        "shares_outstanding", "market_cap",
+        "shares_outstanding", "market_cap", "price_to_ncav",
     ),
     "market_activity": (
         "price", "change_pct", "gap_pct", "session_volume",
@@ -21,6 +22,10 @@ _FACT_GROUPS = {
     "short_interest": (
         "short_pct_outstanding", "days_to_cover", "short_interest_change_pct",
     ),
+    "insiders": ("insider_buyers_30d", "insider_buy_usd_30d"),
+    "congress": ("congress_buyers_30d",),
+    "funds": ("fund_holders", "fund_holders_added"),
+    "earnings": ("days_to_earnings",),
 }
 _CAPABILITY_EXAMPLES = (
     "Market cap under $300 million with price under $10",
@@ -39,6 +44,11 @@ Description: "price above the 200 day average on at least double average volume"
 {"lhs": {"src": "volume"}, "op": ">", "rhs": {"op": "*", "args": [2, {"ind": "sma", "n": 20, "of": {"src": "volume"}}]}}
 ]}},
 "clarifications": ["read 'average volume' as its 20 bar simple average"]}
+
+Description: "oversold chip stocks"
+{"spec": {"version": 1, "tf": "1d", "universe": {"industries": ["3674"]},
+"conditions": {"all": [{"lhs": {"ind": "rsi", "n": 14}, "op": "<", "rhs": 30}]}},
+"clarifications": ["read 'chip stocks' as SIC 3674, semiconductors"]}
 
 Description: "Any low float bangers?"
 {"not_expressible": "Float is not supported."}\
@@ -83,6 +93,7 @@ def render_screen_prompt(vocabulary: Vocabulary | None = None) -> str:
     fact_lines = "\n".join(
         f"- {name}: {FACT_LABELS[name]}" for name in DISCOVERY_FACTS)
     window_lines = g.window_prompt_text(vocabulary)
+    sector_names = ", ".join(SECTOR_NAMES)
     return f"""You compile plain-English market screens into nakagai ScreenSpec v1
 JSON. A screen is a filter: it answers "which symbols match this condition
 right now." Reply with EXACTLY ONE JSON object and nothing else (no prose, no
@@ -91,7 +102,8 @@ code fences): either {{"spec": {{...}}, "clarifications": [...]}} or
 
 # Schema (version 1, required)
 A spec: {{"version": 1, "tf": one of {g.TIMEFRAMES} (the base bars the verdict
-is read on; default "1d"), "conditions": one condition group}}. Nothing else:
+is read on; default "1d"), "universe"?: {{...}} (see Universe),
+"conditions": one condition group}}. Nothing else:
 no name, no entries or sides, no exits, no stops or targets. If the user asks
 for those they are describing a strategy, not a screen; still compile the
 FILTER part and add a clarification that entries/exits belong to the strategy
@@ -117,6 +129,18 @@ SYMBOL is an uppercase market symbol matching [A-Z][A-Z0-9.-]{{0,9}}.
 # Current discovery facts
 {fact_lines}
 
+# Universe
+Optional: {{"sectors": [...], "industries": [...]}} narrows the screen to a
+slice of the market. Sectors are sorted by SEC industry code into these 11
+names: {sector_names}. Industries are four-digit SEC SIC codes as strings, e.g.
+"3674" for semiconductors. A symbol is in when its sector or its code is
+listed. Use it only when the user names a sector or an industry, never as a
+condition, and omit a list rather than send it empty. SIC cannot separate
+internet and media platforms from Technology (Alphabet and Meta file under
+computer services), so when the user means internet, media or communication
+platforms, list both "Communication Services" and "Technology" and add a
+clarification saying so.
+
 # Indicators (name(arg=bounds or choices))
 {ind_lines}
 
@@ -134,6 +158,19 @@ Max expression depth {g.MAX_DEPTH}; max {g.MAX_CONDITIONS} conditions; max
 
 # Rules of engagement
 - Prefer tf "1d" unless the user clearly means intraday.
+- price_to_ncav below 1 means the market values the company under its net
+  current assets (current assets less all liabilities); it is absent for
+  companies without a positive NCAV.
+- insider facts count open-market purchases (Form 4 code P) traded in the last
+  30 days; grants, option exercises and sales never count.
+- congress_buyers_30d counts buy disclosures FILED in the last 30 days;
+  members disclose up to 45 days after the trade.
+- fund facts count the named 13F funds we track, from each fund's newest filed
+  quarter; they are not all funds and a filing lags its quarter end.
+  fund_holders_added counts tracked funds with no position in their previous
+  quarter.
+- days_to_earnings is whole days from today (US Eastern) to the next scheduled
+  report; 0 is today.
 - Vague thresholds ("oversold", "high volume"): pick the conventional value
   (rsi 30/70; volume 2x its 20 bar average) and say so in "clarifications".
 - If the request needs anything the grammar cannot express, return

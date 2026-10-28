@@ -344,6 +344,22 @@ The hosted product at nakag.ai is built on top of this core.
 
 ## Release notes
 
+### 0.17.0 (2026-10-27)
+
+- Seven screen facts: `price_to_ncav` (fundamentals); `insider_buyers_30d`,
+  `insider_buy_usd_30d` (insiders); `congress_buyers_30d` (congress);
+  `fund_holders`, `fund_holders_added` (funds); `days_to_earnings` (earnings).
+- ScreenSpec v1 takes an optional `universe` of `sectors` (1 to 11 names) and
+  `industries` (1 to 20 four-digit SIC codes). A symbol is in it when its
+  sector or its SIC is listed (unpadded codes are zero-filled to four digits);
+  one with no SIC never is. The readback names it, and `universe_of` and
+  `universe_admits` read it. No ScreenSpec version bump.
+- `nakagai.screen.sectors`: `SECTOR_NAMES` and `sector_for_sic`, SEC SIC
+  codes mapped to eleven sectors.
+- A screen compile reply cut off at the token limit is retried rather than
+  read as bad JSON. `MAX_TOKENS` is 8000, and `ModelReply.truncated` reports
+  a `length` stop.
+
 ### 0.16.0 (2026-10-18)
 
 - `past_fires(spec, frames, symbol, *, benchmark, horizon, warmup,

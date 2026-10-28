@@ -109,9 +109,10 @@ def test_group_text_renders_a_bare_group():
     assert "ALL of:" in text and "rsi(14) is below 30" in text
 
 
+from nakagai.screen.sectors import SECTOR_NAMES
 from nakagai.screen.spec import (
     describe_screen, is_intraday, max_lookback, referenced_timeframes,
-    screen_reference_pairs, validate_screen_spec,
+    screen_reference_pairs, universe_admits, universe_of, validate_screen_spec,
 )
 
 GOOD = {"version": 1, "tf": "1d", "conditions": {"all": [RSI_LT_30]}}
@@ -129,6 +130,13 @@ DISCOVERY_FACT_NAMES = (
     "short_pct_outstanding",
     "days_to_cover",
     "short_interest_change_pct",
+    "price_to_ncav",
+    "insider_buyers_30d",
+    "insider_buy_usd_30d",
+    "congress_buyers_30d",
+    "fund_holders",
+    "fund_holders_added",
+    "days_to_earnings",
 )
 
 RELATIVE_SCOPE_SCREEN = {
@@ -513,3 +521,93 @@ def test_a_screen_over_the_expression_node_budget_is_refused():
     errs = validate_screen_spec(spec)
     assert len(errs) == 1 and f"more than {MAX_EXPR_NODES} expression nodes" \
         in errs[0], errs
+
+
+# --- universe ---------------------------------------------------------------
+
+RSI = {"all": [RSI_LT_30]}
+BASE = {"version": 1, "tf": "1d", "conditions": RSI}
+ALL_SECTORS = list(SECTOR_NAMES)
+TWENTY_CODES = [f"{1000 + i}" for i in range(20)]
+
+
+@pytest.mark.parametrize("universe", [
+    {"sectors": ["Technology"]},
+    {"industries": ["3674"]},
+    {"sectors": ["Technology"], "industries": ["3674"]},
+    {"sectors": ALL_SECTORS},
+    {"industries": TWENTY_CODES},
+])
+def test_universe_accepts(universe):
+    assert validate_screen_spec({**BASE, "universe": universe}) == []
+
+
+@pytest.mark.parametrize("universe,error", [
+    ([], "universe must be an object with sectors and/or industries"),
+    ({}, "universe needs sectors or industries"),
+    ({"sectors": ["Technology"], "tickers": ["AAPL"]},
+     "universe: unknown keys ['tickers']"),
+    ({"sectors": []}, "universe.sectors must be a list of 1 to 11 sector names"),
+    ({"sectors": "Technology"},
+     "universe.sectors must be a list of 1 to 11 sector names"),
+    ({"sectors": ["Tech"]}, "universe.sectors: unknown sector 'Tech'"),
+    ({"sectors": ["Technology", "Technology"]},
+     "universe.sectors: duplicate 'Technology'"),
+    ({"industries": []},
+     "universe.industries must be a list of 1 to 20 SIC codes"),
+    ({"industries": [f"{1000 + i}" for i in range(21)]},
+     "universe.industries must be a list of 1 to 20 SIC codes"),
+    ({"industries": [3674]},
+     "universe.industries: 3674 is not a four-digit SIC code string"),
+    ({"industries": ["367"]},
+     "universe.industries: '367' is not a four-digit SIC code string"),
+    ({"industries": ["٣٦٧٤"]},
+     "universe.industries: '٣٦٧٤' is not a four-digit SIC code string"),
+    ({"industries": ["3674", "3674"]},
+     "universe.industries: duplicate '3674'"),
+])
+def test_universe_refuses(universe, error):
+    assert validate_screen_spec({**BASE, "universe": universe}) == [error]
+
+
+def test_universe_readback():
+    both = {**BASE, "universe": {"sectors": ["Technology"], "industries": ["3674"]}}
+    text = describe_screen(both)
+    assert text == ("Screen on 1d bars, in Technology or SIC 3674, matching symbols"
+                    " where ALL of:\n  - rsi(14) is below 30")
+    assert text.replace("in Technology or SIC 3674, ", "") == describe_screen(BASE)
+    two = {**BASE, "universe": {"sectors": ["Technology", "Energy"]}}
+    assert describe_screen(two).startswith(
+        "Screen on 1d bars, in Technology or Energy, matching")
+
+
+def test_universe_of():
+    assert universe_of(BASE) is None
+    assert universe_of({**BASE, "universe": {"sectors": ["Technology"]}}) == (
+        frozenset({"Technology"}), frozenset())
+    assert universe_of({**BASE, "universe": {
+        "sectors": ["Energy"], "industries": ["3674"]}}) == (
+        frozenset({"Energy"}), frozenset({"3674"}))
+
+
+def test_universe_admits():
+    u = (frozenset({"Energy"}), frozenset({"3674"}))
+    assert universe_admits(u, "3674") is True  # SIC listed, its sector is not
+    assert universe_admits(u, "1311") is True  # Energy
+    assert universe_admits(u, "7372") is False
+    assert universe_admits(u, None) is False
+    assert universe_admits(u, "") is False
+    assert universe_admits((frozenset({"Technology"}), frozenset()), "9995") is False
+
+
+def test_universe_admits_pads_unpadded_sic():
+    u = (frozenset(), frozenset({"0100"}))
+    assert universe_admits(u, "100") is True
+    assert universe_admits(u, "0100") is True
+    assert universe_admits(u, "abc") is False
+
+
+def test_empty_condition_group_stays_refused():
+    # The platform's quick path depends on this refusal and supplies price > 0.
+    assert validate_screen_spec({**BASE, "conditions": {"all": []}}) == [
+        "conditions.all: must be a non-empty list"]

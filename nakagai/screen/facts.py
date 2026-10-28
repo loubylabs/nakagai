@@ -16,6 +16,13 @@ DISCOVERY_FACTS: tuple[str, ...] = (
     "short_pct_outstanding",
     "days_to_cover",
     "short_interest_change_pct",
+    "price_to_ncav",
+    "insider_buyers_30d",
+    "insider_buy_usd_30d",
+    "congress_buyers_30d",
+    "fund_holders",
+    "fund_holders_added",
+    "days_to_earnings",
 )
 
 FACT_LABELS: Mapping[str, str] = MappingProxyType({
@@ -31,4 +38,11 @@ FACT_LABELS: Mapping[str, str] = MappingProxyType({
     "short_pct_outstanding": "short interest, % of shares outstanding",
     "days_to_cover": "days to cover",
     "short_interest_change_pct": "short interest change percent",
+    "price_to_ncav": "price to NCAV",
+    "insider_buyers_30d": "insiders buying, 30 days",
+    "insider_buy_usd_30d": "insider buying, USD, 30 days",
+    "congress_buyers_30d": "members of Congress buying, 30 days",
+    "fund_holders": "tracked funds holding",
+    "fund_holders_added": "tracked funds that opened a position",
+    "days_to_earnings": "days to next earnings",
 })
