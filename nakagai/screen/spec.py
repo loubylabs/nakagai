@@ -11,6 +11,7 @@ described, and evaluated against exactly the terms its prompt advertised."""
 
 import re
 
+from nakagai.screen.planner import walk_values
 from nakagai.screen.sectors import SECTOR_NAMES, sector_for_sic
 from nakagai.strategies.rules.spec import (
     TIMEFRAMES, group_text, validate_condition_group,
@@ -153,6 +154,14 @@ def referenced_timeframes(spec: dict) -> set[str]:
 
     walk(spec.get("conditions", {}))
     return tfs
+
+
+def referenced_facts(spec: dict) -> frozenset[str]:
+    """Every discovery fact name the condition tree reads, on either side of
+    any comparison at any depth, so a caller can skip loading the rest."""
+    return frozenset(
+        node["fact"] for node in walk_values(spec.get("conditions", {}))
+        if isinstance(node, dict) and isinstance(node.get("fact"), str))
 
 
 def screen_reference_pairs(spec: dict) -> tuple[ReferencePair, ...]:

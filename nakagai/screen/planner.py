@@ -29,7 +29,7 @@ class _GroupPlan:
     missing_facts: frozenset[str]
 
 
-def _walk_values(root):
+def walk_values(root):
     stack = [root]
     while stack:
         value = stack.pop()
@@ -42,14 +42,14 @@ def _walk_values(root):
 
 def uses_facts(group) -> bool:
     return any(isinstance(node, dict) and "fact" in node
-               for node in _walk_values(group))
+               for node in walk_values(group))
 
 
 def uses_technical(group) -> bool:
     return any(
         isinstance(node, dict) and any(
             kind in node for kind in ("src", "ind", "prim"))
-        for node in _walk_values(group)
+        for node in walk_values(group)
     )
 
 

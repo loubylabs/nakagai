@@ -26,6 +26,7 @@ _FACT_GROUPS = {
     "congress": ("congress_buyers_30d",),
     "funds": ("fund_holders", "fund_holders_added"),
     "earnings": ("days_to_earnings",),
+    "news": ("news_new_stories",),
 }
 _CAPABILITY_EXAMPLES = (
     "Market cap under $300 million with price under $10",
@@ -171,6 +172,10 @@ Max expression depth {g.MAX_DEPTH}; max {g.MAX_CONDITIONS} conditions; max
   quarter.
 - days_to_earnings is whole days from today (US Eastern) to the next scheduled
   report; 0 is today.
+- news_new_stories counts distinct stories about the company over the last 7
+  days (US Eastern dates, today included) that were judged a new development;
+  reprints and recaps do not count, and a story not yet judged makes the value
+  unavailable.
 - Vague thresholds ("oversold", "high volume"): pick the conventional value
   (rsi 30/70; volume 2x its 20 bar average) and say so in "clarifications".
 - If the request needs anything the grammar cannot express, return
