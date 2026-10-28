@@ -10,7 +10,7 @@ from nakagai.strategies.rules.vocabulary import (
 _BASE_UNIVERSE = "All eligible US common stocks"
 _FACT_GROUPS = {
     "fundamentals": (
-        "shares_outstanding", "market_cap",
+        "shares_outstanding", "market_cap", "price_to_ncav",
     ),
     "market_activity": (
         "price", "change_pct", "gap_pct", "session_volume",
@@ -21,6 +21,10 @@ _FACT_GROUPS = {
     "short_interest": (
         "short_pct_outstanding", "days_to_cover", "short_interest_change_pct",
     ),
+    "insiders": ("insider_buyers_30d", "insider_buy_usd_30d"),
+    "congress": ("congress_buyers_30d",),
+    "funds": ("fund_holders", "fund_holders_added"),
+    "earnings": ("days_to_earnings",),
 }
 _CAPABILITY_EXAMPLES = (
     "Market cap under $300 million with price under $10",
@@ -134,6 +138,17 @@ Max expression depth {g.MAX_DEPTH}; max {g.MAX_CONDITIONS} conditions; max
 
 # Rules of engagement
 - Prefer tf "1d" unless the user clearly means intraday.
+- price_to_ncav below 1 means the market values the company under its net
+  current assets (current assets less all liabilities); it is absent for
+  companies without a positive NCAV.
+- insider facts count open-market purchases (Form 4 code P) traded in the last
+  30 days; grants, option exercises and sales never count.
+- congress_buyers_30d counts buy disclosures FILED in the last 30 days;
+  members disclose up to 45 days after the trade.
+- fund facts count the named 13F funds we track, from each fund's newest filed
+  quarter; they are not all funds and a filing lags its quarter end.
+- days_to_earnings is whole days from today (US Eastern) to the next scheduled
+  report; 0 is today.
 - Vague thresholds ("oversold", "high volume"): pick the conventional value
   (rsi 30/70; volume 2x its 20 bar average) and say so in "clarifications".
 - If the request needs anything the grammar cannot express, return

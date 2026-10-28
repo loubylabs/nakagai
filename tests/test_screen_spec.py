@@ -129,6 +129,13 @@ DISCOVERY_FACT_NAMES = (
     "short_pct_outstanding",
     "days_to_cover",
     "short_interest_change_pct",
+    "price_to_ncav",
+    "insider_buyers_30d",
+    "insider_buy_usd_30d",
+    "congress_buyers_30d",
+    "fund_holders",
+    "fund_holders_added",
+    "days_to_earnings",
 )
 
 RELATIVE_SCOPE_SCREEN = {

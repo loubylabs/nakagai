@@ -16,6 +16,13 @@ EXPECTED_FACTS = (
     "short_pct_outstanding",
     "days_to_cover",
     "short_interest_change_pct",
+    "price_to_ncav",
+    "insider_buyers_30d",
+    "insider_buy_usd_30d",
+    "congress_buyers_30d",
+    "fund_holders",
+    "fund_holders_added",
+    "days_to_earnings",
 )
 
 
@@ -39,7 +46,7 @@ def test_screen_capabilities_publish_the_full_market_contract():
     assert capabilities["base_universe"] == "All eligible US common stocks"
     assert capabilities["fact_groups"] == {
         "fundamentals": [
-            "shares_outstanding", "market_cap",
+            "shares_outstanding", "market_cap", "price_to_ncav",
         ],
         "market_activity": [
             "price", "change_pct", "gap_pct", "session_volume",
@@ -52,6 +59,10 @@ def test_screen_capabilities_publish_the_full_market_contract():
             "short_pct_outstanding", "days_to_cover",
             "short_interest_change_pct",
         ],
+        "insiders": ["insider_buyers_30d", "insider_buy_usd_30d"],
+        "congress": ["congress_buyers_30d"],
+        "funds": ["fund_holders", "fund_holders_added"],
+        "earnings": ["days_to_earnings"],
     }
     assert capabilities["fact_labels"] == dict(FACT_LABELS)
     assert capabilities["technical_scope"] == "daily"
@@ -67,6 +78,19 @@ def test_prompt_advertises_every_discovery_fact_from_the_closed_vocabulary():
     for fact in DISCOVERY_FACTS:
         assert f"- {fact}: {FACT_LABELS[fact]}" in prompt
     assert prompt.count("# Current discovery facts") == 1
+
+
+def test_prompt_states_each_new_fact_window():
+    prompt = render_screen_prompt()
+    for sentence in (
+        "price_to_ncav below 1 means the market values the company under its net current assets",
+        "insider facts count open-market purchases (Form 4 code P) traded in the last 30 days",
+        "congress_buyers_30d counts buy disclosures FILED in the last 30 days",
+        "fund facts count the named 13F funds we track, from each fund's newest filed quarter",
+        "days_to_earnings is whole days from today (US Eastern) to the next scheduled report; 0 is today",
+    ):
+        flat = " ".join(prompt.split())
+        assert flat.count(sentence) == 1, sentence
 
 
 def test_prompt_refuses_float_as_not_supported():
