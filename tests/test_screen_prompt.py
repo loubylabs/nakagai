@@ -1,7 +1,11 @@
 """The ScreenSpec prompt and public capabilities share one projection."""
 
+import json
+
 from nakagai.screen.facts import DISCOVERY_FACTS, FACT_LABELS
 from nakagai.screen.prompt import render_screen_prompt, screen_capabilities
+from nakagai.screen.sectors import SECTOR_NAMES
+from nakagai.screen.spec import validate_screen_spec
 
 EXPECTED_FACTS = (
     "shares_outstanding",
@@ -91,6 +95,20 @@ def test_prompt_states_each_new_fact_window():
     ):
         flat = " ".join(prompt.split())
         assert flat.count(sentence) == 1, sentence
+
+
+def test_prompt_teaches_the_universe():
+    prompt = render_screen_prompt()
+    assert "# Universe" in prompt
+    for name in SECTOR_NAMES:
+        assert name in prompt
+    assert "four-digit SEC SIC codes" in " ".join(prompt.split())
+    marker = 'Description: "oversold chip stocks"\n'
+    assert marker in prompt
+    reply = json.loads(prompt.split(marker)[1].split("\n\n")[0])
+    spec = reply["spec"]
+    assert spec["universe"] == {"industries": ["3674"]}
+    assert validate_screen_spec(spec) == []
 
 
 def test_prompt_refuses_float_as_not_supported():

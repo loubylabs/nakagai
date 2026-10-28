@@ -1,12 +1,16 @@
 """ScreenSpec v1: the conditions-only screening IR.
 
 A screen is one all/any/not condition group in RuleSpec v2's exact operand
-grammar, plus a base timeframe. No entries, exits, sides, or risk: a screen
+grammar, plus a base timeframe and an optional universe of sectors and SIC
+industries that narrows which symbols are read. No entries, exits, sides, or risk: a screen
 answers "does this condition hold for this symbol right now," nothing else.
 Validation and the readback delegate to the rules grammar so the two IRs can
 never drift, and both take the caller's vocabulary so a screen is validated,
 described, and evaluated against exactly the terms its prompt advertised."""
 
+import re
+
+from nakagai.screen.sectors import SECTOR_NAMES, sector_for_sic
 from nakagai.strategies.rules.spec import (
     TIMEFRAMES, group_text, validate_condition_group,
 )
@@ -17,9 +21,53 @@ from nakagai.strategies.rules.vocabulary import Vocabulary, resolve_vocabulary
 from nakagai.screen.facts import DISCOVERY_FACTS
 
 VERSION = 1
-_KEYS = {"version", "tf", "conditions"}
+_KEYS = {"version", "tf", "universe", "conditions"}
 _LOOKBACK_ARGS = ("n", "slow", "senkou_n", "kijun_n")
 _MIN_LOOKBACK = 20
+MAX_SECTORS = len(SECTOR_NAMES)
+MAX_INDUSTRIES = 20
+_UNIVERSE_KEYS = {"sectors", "industries"}
+
+
+def _universe_errors(universe) -> list[str]:
+    if not isinstance(universe, dict):
+        return ["universe must be an object with sectors and/or industries"]
+    if not universe:
+        return ["universe needs sectors or industries"]
+    errs: list[str] = []
+    unknown = set(universe) - _UNIVERSE_KEYS
+    if unknown:
+        errs.append(f"universe: unknown keys {sorted(unknown)}")
+    if "sectors" in universe:
+        sectors = universe["sectors"]
+        if (not isinstance(sectors, list)
+                or not 1 <= len(sectors) <= MAX_SECTORS):
+            errs.append(f"universe.sectors must be a list of 1 to "
+                        f"{MAX_SECTORS} sector names")
+        else:
+            seen: list = []
+            for name in sectors:
+                if name not in SECTOR_NAMES:
+                    errs.append(f"universe.sectors: unknown sector {name!r}")
+                elif name in seen:
+                    errs.append(f"universe.sectors: duplicate {name!r}")
+                seen.append(name)
+    if "industries" in universe:
+        codes = universe["industries"]
+        if (not isinstance(codes, list)
+                or not 1 <= len(codes) <= MAX_INDUSTRIES):
+            errs.append(f"universe.industries must be a list of 1 to "
+                        f"{MAX_INDUSTRIES} SIC codes")
+        else:
+            seen = []
+            for code in codes:
+                if not isinstance(code, str) or not re.fullmatch(r"[0-9]{4}", code):
+                    errs.append(f"universe.industries: {code!r} is not a "
+                                f"four-digit SIC code string")
+                elif code in seen:
+                    errs.append(f"universe.industries: duplicate {code!r}")
+                seen.append(code)
+    return errs
 
 
 def validate_screen_spec(spec, *,
@@ -45,6 +93,8 @@ def validate_screen_spec(spec, *,
                                              tf if tf in TIMEFRAMES else "1h",
                                              vocabulary=vocabulary,
                                              allowed_facts=DISCOVERY_FACTS))
+    if "universe" in spec:
+        errs.extend(_universe_errors(spec["universe"]))
     unknown = set(spec) - _KEYS
     if unknown:
         errs.append(f"unknown keys {sorted(unknown)}")
@@ -54,9 +104,33 @@ def validate_screen_spec(spec, *,
 def describe_screen(spec: dict, *,
                     vocabulary: Vocabulary | None = None) -> str:
     """Plain-English restatement of a validated screen: the trust step."""
-    return (f"Screen on {spec.get('tf', '1d')} bars, matching symbols where "
+    universe = spec.get("universe")
+    scope = ""
+    if universe:
+        parts = list(universe.get("sectors", ()))
+        parts += [f"SIC {code}" for code in universe.get("industries", ())]
+        scope = f"in {' or '.join(parts)}, "
+    return (f"Screen on {spec.get('tf', '1d')} bars, {scope}matching symbols where "
             + group_text(spec["conditions"], resolve_vocabulary(vocabulary),
                          allowed_facts=DISCOVERY_FACTS))
+
+
+def universe_of(spec: dict) -> tuple[frozenset[str], frozenset[str]] | None:
+    """The (sectors, industries) a validated spec narrows to, or None."""
+    universe = spec.get("universe")
+    if universe is None:
+        return None
+    return (frozenset(universe.get("sectors", ())),
+            frozenset(universe.get("industries", ())))
+
+
+def universe_admits(universe: tuple[frozenset[str], frozenset[str]],
+                    sic: str | None) -> bool:
+    """Whether a symbol with this SIC code is inside the universe."""
+    if not sic:
+        return False
+    sectors, industries = universe
+    return sic in industries or sector_for_sic(sic) in sectors
 
 
 def referenced_timeframes(spec: dict) -> set[str]:
