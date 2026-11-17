@@ -344,6 +344,20 @@ The hosted product at nakag.ai is built on top of this core.
 
 ## Release notes
 
+### 0.19.0 (2026-11-17)
+
+- The bar cache repairs itself after a split. Bars are split-adjusted at fetch
+  time, so a split after the backfill used to leave the cached history on the
+  old price basis and the new bars on the new one. `BarCache.upsert` now
+  compares the open of every overlap bar with the cached copy; a ratio outside
+  `BASIS_BAND` (1.15) means the basis moved, and the incoming frame replaces the
+  file, one warning is logged, and `(symbol, timeframe)` joins
+  `BarCache.rebased`. `fetch_incremental`, `fetch_incremental_multi` and
+  `derive_incremental` then refill the whole range in the same call and discard
+  the pair; a caller with its own provider loop drains `rebased` itself. Zero,
+  missing or non-positive opens never trigger, and a stock dividend under 15%
+  is inside the band and not detected.
+
 ### 0.18.0 (2026-10-28)
 
 - Screen fact `news_new_stories` (news): distinct stories about the company in
