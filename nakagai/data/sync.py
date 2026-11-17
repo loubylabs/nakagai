@@ -5,9 +5,14 @@ account, shared across every machine using the key). A full three-year 15m
 backfill is dozens of paginated requests per symbol; resuming from the last
 cached bar makes a routine sync cost about one request per symbol/timeframe.
 
-Caveat: bars are split-adjusted at fetch time, so a split after the backfill
-leaves the older cached bars on the pre-split basis. `nakagai sync --full`
-(or deleting the parquet) forces a clean re-fetch.
+Bars are split-adjusted at fetch time, so a split after the backfill moves the
+vendor's whole history onto a new basis. Every resume re-fetches the last
+cached bar, and BarCache.upsert compares that overlap bar's open with the
+cached copy: a move outside BASIS_BAND replaces the file with the incoming
+frame and lists the pair in `cache.rebased`. The writers here then refill the
+whole range in the same call and discard the pair, so they end with one
+consistent file on the new basis. A refill that raises leaves the pair in
+`cache.rebased` and propagates like any provider error.
 
 Not every timeframe is fetched. derive_incremental materializes the derived
 ones (nakagai/data/resample.py) from bars the cache already holds, for no
@@ -34,13 +39,27 @@ def fetch_incremental(cache: BarCache, provider: DataProvider, symbol: str,
     from the last cached bar even when it predates the requested start, so a
     stale cache never ends up with an unfillable hole. A requested start
     earlier than the cache's first bar forces a full-range fetch, so widening
-    the configured start still backfills the missing history."""
+    the configured start still backfills the missing history.
+
+    When the upsert finds the price basis moved (see the module docstring),
+    the whole range, from the earlier of `start` and the old first cached bar,
+    is re-fetched in the same call, unless the first fetch already covered it.
+    Returns the rows upserted by the last write."""
+    span = cache.coverage(symbol, timeframe)
     fetch_start = start
-    if not full:
-        span = cache.coverage(symbol, timeframe)
-        if span is not None and start >= span[0]:
-            fetch_start = span[1]
-    return cache.upsert(symbol, timeframe, provider.fetch_bars(symbol, timeframe, fetch_start, end))
+    if not full and span is not None and start >= span[0]:
+        fetch_start = span[1]
+    written = cache.upsert(
+        symbol, timeframe, provider.fetch_bars(symbol, timeframe, fetch_start, end))
+    pair = (symbol, timeframe)
+    if pair in cache.rebased:
+        refill_start = start if span is None else min(start, span[0])
+        if refill_start < fetch_start:
+            written = cache.upsert(
+                symbol, timeframe,
+                provider.fetch_bars(symbol, timeframe, refill_start, end))
+        cache.rebased.discard(pair)
+    return written
 
 
 def _resume_from(timeframe: str, label: pd.Timestamp) -> pd.Timestamp:
@@ -88,13 +107,18 @@ def derive_incremental(cache: BarCache, symbol: str, timeframe: str = "4h",
     working on; a caller with no clock passes nothing, and a week then waits
     for its Friday bar or a later week's bar.
 
-    Returns the number of rows upserted.
+    A source re-adjusted onto a new price basis shows up as a re-derived
+    boundary bucket whose open moved; upsert then replaces the derived file
+    with the trailing window, and the whole source is re-derived in the same
+    call.
+
+    Returns the number of rows upserted by the last write.
     """
     source_tf = DERIVED.get(timeframe)
     if source_tf is None:
         raise ValueError(f"{timeframe!r} is not a derived timeframe "
                          f"(derived: {sorted(DERIVED)})")
-    src = cache.load(symbol, source_tf)
+    whole = src = cache.load(symbol, source_tf)
     if not len(src.index):
         return 0
     if not full:
@@ -104,7 +128,14 @@ def derive_incremental(cache: BarCache, symbol: str, timeframe: str = "4h",
     derived = resample_bars(src, timeframe, now=now)
     if derived.empty:
         return 0
-    return cache.upsert(symbol, timeframe, derived)
+    written = cache.upsert(symbol, timeframe, derived)
+    pair = (symbol, timeframe)
+    if pair in cache.rebased:
+        if len(src.index) < len(whole.index):
+            written = cache.upsert(
+                symbol, timeframe, resample_bars(whole, timeframe, now=now))
+        cache.rebased.discard(pair)
+    return written
 
 
 def fetch_incremental_multi(cache: BarCache, provider, symbols: list[str],
@@ -137,17 +168,23 @@ def fetch_incremental_multi(cache: BarCache, provider, symbols: list[str],
     `provider` must expose fetch_bars_multi (AlpacaProvider does); this is
     deliberately not typed as DataProvider, whose contract is the single-symbol
     fetch_bars alone.
+
+    A symbol whose upsert found the price basis moved (see the module
+    docstring) is refilled after its chunk commits: the chunk's rebased
+    symbols share one batched whole-range request from the earliest of
+    `start` and their old first cached bars, then leave `cache.rebased`.
     """
     wanted = list(dict.fromkeys(s.upper() for s in symbols if s))
     if not wanted:
         return {}
+    spans = {sym: cache.coverage(sym, timeframe) for sym in wanted}
     if full:
         groups = [(start, wanted)]
     else:
         warm: dict[str, pd.Timestamp] = {}
         cold: list[str] = []
         for sym in wanted:
-            span = cache.coverage(sym, timeframe)
+            span = spans[sym]
             if span is not None and start >= span[0]:
                 warm[sym] = span[1]
             else:
@@ -165,7 +202,32 @@ def fetch_incremental_multi(cache: BarCache, provider, symbols: list[str],
             result = provider.fetch_bars_multi(
                 chunk, timeframe, group_start, end)
             _commit_batch(cache, timeframe, chunk, result, written)
+            _refill_rebased(cache, provider, timeframe, chunk, spans,
+                            start, group_start, end, written)
     return written
+
+
+def _refill_rebased(cache: BarCache, provider, timeframe: str,
+                    chunk: list[str], spans: dict, start: pd.Timestamp,
+                    fetched_from: pd.Timestamp, end: pd.Timestamp,
+                    written: dict[str, int]) -> None:
+    """Refill the chunk's rebased symbols over their whole range.
+
+    A symbol whose whole range the chunk's own request already covered needs
+    no second request. A refill that raises leaves its symbols in
+    cache.rebased."""
+    rebased = [sym for sym in chunk if (sym, timeframe) in cache.rebased]
+    if not rebased:
+        return
+    starts = {sym: start if spans[sym] is None else min(start, spans[sym][0])
+              for sym in rebased}
+    short = [sym for sym in rebased if starts[sym] < fetched_from]
+    if short:
+        result = provider.fetch_bars_multi(
+            short, timeframe, min(starts[sym] for sym in short), end)
+        _commit_batch(cache, timeframe, short, result, written)
+    for sym in rebased:
+        cache.rebased.discard((sym, timeframe))
 
 
 def _commit_batch(cache: BarCache, timeframe: str, requested: list[str],

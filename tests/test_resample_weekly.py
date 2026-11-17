@@ -169,13 +169,35 @@ def test_deriving_weeks_in_steps_matches_deriving_in_one_pass(tmp_path):
                                   one_pass.load("SPY", "1w"))
 
 
+def test_derive_incremental_re_derives_whole_after_its_source_split(tmp_path):
+    """The source was refilled on a new basis by another process. The trailing
+    re-derive disagrees with the cached week, so the weeks are rebuilt from the
+    whole source in the same call."""
+    days = _weekdays("2026-06-01", "2026-06-19")
+    before = BarCache(tmp_path)
+    before.upsert("SPY", "1d", _daily(days))
+    derive_incremental(before, "SPY", "1w")
+    assert len(before.load("SPY", "1w")) == 3
+
+    halved = _daily(days) / 2
+    BarCache(tmp_path).upsert("SPY", "1d", halved)   # the refill, elsewhere
+
+    cache = BarCache(tmp_path)
+    derive_incremental(cache, "SPY", "1w")
+    pd.testing.assert_frame_equal(cache.load("SPY", "1w"),
+                                  resample_bars(cache.load("SPY", "1d"), "1w"),
+                                  check_freq=False)
+    assert cache.rebased == set()
+
+
 def test_a_week_relabeled_by_a_late_first_session_keeps_one_row(tmp_path):
     """A week first derived without its Monday is labeled Tuesday. When the
     Monday bar arrives and a full derive relabels the week, the cache must
     hold the week once, under the newer label, not twice."""
     cache = BarCache(tmp_path)
     cache.upsert("SPY", "1w", _daily(["2026-06-02"], start=10.0))
-    cache.upsert("SPY", "1w", _daily(["2026-06-01"], start=20.0))
+    cache.upsert("SPY", "1w", _daily(["2026-06-01"], start=10.5))
     weekly = cache.load("SPY", "1w")
     assert list(weekly.index) == [_label("2026-06-01")]
-    assert weekly["close"].iloc[0] == 20.0
+    assert weekly["close"].iloc[0] == 10.5
+    assert cache.rebased == set(), "a relabeled week is a merge, not a new basis"

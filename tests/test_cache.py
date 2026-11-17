@@ -78,11 +78,12 @@ def test_daily_upsert_keeps_incoming_row_for_same_session(tmp_path):
     cache.upsert(
         "SPY",
         "1d",
-        _bars_at(["2026-07-14T00:00:00Z"], [300.0], [3_000.0]),
+        _bars_at(["2026-07-14T00:00:00Z"], [101.0], [3_000.0]),
     )
 
-    expected = _bars_at(["2026-07-14T04:00:00Z"], [300.0], [3_000.0])
+    expected = _bars_at(["2026-07-14T04:00:00Z"], [101.0], [3_000.0])
     pd.testing.assert_frame_equal(cache.load("SPY", "1d"), expected)
+    assert cache.rebased == set()
 
 
 def test_daily_upsert_repairs_mixed_sessions_already_on_disk(tmp_path):
@@ -162,6 +163,114 @@ def test_memory_bars_mirrors_the_barcache_contract(make_bars):
     missing = mem.load("SPY", "1d")   # same shape BarCache.load gives for a missing file
     assert missing.empty and list(missing.columns) == ["open", "high", "low", "close", "volume"]
     assert str(missing.index.tz) == "UTC"
+
+
+# -- a moved price basis ------------------------------------------------------
+# The vendor split-adjusts at fetch time. After a split, a re-fetched overlap bar
+# comes back with its open moved by the split ratio, and every cached row is on
+# a basis the vendor no longer serves. upsert then keeps only the incoming frame.
+
+
+def test_a_split_in_the_overlap_bar_truncates_to_the_incoming_frame(
+        tmp_path, make_bars, caplog):
+    cache = BarCache(tmp_path)
+    cache.upsert("SPY", "15m", make_bars(10))
+    assert cache.rebased == set()
+    tail = make_bars(10)[-1:] / 2                       # the last bar, halved
+    tail = pd.concat([tail, make_bars(2, start="2026-06-01 16:00", base=50.5)])
+
+    with caplog.at_level("WARNING", logger="nakagai.data.cache"):
+        assert cache.upsert("SPY", "15m", tail) == 3
+
+    pd.testing.assert_frame_equal(cache.load("SPY", "15m"), tail,
+                                  check_freq=False)
+    assert cache.rebased == {("SPY", "15m")}
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 1
+    assert "SPY" in warnings[0].getMessage() and "15m" in warnings[0].getMessage()
+    assert "0.5" in warnings[0].getMessage()
+
+
+def test_a_full_range_over_a_mixed_file_replaces_it_whole(tmp_path, make_bars):
+    """An old split left the file half on each basis. A full-range fetch
+    disagrees on the old rows, so none of them survive."""
+    cache = BarCache(tmp_path)
+    truth = make_bars(10)
+    mixed = pd.concat([truth.iloc[:5], truth.iloc[5:] / 2])
+    mixed.to_parquet(cache.path("SPY", "15m"))
+
+    full = truth / 2
+    cache.upsert("SPY", "15m", full)
+
+    pd.testing.assert_frame_equal(cache.load("SPY", "15m"), full)
+    assert cache.rebased == {("SPY", "15m")}
+
+
+def test_an_ordinary_overlap_with_a_revised_close_merges(tmp_path, make_bars):
+    cache = BarCache(tmp_path)
+    cache.upsert("SPY", "15m", make_bars(10))
+    final = make_bars(10)[-1:].copy()
+    final["close"] += 0.5                              # the forming bar finished
+    cache.upsert("SPY", "15m", pd.concat(
+        [final, make_bars(1, start="2026-06-01 16:00", base=101.0)]))
+
+    loaded = cache.load("SPY", "15m")
+    assert len(loaded) == 11
+    assert loaded["close"].iloc[9] == final["close"].iloc[0]
+    assert cache.rebased == set()
+
+
+@pytest.mark.parametrize("factor", [1.14, 1 / 1.14])
+def test_an_open_moved_inside_the_band_merges(tmp_path, make_bars, factor):
+    cache = BarCache(tmp_path)
+    cache.upsert("SPY", "15m", make_bars(10))
+    moved = make_bars(10)[-1:].copy()
+    moved["open"] *= factor
+    cache.upsert("SPY", "15m", moved)
+    assert len(cache.load("SPY", "15m")) == 10
+    assert cache.rebased == set()
+
+
+@pytest.mark.parametrize("old_open, new_open", [
+    (0.0, 50.0), (100.0, 0.0), (float("nan"), 50.0), (100.0, float("nan")),
+    (-1.0, 50.0), (100.0, -1.0),
+])
+def test_unusable_opens_never_trigger(tmp_path, make_bars, old_open, new_open):
+    cache = BarCache(tmp_path)
+    seeded = make_bars(10)
+    seeded.iloc[-1, seeded.columns.get_loc("open")] = old_open
+    cache.upsert("SPY", "15m", seeded)
+    incoming = make_bars(10)[-1:].copy()
+    incoming["open"] = new_open
+    cache.upsert("SPY", "15m", incoming)
+    assert len(cache.load("SPY", "15m")) == 10
+    assert cache.rebased == set()
+
+
+def test_weekly_overlap_is_compared_by_week_not_label(tmp_path):
+    """A week first labeled Tuesday and re-derived under Monday is the same
+    bar, so its opens are compared."""
+    tue = pd.Timestamp("2026-06-02", tz="America/New_York").tz_convert("UTC")
+    mon = pd.Timestamp("2026-06-01", tz="America/New_York").tz_convert("UTC")
+    prior = pd.Timestamp("2026-05-26", tz="America/New_York").tz_convert("UTC")
+
+    def week(stamps, opens):
+        return pd.DataFrame({"open": opens, "high": [o + 1 for o in opens],
+                             "low": [o - 1 for o in opens], "close": opens,
+                             "volume": 1_000.0},
+                            index=pd.DatetimeIndex(stamps, name="ts"))
+
+    same = BarCache(tmp_path / "same")
+    same.upsert("SPY", "1w", week([prior, tue], [99.0, 100.0]))
+    same.upsert("SPY", "1w", week([mon], [101.0]))
+    assert list(same.load("SPY", "1w").index) == [prior, mon]
+    assert same.rebased == set()
+
+    split = BarCache(tmp_path / "split")
+    split.upsert("SPY", "1w", week([prior, tue], [99.0, 100.0]))
+    split.upsert("SPY", "1w", week([mon], [50.0]))
+    assert list(split.load("SPY", "1w").index) == [mon]
+    assert split.rebased == {("SPY", "1w")}
 
 
 def test_coverage_reports_cached_span(tmp_path, make_bars):

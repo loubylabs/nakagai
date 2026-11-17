@@ -1,8 +1,10 @@
 """Local parquet cache. Backtests read ONLY from here, offline and reproducible."""
 
+import logging
 import os
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 # empty_bars is re-exported here because this module has always been its import
@@ -13,7 +15,16 @@ from nakagai.data.schema import (
 )
 from nakagai.filelock import file_lock
 
-__all__ = ["BarCache", "MemoryBars", "empty_bars"]
+__all__ = ["BASIS_BAND", "BarCache", "MemoryBars", "empty_bars"]
+
+log = logging.getLogger(__name__)
+
+# How far an overlap bar's open may move before the cached history is judged
+# to be on another price basis. A bar's open does not change while the bar
+# forms, so a moved open means the vendor re-adjusted the history (a split).
+# The smallest common split, 5-for-4, moves it by 0.80; a stock dividend under
+# 15% is inside the band and is not detected.
+BASIS_BAND = 1.15
 
 
 def _canonical_cache_frame(timeframe: str, df: pd.DataFrame) -> pd.DataFrame:
@@ -41,6 +52,33 @@ def _period_keys(timeframe: str, index: pd.DatetimeIndex) -> pd.Index:
     return days - pd.to_timedelta(days.weekday, unit="D")
 
 
+def _keyed_opens(timeframe: str, df: pd.DataFrame) -> pd.Series:
+    """Opens by period key, the last copy of a duplicate key winning."""
+    opens = pd.Series(df["open"].to_numpy(dtype="float64"),
+                      index=_period_keys(timeframe, df.index))
+    return opens[~opens.index.duplicated(keep="last")]
+
+
+def _moved_basis(timeframe: str, existing: pd.DataFrame,
+                 incoming: pd.DataFrame) -> float | None:
+    """The first overlap ratio incoming/existing open outside the band, or None.
+
+    Only rows with a finite, positive open on both sides are compared, so a
+    zero, missing or NaN open can never trigger a replace."""
+    if existing.empty or incoming.empty:
+        return None
+    old = _keyed_opens(timeframe, existing)
+    new = _keyed_opens(timeframe, incoming)
+    common = old.index.intersection(new.index).sort_values()
+    if not len(common):
+        return None
+    old, new = old.loc[common].to_numpy(), new.loc[common].to_numpy()
+    usable = np.isfinite(old) & np.isfinite(new) & (old > 0) & (new > 0)
+    ratios = new[usable] / old[usable]
+    moved = ratios[(ratios <= 1 / BASIS_BAND) | (ratios >= BASIS_BAND)]
+    return float(moved[0]) if len(moved) else None
+
+
 class MemoryBars:
     """BarCache-shaped, dict-backed frames, keyed by (symbol, timeframe).
 
@@ -60,6 +98,11 @@ class BarCache:
     def __init__(self, root: Path):
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
+        # (symbol, timeframe) pairs whose file upsert replaced because the
+        # price basis moved, and that no caller has refilled yet. The writers
+        # in nakagai/data/sync.py refill and discard in the same call; a
+        # caller with its own provider loop drains this itself.
+        self.rebased: set[tuple[str, str]] = set()
 
     def path(self, symbol: str, timeframe: str) -> Path:
         return self.root / f"{symbol}_{timeframe}.parquet"
@@ -76,6 +119,14 @@ class BarCache:
         does not trade much" rather than as data loss. append_parquet is not
         reusable here because it concatenates with ignore_index=True, and this
         cache is indexed by ts and dedupes on that index.
+
+        A moved price basis replaces instead of merging. Bars are split-adjusted
+        at fetch time, so after a split the re-fetched overlap bar comes back
+        with its open moved by the split ratio, and every cached row is on a
+        basis the vendor no longer serves. When any overlap row's open moved
+        outside BASIS_BAND, the incoming frame alone becomes the file: short,
+        never mixed. The pair is added to `self.rebased` and one warning is
+        logged; the return value is unchanged.
         """
         if "interpolated" in df.columns:
             df = df[df["interpolated"] != True]  # noqa: E712 (spec: fake gap-fill bars never enter the cache)
@@ -83,7 +134,16 @@ class BarCache:
         path = self.path(symbol, timeframe)
         with file_lock(path):
             existing = _canonical_cache_frame(timeframe, self.load(symbol, timeframe))
-            merged = pd.concat([existing, df])
+            ratio = _moved_basis(timeframe, existing, df)
+            if ratio is not None:
+                log.warning(
+                    "%s %s: price basis moved (overlap open ratio %.4g); "
+                    "replacing the cached bars with the incoming frame",
+                    symbol, timeframe, ratio)
+                self.rebased.add((symbol, timeframe))
+                merged = df
+            else:
+                merged = pd.concat([existing, df])
             merged = merged[
                 ~_period_keys(timeframe, merged.index).duplicated(keep="last")
             ].sort_index()

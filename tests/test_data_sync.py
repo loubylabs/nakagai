@@ -80,6 +80,137 @@ def test_full_ignores_the_cache(tmp_path, make_bars):
     assert p.calls == [("SPY", "15m", START, END)]
 
 
+# -- a split after the backfill -------------------------------------------------
+# The vendor re-adjusts its whole history at a split. The writers below see it
+# on the re-fetched overlap bar, and end the same call with one full-range file
+# on the new basis, the pair no longer listed in cache.rebased.
+
+
+class SplittingProvider(DataProvider):
+    """Serves slices of one fixed history, scaled by the current adjustment
+    factor, the way a vendor serves split-adjusted bars."""
+    name = "splitting"
+
+    def __init__(self, history, *, max_symbols_per_request=100):
+        self.history = history
+        self.factor = 1.0
+        self.calls: list[tuple] = []
+        self.fail_after: int | None = None
+        self.max_symbols_per_request = max_symbols_per_request
+
+    def _slice(self, start, end):
+        if self.fail_after is not None and len(self.calls) > self.fail_after:
+            raise httpx.ReadTimeout("vendor timed out")
+        h = self.history
+        return h[(h.index >= start) & (h.index <= end)] * self.factor
+
+    def fetch_bars(self, symbol, timeframe, start, end):
+        self.calls.append((symbol, timeframe, start, end))
+        return self._slice(start, end)
+
+    def fetch_bars_multi(self, symbols, timeframe, start, end):
+        self.calls.append((tuple(symbols), timeframe, start, end))
+        frame = self._slice(start, end)
+        return AlpacaBarBatchResult(
+            tuple(symbols),
+            tuple(AlpacaBarMember(s, True, _provider_rows(frame)) for s in symbols),
+        )
+
+
+def test_fetch_incremental_refills_the_whole_range_after_a_split(tmp_path, make_bars):
+    history = make_bars(20)
+    p = SplittingProvider(history)
+    cache = BarCache(tmp_path)
+    first_end = history.index[9]
+    fetch_incremental(cache, p, "SPY", "15m", START, first_end)
+    assert len(cache.load("SPY", "15m")) == 10
+
+    p.factor = 0.5
+    fetch_incremental(cache, p, "SPY", "15m", START, END)
+
+    pd.testing.assert_frame_equal(cache.load("SPY", "15m"), history * 0.5)
+    assert cache.rebased == set()
+    assert p.calls[1][2] == first_end, "the tail fetch resumed from the last bar"
+    assert p.calls[2] == ("SPY", "15m", START, END), "then the whole range"
+
+
+def test_fetch_incremental_refills_from_cached_history_before_start(tmp_path, make_bars):
+    """History cached before the requested start is part of the range a
+    refill restores, or the split would cost it."""
+    history = make_bars(20)
+    p = SplittingProvider(history)
+    cache = BarCache(tmp_path)
+    fetch_incremental(cache, p, "SPY", "15m", START, history.index[9])
+
+    p.factor = 0.5
+    later = history.index[5]
+    fetch_incremental(cache, p, "SPY", "15m", later, END)
+
+    assert p.calls[-1][2] == START
+    pd.testing.assert_frame_equal(cache.load("SPY", "15m"), history * 0.5)
+
+
+def test_a_failed_refill_leaves_the_pair_rebased_and_raises(tmp_path, make_bars):
+    history = make_bars(20)
+    p = SplittingProvider(history)
+    cache = BarCache(tmp_path)
+    fetch_incremental(cache, p, "SPY", "15m", START, history.index[9])
+
+    p.factor = 0.5
+    p.fail_after = 2                    # the tail fetch succeeds, the refill fails
+    with pytest.raises(httpx.ReadTimeout):
+        fetch_incremental(cache, p, "SPY", "15m", START, END)
+
+    assert cache.rebased == {("SPY", "15m")}
+    pd.testing.assert_frame_equal(cache.load("SPY", "15m"),
+                                  history.iloc[9:] * 0.5)
+
+
+def test_full_fetch_needs_no_second_request_after_a_split(tmp_path, make_bars):
+    history = make_bars(20)
+    p = SplittingProvider(history)
+    cache = BarCache(tmp_path)
+    fetch_incremental(cache, p, "SPY", "15m", START, history.index[9])
+
+    p.factor = 0.5
+    fetch_incremental(cache, p, "SPY", "15m", START, END, full=True)
+
+    assert len(p.calls) == 2
+    pd.testing.assert_frame_equal(cache.load("SPY", "15m"), history * 0.5)
+    assert cache.rebased == set()
+
+
+def test_multi_refills_the_whole_range_after_a_split(tmp_path, make_bars):
+    history = make_bars(20)
+    p = SplittingProvider(history)
+    cache = BarCache(tmp_path)
+    first_end = history.index[9]
+    fetch_incremental_multi(cache, p, ["AAPL", "MSFT"], "15m", START, first_end)
+
+    p.factor = 0.5
+    fetch_incremental_multi(cache, p, ["AAPL", "MSFT"], "15m", START, END)
+
+    for symbol in ("AAPL", "MSFT"):
+        pd.testing.assert_frame_equal(cache.load(symbol, "15m"), history * 0.5)
+    assert cache.rebased == set()
+    assert p.calls[1][2] == first_end
+    assert p.calls[2] == (("AAPL", "MSFT"), "15m", START, END), \
+        "one batched whole-range refill for the rebased symbols"
+
+
+def test_multi_failed_refill_leaves_the_symbols_rebased_and_raises(tmp_path, make_bars):
+    history = make_bars(20)
+    p = SplittingProvider(history)
+    cache = BarCache(tmp_path)
+    fetch_incremental_multi(cache, p, ["AAPL"], "15m", START, history.index[9])
+
+    p.factor = 0.5
+    p.fail_after = 2
+    with pytest.raises(httpx.ReadTimeout):
+        fetch_incremental_multi(cache, p, ["AAPL"], "15m", START, END)
+    assert cache.rebased == {("AAPL", "15m")}
+
+
 # -- fetch_incremental_multi --------------------------------------------------
 # One provider round trip for many symbols. One request carries ONE start, and
 # symbols resume at different points, so the batch starts at the earliest resume
