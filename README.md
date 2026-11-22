@@ -344,6 +344,15 @@ The hosted product at nakag.ai is built on top of this core.
 
 ## Release notes
 
+### 0.20.0 (2026-11-22)
+
+- `conditions_sentence(spec, vocabulary=None, *, lead="When")` says when a
+  rule fires, in the same words as `rule_sentence`, with no side, stop, target
+  or exit: "When the 14-bar RSI is below 30, on the 4-hour chart." Two sides
+  join with ", or " (said once when their words match), and the low-IEX
+  disclosure follows when a window needs it. A non-dict or a spec with neither
+  side reads "Not a strategy spec."
+
 ### 0.19.0 (2026-11-17)
 
 - The bar cache repairs itself after a split. Bars are split-adjusted at fetch
