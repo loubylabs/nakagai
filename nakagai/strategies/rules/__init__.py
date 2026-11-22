@@ -9,7 +9,7 @@ from nakagai.strategies.rules.pine.model import (
     PineBundle, PineCompileError, PineExits, PineExpr, PineHelper, PineInput,
     PineLowering, PineProgram, PineRisk,
 )
-from nakagai.strategies.rules.plain import rule_sentence
+from nakagai.strategies.rules.plain import conditions_sentence, rule_sentence
 from nakagai.strategies.rules.spec import (
     DEFAULT_RISK, describe_spec, risk_text, validate_risk, validate_spec,
 )
@@ -21,7 +21,7 @@ from nakagai.strategies.rules.windows import PRIOR_DAY, WindowSpec
 
 __all__ = [
     "RuleStrategy", "DEFAULT_RISK", "canonical_expr", "canonical_spec",
-    "compile_pine", "describe_spec", "lower_pine", "PineBundle",
+    "compile_pine", "conditions_sentence", "describe_spec", "lower_pine", "PineBundle",
     "PineCompileError", "PineExits", "PineExpr", "PineHelper", "PineInput",
     "PineLowering", "PastFiresRefused", "SideFires", "SymbolFires",
     "past_fires", "unhistoried_reads",

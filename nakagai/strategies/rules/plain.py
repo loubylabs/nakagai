@@ -4,7 +4,8 @@ describe_spec renders the rule DSL (`close crosses above sma(20)`), which an
 agent edits rules with and which must not change. rule_sentence renders the
 same spec for a person reading it before they save: "Long on the daily chart
 when the close crosses above the 20-day simple moving average." Deterministic,
-every number printed in code.
+every number printed in code. conditions_sentence says only when the rule
+fires, in the same words, with no side or risk plan.
 
 Each term's words live on its Term (`Term.plain`), so an injected vocabulary
 brings its own; a term without them reads through a generic fallback. Like
@@ -281,15 +282,17 @@ def _risk(reader: _Reader, risk: Mapping, spec: dict) -> list[str]:
     return [f"Stop {stop_text}.", f"Target {target_text}."]
 
 
+def _reader(spec: dict, vocabulary: Vocabulary | None) -> _Reader:
+    return _Reader(resolve_vocabulary(vocabulary), spec.get("timeframe", "1h"))
+
+
 def rule_sentence(spec: dict, vocabulary: Vocabulary | None = None) -> str:
     """Plain sentences restating a rule spec for a person. The spec's name is
     not repeated: every surface showing this already shows the label."""
-    vocabulary = resolve_vocabulary(vocabulary)
     if not isinstance(spec, dict):
         return "Not a strategy spec."
-    tf = spec.get("timeframe", "1h")
-    reader = _Reader(vocabulary, tf)
-    chart = f"the {_frame(tf)} chart"
+    reader = _reader(spec, vocabulary)
+    chart = f"the {_frame(reader.tf)} chart"
     sentences = []
     for side in ("long", "short"):
         if side in spec:
@@ -300,6 +303,28 @@ def rule_sentence(spec: dict, vocabulary: Vocabulary | None = None) -> str:
         sentences.extend(_exits(reader, exits))
     risk = spec.get("risk", DEFAULT_RISK)
     sentences.extend(_risk(reader, risk if isinstance(risk, dict) else {}, spec))
+    if reader.low_iex:
+        sentences.append(LOW_IEX_DISCLOSURE)
+    return " ".join(sentences)
+
+
+def conditions_sentence(spec: dict, vocabulary: Vocabulary | None = None, *,
+                        lead: str = "When") -> str:
+    """The rule's conditions alone, in plain words: when it fires, with no
+    side, stop, target or exit. `lead` opens the sentence."""
+    if not isinstance(spec, dict):
+        return "Not a strategy spec."
+    reader = _reader(spec, vocabulary)
+    groups = []
+    for side in ("long", "short"):
+        if side in spec:
+            words = reader.group(spec[side])
+            if words not in groups:
+                groups.append(words)
+    if not groups:
+        return "Not a strategy spec."
+    sentences = [f"{lead} {', or '.join(groups)}, on the "
+                 f"{_frame(reader.tf)} chart."]
     if reader.low_iex:
         sentences.append(LOW_IEX_DISCLOSURE)
     return " ".join(sentences)

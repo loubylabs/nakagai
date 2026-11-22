@@ -1,16 +1,18 @@
-"""rule_sentence: a rule spec in plain sentences for a person.
+"""rule_sentence and conditions_sentence: a rule spec in plain sentences for a
+person.
 
 The DSL readback (describe_spec) is untouched and has its own goldens; these
 freeze the people-facing words.
 """
 
+import re
 from datetime import time
 
 import pytest
 
 from nakagai.strategies.rules import (
-    PRIOR_DAY, Term, WindowSpec, core_vocabulary, describe_spec,
-    rule_sentence, validate_spec,
+    PRIOR_DAY, Term, WindowSpec, conditions_sentence, core_vocabulary,
+    describe_spec, rule_sentence, validate_spec,
 )
 from nakagai.strategies.rules.spec import LOW_IEX_DISCLOSURE
 
@@ -306,3 +308,99 @@ def test_a_non_callable_phrase_is_refused_where_the_term_is_built():
 ])
 def test_garbage_never_raises(bad):
     assert isinstance(rule_sentence(bad), str)
+
+
+# conditions_sentence: the rule's conditions alone, with no side or risk plan.
+
+RSI_4H = _spec([_when({"ind": "rsi"}, "<", 30)], timeframe="4h")
+SHORT_ONLY = _spec(short=[_when(CLOSE, "<", {"ind": "sma"})],
+                   risk={"stop": {"kind": "percent", "pct": 1},
+                         "target": {"kind": "percent", "pct": 3}})
+MACD_BOTH = _spec([_when({"ind": "macd", "field": "hist"}, "crosses_above", 0)],
+                  short=[_when({"ind": "macd", "field": "hist"},
+                               "crosses_below", 0)],
+                  exits={"trailing": {"kind": "percent", "pct": 2}})
+SAME_BOTH = _spec([_when({"ind": "rsi"}, "<", 30)],
+                  short=[_when({"ind": "rsi"}, "<", 30)])
+ANY_GROUP = {**_spec(), "long": {"any": [_when(CLOSE, "<", 10),
+                                         _when(CLOSE, ">", 500)]}}
+HIGHER_FRAME = _spec([_when({"src": "close", "tf": "1d"}, ">",
+                            {"ind": "sma", "n": 50, "tf": "1d"})],
+                     timeframe="15m")
+LONDON_RULE = _spec([_when(CLOSE, ">", {"ind": "highest", "window": "london"})],
+                    timeframe="15m")
+SIDELESS = _spec(exits={"time_stop": {"bars": 5}},
+                 risk={"stop": {"kind": "percent", "pct": 1}})
+
+
+def test_conditions_one_side_reads_without_the_side():
+    assert validate_spec(RSI_4H) == []
+    assert conditions_sentence(RSI_4H) == (
+        "When the 14-bar RSI is below 30, on the 4-hour chart.")
+
+
+def test_conditions_of_a_short_only_rule():
+    assert validate_spec(SHORT_ONLY) == []
+    assert conditions_sentence(SHORT_ONLY) == (
+        "When the close is below the 20-day simple moving average, on the "
+        "daily chart.")
+
+
+def test_conditions_of_both_sides_join_with_or_and_name_the_chart_once():
+    assert validate_spec(MACD_BOTH) == []
+    text = conditions_sentence(MACD_BOTH)
+    assert text == (
+        "When the MACD histogram (12, 26, 9) crosses above 0, or the MACD "
+        "histogram (12, 26, 9) crosses below 0, on the daily chart.")
+    assert text.count("chart") == 1
+
+
+def test_conditions_of_identical_sides_are_said_once():
+    assert validate_spec(SAME_BOTH) == []
+    assert conditions_sentence(SAME_BOTH) == (
+        "When the 14-day RSI is below 30, on the daily chart.")
+
+
+def test_conditions_of_an_any_group():
+    assert validate_spec(ANY_GROUP) == []
+    assert conditions_sentence(ANY_GROUP) == (
+        "When the close is below 10 or the close is above 500, on the daily "
+        "chart.")
+
+
+def test_conditions_name_a_higher_timeframe():
+    assert validate_spec(HIGHER_FRAME) == []
+    assert conditions_sentence(HIGHER_FRAME) == (
+        "When the daily close is above the 50-day simple moving average, on "
+        "the 15-minute chart.")
+
+
+def test_conditions_take_a_custom_lead():
+    assert conditions_sentence(RSI_4H, lead="Tell me when") == (
+        "Tell me when the 14-bar RSI is below 30, on the 4-hour chart.")
+
+
+@pytest.mark.parametrize("bad", [None, [], "spec", 3, SIDELESS, {}])
+def test_conditions_of_a_non_spec_or_a_sideless_spec(bad):
+    assert conditions_sentence(bad) == "Not a strategy spec."
+
+
+def test_conditions_carry_the_low_iex_disclosure():
+    assert validate_spec(LONDON_RULE, WINDOWS) == []
+    assert conditions_sentence(LONDON_RULE, WINDOWS) == (
+        "When the close is above the highest value of the close between "
+        "08:00 and 16:30 London time, on the 15-minute chart. "
+        f"{LOW_IEX_DISCLOSURE}")
+
+
+_SIDE_OR_RISK = re.compile(r"\b(long|short|buy|sell|stop|target|entry|risk)\b",
+                           re.IGNORECASE)
+
+
+@pytest.mark.parametrize("spec", [RSI_4H, SHORT_ONLY, MACD_BOTH, SAME_BOTH,
+                                  ANY_GROUP, HIGHER_FRAME, LONDON_RULE,
+                                  SIDELESS])
+def test_conditions_never_name_a_side_or_the_risk_plan(spec):
+    for lead in ("When", "Tell me when"):
+        text = conditions_sentence(spec, WINDOWS, lead=lead)
+        assert _SIDE_OR_RISK.search(text) is None, text
