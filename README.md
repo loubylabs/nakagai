@@ -223,6 +223,33 @@ Two more examples ship in `nakagai/strategies/catalog/specs/`: `rsi_reversion.js
 core_vocabulary)` turns every JSON file in a directory like this one into a
 frozen `StrategyDefinition` ready to enter a registry.
 
+### Reading an earlier bar
+
+`ago` is its `of` series as it stood `n` bars back (`n` a whole number in
+[1, 500], default 1; `of` defaults to the close and may be any expression).
+That is how a rule compares one bar with an earlier one, so candle patterns
+are a few conditions. A bullish engulfing bar on daily bars:
+
+```json
+{"version": 2, "name": "bullish-engulfing", "timeframe": "1d",
+ "long": {"all": [
+   {"lhs": {"ind": "ago", "of": {"src": "close"}}, "op": "<", "rhs": {"ind": "ago", "of": {"src": "open"}}},
+   {"lhs": {"src": "close"}, "op": ">", "rhs": {"src": "open"}},
+   {"lhs": {"src": "close"}, "op": ">", "rhs": {"ind": "ago", "of": {"src": "open"}}},
+   {"lhs": {"src": "open"}, "op": "<", "rhs": {"ind": "ago", "of": {"src": "close"}}}
+ ]}}
+```
+
+`n` counts bars of the frame the node is evaluated on: the spec's, or the
+node's own `tf`. `{"ind": "ago", "tf": "1h"}` on a 15m spec is the hourly close
+one hourly bar back, while `ago` of `{"src": "close", "tf": "1h"}` is one 15m
+bar back. The previous bar is the previous row, so on an intraday frame the
+first bar of a session reads the last bar of the session before. The first `n`
+bars have no value, so a condition on them is unknown and never fires; the
+history a rule needs is `n` on top of whatever `of` needs. A shift reads only
+the past, so `ago` carries none of the causal flags. Pine lowers it to
+`src[n]`, with `n` an input and `max_bars_back` declared.
+
 ### Named time windows
 
 An aggregate indicator can read one immutable, recurring window row. The row
@@ -343,6 +370,17 @@ the hosted platform: API, web UI, and the mandate and approvals judgment layer.
 The hosted product at nakag.ai is built on top of this core.
 
 ## Release notes
+
+### 0.21.0 (2026-11-24)
+
+- New series term `ago`: its `of` series `n` bars back (`n` in [1, 500],
+  default 1), so a rule can read the previous bar and write candle patterns
+  such as an engulfing bar. `n` counts bars of the frame the node is evaluated
+  on, and must be a whole number (`ago.n must be a whole number in [1, 500]`).
+  It reads in plain words as "the open 1 day ago", in the DSL as
+  `ago(1, of=open)`, and in Pine as `open[n]`. Both NL compilers list and
+  explain it. The core vocabulary digest moves because a term was added; no
+  existing spec's hash or verdict changes.
 
 ### 0.20.0 (2026-11-22)
 
