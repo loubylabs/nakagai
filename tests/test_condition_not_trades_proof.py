@@ -692,16 +692,21 @@ def test_every_field_reaches_one_side_of_the_comparison(market):
 # this table cannot bless arithmetic or signal movement with that identity
 # change. Derived on 2026-08-28 only after every behavior digest and every
 # float reference below passed unchanged and each identity formula rebuilt.
+#
+# Re-derived on 2026-11-24 (0.21.0) because the `ago` term joined the core
+# vocabulary, which moves the vocabulary digest inside every definition and so
+# every replay and trade id. Trade counts, every behavior digest and every
+# float reference passed unchanged before these were taken.
 GOLDEN = {
-    "catalog:macd_trend": (65, "dae02680f7fb6d500a24b1b25ab3f6a3e5e7a299936131745c8de8cb19eacecc"),
-    "catalog:rsi_reversion": (7, "3d5cbad4a79bf2a3d1e150b5c7866d806a9f510907e15a6388bd306a1f79a64a"),
-    "catalog:sma_cross": (40, "4a5a1dcf823d04b863fe9260a59466dd4cb60f16bf140e582d220c987a24b74d"),
-    "fixture:bollinger_breakout": (4, "25af8aac0ede583eef3a7d36344bac916c46ad51ab9b0b5554a088f3ecb0ebba"),
-    "fixture:discount_pullback": (23, "716f30f29682962af7ea8b5770957caee7dc61946f3ba2c688786b1a1d1a5130"),
-    "fixture:ifvg_reversal": (65, "53a3319f7441efca82a482e9e4ea01ac75c59b1a4554c3502857d6c74b84e767"),
-    "fixture:ob_bounce": (55, "f1fb5034f189d78a7f543ae6d37e0c02c4c2c0e6a7b5dd9b958ea94bf2d59f5d"),
-    "fixture:orb": (135, "922128321ce092d0aec10a01a7c8c6ff306c87fc8a7a22f1f403c8214b29aaed"),
-    "fixture:sma_cross": (40, "4a5a1dcf823d04b863fe9260a59466dd4cb60f16bf140e582d220c987a24b74d"),
+    "catalog:macd_trend": (65, "33e52d403485a1b78687d887a1a204a0883d2fdc64e7371574d5c924380d6b27"),
+    "catalog:rsi_reversion": (7, "fced5258483815a9ce26bc1f1ace041ab032ce4e08ae41fe5f486e2f35d91e29"),
+    "catalog:sma_cross": (40, "f2f81b4ff7be18688676e2cd0e1b61c844f5a79c696ce41c4e2df6c2c8cae7ef"),
+    "fixture:bollinger_breakout": (4, "88b3e7dd2a97a14ee7ebbab6d597b9e9c6984d67431d92e34573f0fe757772fb"),
+    "fixture:discount_pullback": (23, "23e40a7f8f3f7df67bfdf3317456fb0f8d59c0a60119c2f55c80588f75597146"),
+    "fixture:ifvg_reversal": (65, "88f9963100b9ba0eb1d5d5d5258fca792c571f564f057aed913f47b3d1a38d01"),
+    "fixture:ob_bounce": (55, "ff92825764e1ca009d933aee220886db02a85434940a880002102caf4a6bb609"),
+    "fixture:orb": (135, "6eddccdb539bee05cb1248a5f645f2704d8ce039033692188cb8f499db34c406"),
+    "fixture:sma_cross": (40, "f2f81b4ff7be18688676e2cd0e1b61c844f5a79c696ce41c4e2df6c2c8cae7ef"),
 }
 
 

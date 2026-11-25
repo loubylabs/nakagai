@@ -64,6 +64,10 @@ EVERY_NODE = [
     {"ind": "cci", "n": 20}, {"ind": "mfi", "n": 14}, {"ind": "wpr", "n": 14},
     # `of` routes a series indicator through another node instead of close.
     {"ind": "rsi", "n": 14, "of": {"src": "high"}},
+    # ago is a backward shift, so row i reads row i - n of the prefix; with its
+    # own tf it shifts by that frame's bars before the result is lifted.
+    {"ind": "ago", "n": 1, "of": {"src": "open"}}, {"ind": "ago", "n": 7},
+    {"ind": "ago", "n": 2, "tf": "1h"},
     {"prim": "gap_pct"},
     {"prim": "swing_high", "k": 3}, {"prim": "swing_low", "k": 3},
     {"prim": "day_of_week"}, {"prim": "minutes_into_session"},

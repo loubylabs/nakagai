@@ -92,6 +92,8 @@ INDICATORS = [
      "nk_lowest_1"),
     ({"ind": "stdev"}, [f"nk_stdev_1 = ta.stdev(close, {LHS}_stdev_n)"],
      "nk_stdev_1"),
+    # ago is Pine's own history operator, offset by the n input.
+    ({"ind": "ago"}, [f"nk_ago_1 = close[{LHS}_ago_n]"], "nk_ago_1"),
     ({"ind": "macd", "field": "hist"},
      [f"[nk_macd_1_macd, nk_macd_1_signal, nk_macd_1_hist] = "
       f"ta.macd(close, {LHS}_macd_fast, {LHS}_macd_slow, {LHS}_macd_signal)"],

@@ -27,7 +27,8 @@ bar late, so modelling it rather than assuming it is the point.
 Scope, deliberately narrow. This is the subset those helpers use and nothing
 more: `var` persistence, `:=`, `+=`, `=`, tuple unpacking, typed declarations,
 if/else if/else, `for` with `break`, ternaries, history indexing on the built-in
-series and on a function's own locals, and the handful of `math.*`, `array.*`,
+series and on a function's own locals (by a constant or by an input, which a
+generated function reads as the global it is), and the handful of `math.*`, `array.*`,
 `input.*`, `time_close` and `request.security` calls the emitted programs use.
 Two known simplifications, both unreachable from the helpers as written: a
 comparison against `na` reads false rather than `na` (Pine reads that false in a
@@ -433,6 +434,13 @@ class Runtime:
         # visibility gate for that expected interval.
         self.calendar_closes: dict[str, np.ndarray] = {}
         self._requested: dict[tuple[_RequestPair, int], list] = {}
+        # Every `name = input.*(...)` the program declared. A Pine function may
+        # read a global declared above it, and an input is the one global a
+        # generated function reads (an offset like `open[nk_..._ago_n]` inside a
+        # request). Inputs only: they are constant, so reading one from a
+        # request evaluated ahead of the chart bar cannot read the wrong bar,
+        # which a series global could.
+        self.inputs: dict[str, object] = {}
 
     def call(self, name: str, args: list, key: tuple):
         function = self.helpers.get(name)
@@ -461,6 +469,9 @@ class Runtime:
             scope[name] = frame.persistent[name]
         elif kind == "let":
             scope[statement[1]] = self._eval(statement[2], scope, frame, key)
+            node = statement[2]
+            if node[0] == "call" and node[1] in ("input.int", "input.float"):
+                self.inputs[statement[1]] = scope[statement[1]]
         elif kind in ("set", "add"):
             _, name, node = statement
             value = self._eval(node, scope, frame, key)
@@ -512,6 +523,8 @@ class Runtime:
             name = node[1]
             if name in scope:
                 return scope[name]
+            if name in self.inputs:
+                return self.inputs[name]
             return self.market.at(name, self.bar)
         if kind == "index":
             _, name, offset_node = node
@@ -588,6 +601,7 @@ class Runtime:
             sub.markets, sub.maps = self.markets, self.maps
             sub.coverage = self.coverage
             sub.calendar_closes = self.calendar_closes
+            sub.inputs = self.inputs
             values = []
             for bar in range(market.length):
                 sub.bar = bar

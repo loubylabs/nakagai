@@ -185,6 +185,11 @@ Max expression depth {g.MAX_DEPTH}; max {g.MAX_CONDITIONS} conditions; max
 - highest/lowest are unshifted rolling extrema that include the current bar,
   so a breakout cross like "close crosses_above highest(close, n)" can never
   fire; use donchian(n).upper/.lower for breakout crosses instead.
+- ago is its `of` series n bars back on the frame it is evaluated on (n=1,
+  the default, is the previous bar). Candle patterns and "above yesterday's
+  high" are written with it: "the previous bar closed below its open" is
+  {{"lhs": {{"ind": "ago", "of": {{"src": "close"}}}}, "op": "<",
+  "rhs": {{"ind": "ago", "of": {{"src": "open"}}}}}}.
 
 # Examples
 {_EXAMPLES}"""
