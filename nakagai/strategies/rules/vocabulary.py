@@ -57,6 +57,34 @@ WINDOW_REDUCERS = ("max", "min", "first", "last")
 WindowReducer: TypeAlias = Literal["max", "min", "first", "last"]
 
 
+class WholeRange(tuple):
+    """A range rule whose value must also be a whole number: a count of bars.
+
+    It IS a (low, high) tuple, so every reader that only needs the bounds (the
+    prompts, the vocabulary digest, the Pine input typing, which already reads
+    whole bounds as an int input) takes it unchanged. The validator alone reads
+    the extra promise, and refuses 1.5 with a message saying so; a whole float
+    such as 2.0 is the same number, as canon already treats it.
+
+    Only `ago` declares one. A fractional shift has no meaning at all, where
+    the other length arguments are truncated by their functions today.
+    """
+
+    def __new__(cls, low: int, high: int):
+        return super().__new__(cls, (low, high))
+
+    def __getnewargs__(self):
+        # tuple's own answer is (tuple(self),), one argument where __new__
+        # takes two, so pickle and deepcopy would fail on a vocabulary
+        # carrying one.
+        return tuple(self)
+
+
+def is_whole_rule(rule: ArgRule) -> bool:
+    """True for a range rule that also requires a whole-number value."""
+    return isinstance(rule, WholeRange)
+
+
 def is_condition_rule(rule: ArgRule) -> bool:
     """True for an arg whose value is a condition node, never a bare value."""
     return rule == CONDITION_ARG
@@ -378,6 +406,29 @@ def core_vocabulary() -> Vocabulary:
                 lambda s, a: ind.stdev(s, a["n"]),
                 PineLowering(pine.emit_series_call("ta.stdev", "n")),
                 plain=_length("standard deviation")),
+        # `of` as it stood n bars ago: a backward shift, so "the previous bar
+        # closed below its open" is ago(close) < ago(open), and a candle pattern
+        # is a few of those. n counts bars of the frame the node is evaluated
+        # on: its own `tf` when it names one (ago of close with tf 1h is the
+        # hourly close one HOURLY bar back), otherwise the spec's. The previous
+        # bar is simply the previous row, so on an intraday frame the first bar
+        # of a session reads the last bar of the session before it. Its first
+        # n rows have no value, so a condition on them is unknown, never fired.
+        #
+        # None of the three causal flags applies. A shift reads only rows
+        # before i, so it is a plain causal series and the whole-frame pass
+        # broadcasts it like any other (not end_anchored). It reads no session
+        # or calendar structure, only whatever `of` yields, so a foreign `tf`
+        # is meaningful (not session_scoped), and on daily bars "1 bar ago" is
+        # yesterday, which is exactly right (not driving_frame_intraday).
+        #
+        # It has no rolling window of its own, so the history it needs is n on
+        # top of whatever `of` needs.
+        _series("ago", {"n": WholeRange(1, 500)}, {"n": 1},
+                lambda s, a: s.shift(int(a["n"])),
+                PineLowering(pine.emit_ago),
+                plain=lambda a, unit, of: (
+                    f"{of or 'the close'} {plain_count(a['n'], unit)} ago")),
         _frame("macd", {"fast": (2, 100), "slow": (3, 200),
                          "signal": (2, 100),
                          "field": ("macd", "signal", "hist")},

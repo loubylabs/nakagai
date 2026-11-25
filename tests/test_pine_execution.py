@@ -21,6 +21,7 @@ in memory, and asserts the comparison notices: a net nobody has seen fail is a
 claim rather than a check.
 """
 
+import re
 from datetime import time
 from types import SimpleNamespace
 
@@ -596,6 +597,65 @@ def test_a_foreign_operand_decides_where_the_engine_decides(groups, market,
         f"{[str(t) for t in chart.index[wrong[:8]]]}, Pine "
         f"{pine[wrong[:8]].tolist()} against engine {engine[wrong[:8]].tolist()}")
     assert 2 <= int(engine.sum()) <= len(frames["1h"])
+
+
+# -- `ago`: history indexed by an input --------------------------------------
+#
+# A close that turns: up from the previous close after that close fell from the
+# one before it (and the mirror), on the chart's own frame and inside a
+# request. `ago` lowers to `src[n]` with n an input, so what is under test is
+# that the offset counts bars of the frame the term is evaluated on, not chart
+# bars, wherever the walk emits it. The trending market alternates direction by
+# session, so even its six daily bars turn both ways.
+
+def _ago(n: int) -> dict:
+    return {"ind": "ago", "n": n, "of": {"src": "close"}}
+
+
+AGO_GROUPS = {
+    "long": {"all": [{"lhs": {"src": "close"}, "op": ">", "rhs": _ago(1)},
+                     {"lhs": _ago(1), "op": "<", "rhs": _ago(2)}]},
+    "short": {"all": [{"lhs": {"src": "close"}, "op": "<", "rhs": _ago(1)},
+                      {"lhs": _ago(1), "op": ">", "rhs": _ago(2)}]},
+}
+
+
+@pytest.mark.parametrize("timeframe", ["15m", "1h", "1d"])
+@pytest.mark.parametrize("side", ["long", "short"])
+def test_a_bar_read_n_bars_back_decides_where_the_engine_decides(timeframe,
+                                                                 side):
+    spec = _ago_spec(timeframe)
+    pine = _decisions(_body(compile_pine(spec).indicator), side)
+    engine = _engine_decisions(spec, side)
+    wrong = np.flatnonzero(pine != engine)
+    assert not len(wrong), (
+        f"{timeframe} {side}: rows {wrong[:8].tolist()}, Pine "
+        f"{pine[wrong[:8]].tolist()} against engine {engine[wrong[:8]].tolist()}")
+    assert int(engine.sum()) >= 1, "the pattern must occur for this to measure"
+
+
+def _ago_spec(timeframe: str) -> dict:
+    return {"version": 2, "name": "probe", "timeframe": timeframe, **AGO_GROUPS,
+            "risk": {"stop": {"kind": "percent", "pct": 2.0},
+                     "target": {"kind": "rr", "rr": 2.0}}}
+
+
+def _decisions(lines: list[str], side: str) -> np.ndarray:
+    rows = run_program({h.id: h.source for h in HELPERS.values()}, lines,
+                       CHART, CHART_STEP, REQUESTED)
+    return np.array([bool(row[f"nk_{side}_decision"]) for row in rows])
+
+
+def test_the_ago_comparison_notices_an_offset_read_in_the_wrong_bars():
+    # The net, checked against itself: the same request with the offset read
+    # one bar short must disagree, or the test above cannot see an offset bug.
+    spec = _ago_spec("1h")
+    lines = _body(compile_pine(spec).indicator)
+    mutated = [re.sub(r"close\[(nk_\w+_ago_n)\]", r"close[\1 - 1]", line)
+               for line in lines]
+    assert mutated != lines
+    engine = _engine_decisions(spec, "long")
+    assert (_decisions(mutated, "long") != engine).any()
 
 
 def _raw_request_values(gaps: str) -> np.ndarray:

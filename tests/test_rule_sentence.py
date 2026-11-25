@@ -70,6 +70,7 @@ def test_the_dsl_readback_is_unchanged():
     ({"ind": "roc", "n": 10}, "the 10-day rate of change"),
     ({"ind": "zscore"}, "the 20-day z-score"),
     ({"ind": "stdev"}, "the 20-day standard deviation"),
+    ({"ind": "ago", "n": 2, "of": {"src": "high"}}, "the high 2 days ago"),
     ({"ind": "sma", "n": 20, "of": {"src": "volume"}},
      "the 20-day simple moving average of volume"),
     ({"ind": "highest", "n": 20}, "the highest value of the close over the last 20 days"),

@@ -14,7 +14,7 @@ from collections.abc import Collection
 from nakagai.data.schema import DEFAULT_TIMEFRAMES
 from nakagai.strategies.rules.vocabulary import (
     Vocabulary, is_choice_rule, is_condition_rule, is_json_number,
-    is_range_rule,
+    is_range_rule, is_whole_rule,
     resolve_vocabulary,
 )
 from nakagai.strategies.rules.windows import window_duration
@@ -146,6 +146,9 @@ def _check_args(name: str, given: dict, term, path: str, errs: list[str],
         lo, hi = rule
         if _not_num(value, lo, hi):
             errs.append(f"{path}: {name}.{arg} must be a number in "
+                        f"[{lo}, {hi}], got {value!r}")
+        elif is_whole_rule(rule) and not float(value).is_integer():
+            errs.append(f"{path}: {name}.{arg} must be a whole number in "
                         f"[{lo}, {hi}], got {value!r}")
         elif not _canonicalizable(value):
             errs.append(f"{path}: {name}.{arg} number is out of range")

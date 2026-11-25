@@ -339,7 +339,7 @@ def test_every_core_term_satisfies_the_term_checks():
     # the checks above are satisfied by the shipped declarations rather than
     # only by the hand-written ones in this file.
     vocab = core_vocabulary()
-    assert len(vocab.indicators) == 24 and len(vocab.primitives) == 10
+    assert len(vocab.indicators) == 25 and len(vocab.primitives) == 10
     for term in vocab.all_terms():
         assert set(term.defaults) <= set(term.args)
 
@@ -430,7 +430,7 @@ def test_a_vocabulary_cannot_be_a_cache_key():
     cached = cache(lambda vocab: len(vocab.indicators))
     with pytest.raises(TypeError, match="unhashable"):
         cached(core_vocabulary())
-    assert cache(lambda factory: len(factory().indicators))(core_vocabulary) == 24
+    assert cache(lambda factory: len(factory().indicators))(core_vocabulary) == 25
 
 
 def test_existing_catalog_hashes_do_not_move():

@@ -104,6 +104,21 @@ def emit_zscore(ctx, call):
         call, f"{DIV}({src} - ta.sma({src}, {n}), ta.stdev({src}, {n}))"))
 
 
+def emit_ago(ctx, call):
+    # Pine's own history operator is exactly the engine's .shift(n): `x[n]` is
+    # x as it stood n bars of THIS script's frame ago, na before there were n,
+    # which is why the same emit is right on the chart and inside a request.
+    n = ctx.arg(call, "n")
+    # n is an input, so TradingView cannot infer how far back `x[n]` reaches
+    # and the script owes max_bars_back; the buffer is n's upper bound + 1.
+    ctx.needs_history(call, "n")
+    # Pine indexes an identifier rather than a parenthesized expression, so a
+    # compound source (high - low) is named before it is indexed.
+    source = (call.source if call.source.isidentifier()
+              else ctx.local(call, "source", call.source))
+    return PineExpr(ctx.calc(call, f"{source}[{n}]"))
+
+
 def emit_macd(ctx, call):
     fast, slow, signal = (ctx.arg(call, a) for a in ("fast", "slow", "signal"))
     parts = ctx.destructure(call, ("macd", "signal", "hist"),
